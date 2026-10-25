@@ -2466,7 +2466,14 @@ impl App {
                                     "Arial",
                                 );
                             });
-                            ui.add(egui::Slider::new(&mut b.label.size, 2.0..=12.).text("字号 mm"));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.selectable_value(&mut b.label.font, crate::label::Font::ChineseBold, "微软雅黑粗体（推荐）");
+                                ui.selectable_value(&mut b.label.font, crate::label::Font::ArialBold, "Arial Bold");
+                            });
+                            crate::label::stroke_check_ui(ui, &b.label);
+                            let minimum = b.label.min_size();
+                            ui.add(egui::Slider::new(&mut b.label.size, minimum..=12.).text("字号 mm"));
+                            ui.small("0.4 mm 喷嘴经验建议：优先粗体；字号为字体 em 尺寸，非实际字高。复杂汉字需放大并检查切片。笔画检查结果见下方。");
                             ui.add(
                                 egui::Slider::new(&mut b.label.depth, 0.2..=0.8)
                                     .text("字高 / 刻深 mm"),
@@ -2547,8 +2554,13 @@ impl App {
                         ui.label(t(z,"字体","Font"));
                         ui.selectable_value(&mut self.label.font,crate::label::Font::Chinese,t(z,"微软雅黑（中英文）","Microsoft YaHei"));
                         ui.selectable_value(&mut self.label.font,crate::label::Font::Arial,"Arial");
+                        ui.selectable_value(&mut self.label.font,crate::label::Font::ChineseBold,t(z,"微软雅黑粗体（推荐）","Microsoft YaHei Bold (recommended)"));
+                        ui.selectable_value(&mut self.label.font,crate::label::Font::ArialBold,"Arial Bold");
                     });
-                    ui.add(egui::Slider::new(&mut self.label.size,2. ..=12.).text(t(z,"字号 mm","Size mm")));
+                    crate::label::stroke_check_ui(ui, &self.label);
+                    let minimum = self.label.min_size();
+                    ui.add(egui::Slider::new(&mut self.label.size,minimum..=12.).text(t(z,"字号 mm","Size mm")));
+                    ui.small(t(z,"0.4 mm 喷嘴经验建议：优先粗体；英文/数字最低 4 mm，中文及其他文字最低 5 mm。字号为 em 尺寸，非实际字高；复杂汉字需放大并检查切片。笔画检查结果见下方。","Guidance for a 0.4 mm nozzle: prefer bold; minimum em size 4 mm for ASCII, 5 mm for other scripts. Actual glyph height varies. Enlarge complex glyphs and inspect sliced paths. See the stroke geometry estimate below."));
                     ui.add(egui::Slider::new(&mut self.label.depth,0.2..=0.8).text(t(z,"字高 / 刻深 mm","Relief / depth mm")));
                     ui.horizontal(|ui|{
                         ui.label(t(z,"水平偏移 mm","Horizontal mm"));ui.add(egui::DragValue::new(&mut self.label.offset[0]).speed(0.1).range(-10. ..=10.));

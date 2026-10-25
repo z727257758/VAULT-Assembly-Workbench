@@ -22,9 +22,11 @@ pub enum Style {
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Font {
-    #[default]
     Chinese,
     Arial,
+    #[default]
+    ChineseBold,
+    ArialBold,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -43,9 +45,9 @@ impl Default for Config {
             enabled: false,
             text: "VAULT".into(),
             style: Style::Raised,
-            font: Font::Chinese,
+            font: Font::ChineseBold,
             size: 5.,
-            depth: 0.4,
+            depth: 0.6,
             offset: [0., 0.],
         }
     }
@@ -53,6 +55,18 @@ impl Default for Config {
 impl Config {
     pub fn active(&self) -> bool {
         self.enabled && !self.text.trim().is_empty()
+    }
+    /// Font em size in mm; actual glyph height depends on the font.
+    pub fn min_size(&self) -> f32 {
+        if self
+            .text
+            .chars()
+            .any(|c| !c.is_ascii() && !c.is_whitespace())
+        {
+            5.
+        } else {
+            4.
+        }
     }
     pub fn validate(&self) -> Result<(), String> {
         if !self.active() {
@@ -62,12 +76,15 @@ impl Config {
             return Err("标签最多两行、48 个字符".into());
         }
         if !self.size.is_finite()
-            || !(2. ..=12.).contains(&self.size)
+            || !(self.min_size()..=12.).contains(&self.size)
             || !self.depth.is_finite()
             || !(0.2..=0.8).contains(&self.depth)
             || self.offset.iter().any(|x| !x.is_finite() || x.abs() > 10.)
         {
-            return Err("字号需为 2–12 mm，字高/刻深需为 0.2–0.8 mm，偏移不可超过 10 mm".into());
+            return Err(format!(
+                "字号需为 {}–12 mm（英文/数字最低 4 mm，中文及其他文字最低 5 mm），字高/刻深需为 0.2–0.8 mm，偏移不可超过 10 mm",
+                self.min_size()
+            ));
         }
         if self
             .text
@@ -145,6 +162,8 @@ pub(crate) fn text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
     let file = match config.font {
         Font::Chinese => "msyh.ttc",
         Font::Arial => "arial.ttf",
+        Font::ChineseBold => "msyhbd.ttc",
+        Font::ArialBold => "arialbd.ttf",
     };
     let path = crate::paths::windows_font(file).ok_or_else(|| format!("系统字体不可用：{file}"))?;
     let data = std::fs::read(&path).map_err(|e| format!("字体不可用：{}: {e}", path.display()))?;
@@ -211,6 +230,86 @@ pub(crate) fn text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
     }
     Ok(CrossSection::new(out.paths).to_polygons())
 }
+/// Fraction lost by a circular opening: detects narrow strokes, but also sharp tips.
+/// This is a planar geometry estimate, not an exact minimum width or sliced toolpath.
+fn narrow_area_fraction(section: &CrossSection, width: f64) -> f64 {
+    let area = section.area().abs();
+    if area < 1e-9 {
+        return 0.;
+    }
+    let opened = section.offset(-width * 0.5).offset(width * 0.5);
+    ((area - opened.area().abs()) / area).clamp(0., 1.)
+}
+
+fn stroke_report(config: &Config) -> Result<String, String> {
+    config.validate()?;
+    let section = CrossSection::new(text_polygons(config)?);
+    let fine = narrow_area_fraction(&section, 0.4) * 100.;
+    let recommended = narrow_area_fraction(&section, 0.6) * 100.;
+    Ok(format!(
+        "笔画几何估算：0.4 mm 检查损失面积 {fine:.1}%，0.6 mm 检查损失面积 {recommended:.1}%。\n数值越高，细笔画或尖角越多；建议放大字号或选择粗体。按 0.4 mm 喷嘴参考，非精确最小笔画测量；未检查字内间隙，仍需检查切片路径。"
+    ))
+}
+
+#[derive(Default)]
+struct StrokeUiState {
+    config: Option<Config>,
+    changed_at: f64,
+    running: bool,
+    result: Option<Result<String, String>>,
+}
+
+/// One debounced background job per editor; stale results never replace current input.
+pub(crate) fn stroke_check_ui(ui: &mut eframe::egui::Ui, config: &Config) {
+    use eframe::egui;
+    use std::sync::Mutex;
+    let id = ui.id().with("stroke-width-check");
+    let shared = ui.ctx().data_mut(|data| {
+        data.get_temp_mut_or_default::<Arc<Mutex<StrokeUiState>>>(id)
+            .clone()
+    });
+    let now = ui.input(|i| i.time);
+    let mut state = shared.lock().unwrap();
+    if state.config.as_ref() != Some(config) {
+        state.config = Some(config.clone());
+        state.changed_at = now;
+        state.result = None;
+    }
+    if !config.active() {
+        return;
+    }
+    if let Some(result) = &state.result {
+        match result {
+            Ok(report) => {
+                ui.small(report);
+            }
+            Err(error) => {
+                ui.colored_label(egui::Color32::LIGHT_RED, format!("笔画检查失败：{error}"));
+            }
+        }
+        return;
+    }
+    ui.small("笔画宽度检查中…");
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(100));
+    if state.running || now - state.changed_at < 0.4 {
+        return;
+    }
+    state.running = true;
+    let config = config.clone();
+    let ctx = ui.ctx().clone();
+    drop(state);
+    std::thread::spawn(move || {
+        let result = stroke_report(&config);
+        let mut state = shared.lock().unwrap();
+        state.running = false;
+        if state.config.as_ref() == Some(&config) {
+            state.result = Some(result);
+        }
+        ctx.request_repaint();
+    });
+}
+
 pub(crate) fn solid(mesh: &Mesh) -> Result<Manifold, String> {
     let mut input = MeshGL64 {
         num_prop: 3,
@@ -455,6 +554,35 @@ pub fn write_stl(mesh: &Mesh, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stroke_opening_detects_thin_strokes_and_preserves_holes() {
+        fn rectangle(w: f64, h: f64) -> CrossSection {
+            CrossSection::new(vec![vec![
+                D2::new(0., 0.),
+                D2::new(w, 0.),
+                D2::new(w, h),
+                D2::new(0., h),
+            ]])
+        }
+        assert!(narrow_area_fraction(&rectangle(0.3, 5.), 0.4) > 0.99);
+        assert!(narrow_area_fraction(&rectangle(2., 5.), 0.4) < 0.05);
+        let ring = CrossSection::new(vec![
+            vec![
+                D2::new(0., 0.),
+                D2::new(5., 0.),
+                D2::new(5., 5.),
+                D2::new(0., 5.),
+            ],
+            vec![
+                D2::new(0.2, 0.2),
+                D2::new(0.2, 4.8),
+                D2::new(4.8, 4.8),
+                D2::new(4.8, 0.2),
+            ],
+        ]);
+        assert!(narrow_area_fraction(&ring, 0.6) > 0.99);
+    }
+
     #[test]
     fn label_limits_and_empty_text() {
         assert!(
