@@ -5,6 +5,7 @@ mod baseplate;
 mod catalog;
 mod collision;
 mod constraints;
+mod cullenect;
 mod display;
 mod divider_editor;
 mod dividers;

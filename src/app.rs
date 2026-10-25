@@ -1480,11 +1480,11 @@ impl App {
             .filter(|p| p.pose.path == path)
             .count();
         let has_text = path == crate::label::PATH
-            || self
-                .gridfinity
-                .bins
-                .iter()
-                .any(|b| b.path() == path && b.tab);
+            || self.gridfinity.bins.iter().any(|b| {
+                b.tab
+                    && ((!b.detachable() && b.path() == path)
+                        || (b.detachable() && b.label_path() == path))
+            });
         let z = self.zh;
         let mut changed = false;
         ui.strong(t(z, "打印颜色", "Print color"));
@@ -2436,6 +2436,8 @@ impl App {
                     );
                     ui.checkbox(&mut b.tab, "标签台");
                     if b.tab {
+                        if ui.checkbox(&mut b.detachable_label, "Cullenect 可拆标牌").changed() && b.detachable_label { b.label.depth = 0.2; }
+                        if b.detachable() { ui.small("标牌单独导出；36 × 11 × 1.2 mm。卡扣配合待试打印确认。"); }
                         ui.checkbox(&mut b.label.enabled, "标签文字");
                         if b.label.enabled {
                             ui.add(
@@ -2475,7 +2477,7 @@ impl App {
                             ui.add(egui::Slider::new(&mut b.label.size, minimum..=12.).text("字号 mm"));
                             ui.small("0.4 mm 喷嘴经验建议：优先粗体；字号为字体 em 尺寸，非实际字高。复杂汉字需放大并检查切片。笔画检查结果见下方。");
                             ui.add(
-                                egui::Slider::new(&mut b.label.depth, 0.2..=0.8)
+                                egui::Slider::new(&mut b.label.depth, 0.2..=if b.detachable_label { 0.4 } else { 0.8 })
                                     .text("字高 / 刻深 mm"),
                             );
                         }
@@ -3235,10 +3237,12 @@ impl eframe::App for App {
                                 self.gridfinity.bins = vec![
                                     crate::gridfinity::Bin {
                                         scoop: true,
+                                        detachable_label: true,
                                         label: crate::label::Config {
                                             enabled: true,
-                                            text: "收纳\nA8".into(),
-                                            size: 4.,
+                                            text: "收纳 A8".into(),
+                                            size: 5.,
+                                            depth: 0.2,
                                             ..Default::default()
                                         },
                                         ..Default::default()

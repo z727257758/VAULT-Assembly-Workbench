@@ -10,6 +10,26 @@ fn tr(zh: bool, cn: &'static str, en: &'static str) -> &'static str {
 }
 pub fn info(path: &str, zh: bool) -> Option<Info> {
     if path.starts_with(crate::gridfinity::PREFIX) {
+        if let Some(id) = path
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .strip_prefix("Cullenect-")
+            .and_then(|s| s.strip_suffix(".stl"))
+        {
+            return Some(Info {
+                group: tr(zh, "Gridfinity 标牌", "Gridfinity labels"),
+                name: format!(
+                    "{} {id}",
+                    tr(zh, "Cullenect 可拆标牌", "Cullenect removable label")
+                ),
+                description: tr(
+                    zh,
+                    "单独打印的 36 × 11 mm 标牌，卡入盒体标签台；配合待试打印确认。",
+                    "Separately printed 36 x 11 mm label for the bin socket; physical fit unverified.",
+                ),
+            });
+        }
         let id = path
             .rsplit('/')
             .next()

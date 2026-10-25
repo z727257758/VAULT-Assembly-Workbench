@@ -24,6 +24,7 @@ pub struct Bin {
     pub auto_height: bool,
     pub height_units: u32,
     pub tab: bool,
+    pub detachable_label: bool,
     // Presets predating this field retain their original flat interior.
     #[serde(default)]
     pub scoop: bool,
@@ -38,6 +39,7 @@ impl Default for Bin {
             auto_height: true,
             height_units: 3,
             tab: true,
+            detachable_label: false,
             scoop: true,
             label: crate::label::Config {
                 size: 4.,
@@ -48,6 +50,12 @@ impl Default for Bin {
     }
 }
 impl Bin {
+    pub fn label_path(&self) -> String {
+        format!("{PREFIX}Cullenect-{}.stl", self.id)
+    }
+    pub fn detachable(&self) -> bool {
+        self.tab && self.detachable_label
+    }
     pub fn path(&self) -> String {
         format!("{PREFIX}Gridfinity-{}.stl", self.id)
     }
@@ -127,6 +135,9 @@ impl Layout {
             }
             if b.tab && b.label.active() {
                 b.label.validate()?;
+                if b.detachable() && b.label.depth > 0.4 {
+                    return Err("Detachable label text depth must be at most 0.4 mm".into());
+                }
             }
         }
         Ok(())
@@ -164,6 +175,14 @@ impl Layout {
                 enabled: true,
                 group: GROUP.into(),
             });
+            if b.detachable() {
+                bom.push(Bom {
+                    path: b.label_path(),
+                    qty: 1,
+                    enabled: true,
+                    group: GROUP.into(),
+                });
+            }
         }
     }
 }
@@ -344,7 +363,20 @@ fn claim_body(path: &Path, cancel: Option<&crate::preview::Cancel>) -> Result<Bo
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+fn socket_key(home: &Path, b: &Bin, s: &Selection) -> Result<PathBuf, String> {
+    let hash = script(home, b, s)?
+        .bytes()
+        .fold(14695981039346656037_u64, |h, c| {
+            (h ^ c as u64).wrapping_mul(1099511628211)
+        });
+    Ok(home
+        .join("state/gridfinity-cache")
+        .join(format!("native-cullenect-v1-{hash:016x}.stl")))
+}
 fn preview_mesh(home: &Path, b: &Bin, s: &Selection) -> Result<Arc<Mesh>, String> {
+    if b.detachable() {
+        return Ok(cached(&socket_key(home, b, s)?).unwrap_or(proxy(b, s)?));
+    }
     let body = script(home, b, s)?;
     let (key, dir, prefix) = if b.tab && b.label.active() {
         (
@@ -470,6 +502,17 @@ fn generate_cancel(
     cancel: Option<&crate::preview::Cancel>,
 ) -> Result<Arc<Mesh>, String> {
     crate::preview::check(cancel)?;
+    if b.detachable() {
+        let path = socket_key(home, b, s)?;
+        if let Some(mesh) = cached(&path) {
+            return Ok(mesh);
+        }
+        let body = generate_body_cancel(home, b, s, cancel)?;
+        let (offset, top) = label_seat(b, s, &body)?;
+        let mesh = crate::cullenect::socket(&body, offset, top)?;
+        remember(&path, mesh.clone());
+        return Ok(mesh);
+    }
     // Validate text before potentially starting an expensive new body render.
     let polygons = if b.tab && b.label.active() {
         b.label.validate()?;
@@ -551,6 +594,12 @@ fn generate_cancel(
     remember(&path, mesh.clone());
     Ok(mesh)
 }
+pub(crate) fn label_seat(b: &Bin, s: &Selection, mesh: &Mesh) -> Result<(f32, f32), String> {
+    Ok((
+        -(b.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.,
+        mesh.min.y + units(b, s)? as f32 * 7. - 1.2,
+    ))
+}
 pub fn generate_many(
     home: &Path,
     bins: &[&Bin],
@@ -563,7 +612,12 @@ pub fn generate_many(
     let mut indices = Vec::new();
     for bin in bins {
         let mut key = script(home, bin, s)?;
-        if bin.tab && bin.label.active() {
+        key += if bin.detachable() {
+            "\ncullenect-v1"
+        } else {
+            ""
+        };
+        if bin.tab && !bin.detachable() && bin.label.active() {
             key += &toml::to_string(&bin.label).map_err(|e| e.to_string())?;
         }
         let index = if let Some(i) = keys.iter().position(|k| k == &key) {
@@ -669,7 +723,12 @@ pub fn apply_preview(
         .iter()
         .filter(|b| items.iter().any(|i| i.enabled && i.path == b.path()))
         .collect();
-    if selected.is_empty() {
+    if selected.is_empty()
+        && !layout
+            .bins
+            .iter()
+            .any(|b| b.detachable() && items.iter().any(|i| i.enabled && i.path == b.label_path()))
+    {
         return Ok(());
     }
     let plate = scene
@@ -733,6 +792,51 @@ pub fn apply_preview(
             )?;
         }
     }
+    for b in layout.bins.iter().filter(|b| b.detachable()) {
+        if !items.iter().any(|i| {
+            i.enabled && (i.path == b.label_path() || (!scene.assembly && i.path == b.path()))
+        }) {
+            continue;
+        }
+        let parent = scene.parts.iter().position(|p| p.pose.path == b.path());
+        let (offset, top) = if let Some(parent) = parent {
+            label_seat(b, s, &scene.parts[parent].mesh)?
+        } else {
+            (0., 1.2)
+        };
+        let mesh = crate::cullenect::label(&b.label)?;
+        let index = scene.parts.len();
+        scene.parts.push(Part {
+            source_size: mesh.size,
+            mesh,
+            pose: Pose {
+                path: b.label_path(),
+                instance: 0,
+                body: None,
+                position: [0., top - 1.2, -offset],
+                rotation: [0.; 3],
+                travel: [0.; 3],
+                travel_frame: None,
+            },
+            color: [0.9, 0.9, 0.9, 1.],
+            visible: true,
+            source_bodies: 1,
+        });
+        if let Some(parent) = parent {
+            constraints::add(
+                scene,
+                Relation {
+                    parent: PartId::of(&scene.parts[parent]),
+                    child: PartId::of(&scene.parts[index]),
+                    joint: Joint::Fixed {
+                        position: [0., top - 1.2, -offset],
+                        rotation: Quat::IDENTITY.to_array(),
+                    },
+                    label: "Cullenect / nominal dimensions, print fit unverified".into(),
+                },
+            )?;
+        }
+    }
     if scene.assembly {
         crate::explosion::reset(scene)?;
     }
@@ -742,6 +846,162 @@ pub fn apply_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detachable_real_geometry_and_export() {
+        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
+            return;
+        }
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let selection = Selection::default();
+        let bin = Bin {
+            detachable_label: true,
+            label: crate::label::Config {
+                enabled: true,
+                text: "M3".into(),
+                font: crate::label::Font::ArialBold,
+                size: 4.,
+                depth: 0.2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let body = generate(home, &bin, &selection).unwrap();
+        let solid = crate::label::solid(&body).unwrap();
+        assert_eq!(
+            solid.decompose().len(),
+            1,
+            "socket must remain attached to the bin"
+        );
+        let original = generate_body(home, &bin, &selection).unwrap();
+        assert!((body.min - original.min).abs().max_element() < 0.001);
+        assert!((body.max - original.max).abs().max_element() < 0.001);
+        let (offset, top) = label_seat(&bin, &selection, &body).unwrap();
+        let label = crate::cullenect::label(&bin.label).unwrap();
+        let installed =
+            crate::label::solid(&label)
+                .unwrap()
+                .translate(manifold_rust::linalg::Vec3::new(
+                    0.,
+                    offset as f64,
+                    top as f64 - 1.2,
+                ));
+        assert!(
+            solid.intersection(&installed).volume().abs() < 0.001,
+            "nominal seated geometry must not overlap"
+        );
+        let layout = Layout {
+            bins: vec![bin.clone()],
+            ..Default::default()
+        };
+        let mut bom = Vec::new();
+        layout.sync_bom(&mut bom);
+        assert_eq!(bom.len(), 2);
+        let mut scene = Scene::default();
+        apply_preview(&mut scene, home, &layout, &selection, &bom, false, None).unwrap();
+        assert_eq!(scene.parts.len(), 2);
+        let mut changed = bin.clone();
+        changed.label.text = "M4".into();
+        assert!(Arc::ptr_eq(
+            &body,
+            &generate(home, &changed, &selection).unwrap()
+        ));
+        let out = home.join("output/cullenect-validation");
+        std::fs::create_dir_all(&out).unwrap();
+        let temp = tempfile::tempdir_in(&out).unwrap();
+        let root = temp.path().join("empty-library");
+        std::fs::create_dir_all(&root).unwrap();
+        for (format, name) in [
+            (crate::export::Format::Stl, "parts"),
+            (crate::export::Format::ThreeMf, "parts.3mf"),
+        ] {
+            let dest = temp.path().join(name);
+            let mut options = crate::export::Options {
+                format,
+                ..Default::default()
+            };
+            options.plate.text_filaments.insert(bin.label_path(), 2);
+            crate::export::run_configured(
+                &root,
+                &bom,
+                &dest,
+                &options,
+                &Default::default(),
+                Some((home, &layout, &selection)),
+            )
+            .unwrap();
+            if format == crate::export::Format::Stl {
+                assert_eq!(std::fs::read_dir(dest).unwrap().count(), 2);
+            } else {
+                use std::io::Read;
+                let mut zip = zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).unwrap();
+                let mut model = String::new();
+                zip.by_name("3D/3dmodel.model")
+                    .unwrap()
+                    .read_to_string(&mut model)
+                    .unwrap();
+                assert_eq!(model.matches("<item ").count(), 2);
+                let mut settings = String::new();
+                zip.by_name("Metadata/model_settings.config")
+                    .unwrap()
+                    .read_to_string(&mut settings)
+                    .unwrap();
+                assert!(settings.contains("Cullenect-1.stl"));
+                assert_eq!(settings.matches("<part ").count(), 3);
+                assert_eq!(settings.matches("key=\"extruder\" value=\"2\"").count(), 1);
+            }
+        }
+        crate::label::write_stl(&body, &out.join("Gridfinity-1-with-socket.stl")).unwrap();
+        crate::label::write_stl(&label, &out.join("Cullenect-1-M3.stl")).unwrap();
+    }
+    #[test]
+    fn detachable_old_presets_and_label_only_preview() {
+        assert!(!toml::from_str::<Bin>("id=1").unwrap().detachable());
+        let bin = Bin {
+            detachable_label: true,
+            ..Default::default()
+        };
+        let layout = Layout {
+            bins: vec![bin.clone()],
+            ..Default::default()
+        };
+        let items = vec![Bom {
+            path: bin.label_path(),
+            qty: 1,
+            enabled: true,
+            group: GROUP.into(),
+        }];
+        let mut scene = Scene::default();
+        apply_preview(
+            &mut scene,
+            Path::new("missing-generator"),
+            &layout,
+            &Selection::default(),
+            &items,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(scene.parts.len(), 1);
+        assert_eq!(scene.parts[0].pose.path, bin.label_path());
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/cullenect-validation");
+        std::fs::create_dir_all(&out).unwrap();
+        let temp = tempfile::tempdir_in(out).unwrap();
+        let root = temp.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::export::run_design(
+            &root,
+            &items,
+            &temp.path().join("label-only"),
+            crate::export::Format::Stl,
+            &Default::default(),
+            Some((
+                Path::new("missing-generator"),
+                &layout,
+                &Selection::default(),
+            )),
+        )
+        .unwrap();
+    }
     #[test]
     fn relative_generator_search_prefers_bundled_and_ignores_working_directory() {
         let temp = tempfile::tempdir().unwrap();

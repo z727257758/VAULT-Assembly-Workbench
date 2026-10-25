@@ -155,10 +155,15 @@ pub fn run_configured(
             let bin = layout
                 .bins
                 .iter()
-                .find(|b| b.path() == item.path)
+                .find(|b| b.path() == item.path || (b.detachable() && b.label_path() == item.path))
                 .ok_or("生成盒子的配置缺失")?;
             if item.qty != 1 {
                 return Err("盒子份数由布局管理".into());
+            }
+            if bin.detachable() && bin.label_path() == item.path {
+                generated.insert(item.path.clone(), crate::cullenect::label(&bin.label)?);
+                inputs.push((item.clone(), PathBuf::new()));
+                continue;
             }
             bins.push(bin);
             generated_items.push(item);
@@ -270,14 +275,20 @@ fn write_3mf(
             };
             Some((label.clone(), [0., 0.], top as f64))
         } else if let Some((layout, selection)) = gridfinity {
-            if let Some(bin) = layout
-                .bins
-                .iter()
-                .find(|b| b.path() == item.path && b.tab && b.label.active())
-            {
-                let top = mesh.min.y + crate::gridfinity::units(bin, selection)? as f32 * 7. - 1.2;
-                let tab_y = -(bin.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.;
-                Some((bin.label.clone(), [0., tab_y as f64], top as f64))
+            if let Some(bin) = layout.bins.iter().find(|b| {
+                b.tab
+                    && b.label.active()
+                    && ((!b.detachable() && b.path() == item.path)
+                        || (b.detachable() && b.label_path() == item.path))
+            }) {
+                if bin.detachable() {
+                    Some((bin.label.clone(), [0., 0.], 1.2))
+                } else {
+                    let top =
+                        mesh.min.y + crate::gridfinity::units(bin, selection)? as f32 * 7. - 1.2;
+                    let tab_y = -(bin.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.;
+                    Some((bin.label.clone(), [0., tab_y as f64], top as f64))
+                }
             } else {
                 None
             }
