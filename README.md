@@ -162,7 +162,7 @@ cargo run --release -- --smoke-test
 cargo run -- --debug-ui
 ```
 
-调试调整只影响展示配置。包围盒重叠或网格相交结果不能直接证明穿模、公差合理或装配可制造。装配配置与验证资料见 `state/` 和 [docs/VALIDATION.md](docs/VALIDATION.md)。
+调试调整只影响展示配置。包围盒重叠或网格相交结果不能直接证明穿模、公差合理或装配可制造。装配配置见 `state/`。
 
 ## 工作区结构
 

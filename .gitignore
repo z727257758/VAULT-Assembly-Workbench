@@ -1,6 +1,7 @@
 /target/
 /state/
 /output/
+/*.code-workspace
 *.log
 
 /tools/openscad/
