@@ -1,0 +1,24 @@
+/target/
+/state/
+/output/
+*.log
+
+/tools/openscad/
+
+# External model libraries and generated print projects must not be distributed.
+*.[sS][tT][lL]
+*.[oO][bB][jJ]
+*.[sS][tT][eE][pP]
+*.[sS][tT][pP]
+*.3[mM][fF]
+*.[gG][cC][oO][dD][eE]
+*.[pP][dD][fF]
+*.[zZ][iI][pP]
+*.7[zZ]
+*.[rR][aA][rR]
+/01. DRAWERS/
+/02. SUSTAINERS/
+/03. MODIFICATIONS/
+
+# Optional portable OpenSCAD location beside the application.
+/openscad/

@@ -1,0 +1,29 @@
+[package]
+name = "vault-native"
+version = "0.1.35"
+edition = "2024"
+rust-version = "1.88"
+description = "VAULT Assembly Workbench / VAULT 装配工作台 — Unofficial Companion Tool"
+
+[dependencies]
+eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "wgpu"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+glam = { version = "0.30", features = ["serde", "bytemuck"] }
+
+wgpu = { version = "27", default-features = false, features = ["dx12", "wgsl"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate-miniz"] }
+tempfile = "3"
+manifold-rust = "=0.18.0"
+ttf-parser = "=0.25.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 2

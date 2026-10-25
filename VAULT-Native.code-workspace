@@ -1,0 +1,8 @@
+{
+  "folders": [{ "path": "." }],
+  "settings": {
+    "files.exclude": { "**/target": true },
+    "search.exclude": { "**/target": true, "**/output": true },
+    "rust-analyzer.cargo.features": "all"
+  }
+}

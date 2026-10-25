@@ -1,0 +1,27 @@
+# Display-only recipes. Source STL files remain read-only.
+# Bodies are sorted by their centers in the original STL X/Y/Z axes.
+# Unexpected body counts are reported as errors; geometry is never discarded.
+[[rules]]
+path = '01. DRAWERS/07. Universal/Springs.stl'
+split_disconnected = true
+expected_bodies = 2
+
+[[rules]]
+path = '01. DRAWERS/07. Universal/Geared Rails/S Rails.stl'
+split_disconnected = true
+expected_bodies = 2
+
+[[rules]]
+path = '01. DRAWERS/07. Universal/Geared Rails/M Rails.stl'
+split_disconnected = true
+expected_bodies = 2
+
+[[rules]]
+path = '01. DRAWERS/07. Universal/Geared Rails/L Rails.stl'
+split_disconnected = true
+expected_bodies = 2
+
+[[rules]]
+path = '01. DRAWERS/07. Universal/Geared Rails/XL Rails.stl'
+split_disconnected = true
+expected_bodies = 2

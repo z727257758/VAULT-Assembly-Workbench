@@ -1,0 +1,3 @@
+# Model library is selected by the user and stored in state/settings.toml.
+model_root = ""
+language = "zh"
