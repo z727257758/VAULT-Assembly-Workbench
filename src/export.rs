@@ -360,7 +360,23 @@ fn write_3mf(
         .iter()
         .map(|ids| ids.iter().map(|(_, slot)| *slot).collect())
         .collect();
-    let placements = crate::print_plate::arrange_materials(&parts, &materials, plate)?;
+    let plate_groups: Vec<_> = inputs
+        .iter()
+        .map(|(item, _)| {
+            if gridfinity.is_some_and(|(layout, _)| {
+                layout
+                    .bins
+                    .iter()
+                    .any(|b| b.detachable() && b.label_path() == item.path)
+            }) {
+                crate::print_plate::PlateGroup::RemovableLabel
+            } else {
+                crate::print_plate::PlateGroup::Standard
+            }
+        })
+        .collect();
+    let placements =
+        crate::print_plate::arrange_grouped_materials(&parts, &materials, &plate_groups, plate)?;
     let plate_count = placements.iter().map(|p| p.plate + 1).max().unwrap_or(0);
     let mut config = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><config>");
     // Each copy gets a wrapper object: Bambu's plate map stores one instance per object ID.
@@ -425,7 +441,12 @@ fn write_3mf(
             .collect::<Vec<_>>()
             .join(" + ");
         let name = xml(&format!(
-            "{} {colors} · {}",
+            "{}{} {colors} · {}",
+            if plate_groups[item.input] == crate::print_plate::PlateGroup::RemovableLabel {
+                "可拆标牌 · "
+            } else {
+                ""
+            },
             if slots.len() > 1 { "多色" } else { "颜色" },
             index + 1
         ));
@@ -470,6 +491,100 @@ vertex 0 1 0
 endloop
 endfacet
 endsolid t";
+    #[test]
+    fn removable_labels_export_on_dedicated_plates() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/cullenect-validation");
+        std::fs::create_dir_all(&out).unwrap();
+        let temp = tempfile::tempdir_in(&out).unwrap();
+        let root = temp.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("tall.stl"), TRI).unwrap();
+        for multicolor in [false, true] {
+            let bin = crate::gridfinity::Bin {
+                detachable_label: true,
+                label: crate::label::Config {
+                    enabled: multicolor,
+                    text: "M3".into(),
+                    font: crate::label::Font::ArialBold,
+                    size: 4.,
+                    depth: 0.2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let layout = crate::gridfinity::Layout {
+                bins: vec![bin.clone()],
+                ..Default::default()
+            };
+            let items = vec![
+                Bom {
+                    path: "tall.stl".into(),
+                    qty: 2,
+                    enabled: true,
+                    group: "test".into(),
+                },
+                Bom {
+                    path: bin.label_path(),
+                    qty: 1,
+                    enabled: true,
+                    group: crate::gridfinity::GROUP.into(),
+                },
+            ];
+            let mut options = Options::default();
+            if multicolor {
+                options.plate.text_filaments.insert(bin.label_path(), 2);
+            }
+            let destination = temp.path().join(format!("separate-{multicolor}.3mf"));
+            run_configured(
+                &root,
+                &items,
+                &destination,
+                &options,
+                &Default::default(),
+                Some((Path::new("no-generator"), &layout, &Default::default())),
+            )
+            .unwrap();
+            let mut zip = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+            let mut settings = String::new();
+            zip.by_name("Metadata/model_settings.config")
+                .unwrap()
+                .read_to_string(&mut settings)
+                .unwrap();
+            assert_eq!(settings.matches("<plate>").count(), 2);
+            let plates: Vec<_> = settings
+                .split("<plate>")
+                .skip(1)
+                .map(|p| p.split("</plate>").next().unwrap())
+                .collect();
+            let label_plate = plates.iter().find(|p| p.contains("可拆标牌")).unwrap();
+            assert_eq!(label_plate.matches("<model_instance>").count(), 1);
+            let other_plate = plates.iter().find(|p| !p.contains("可拆标牌")).unwrap();
+            assert_eq!(other_plate.matches("<model_instance>").count(), 2);
+            let label_object = settings
+                .split("<object id=\"")
+                .skip(1)
+                .find(|o| {
+                    o.split("</object>")
+                        .next()
+                        .unwrap()
+                        .contains("Cullenect-1.stl")
+                })
+                .unwrap();
+            let id = label_object.split('"').next().unwrap();
+            let membership = format!("key=\"object_id\" value=\"{id}\"");
+            assert!(label_plate.contains(&membership));
+            assert!(!other_plate.contains(&membership));
+            assert_eq!(
+                label_object
+                    .split("</object>")
+                    .next()
+                    .unwrap()
+                    .matches("<part ")
+                    .count(),
+                if multicolor { 2 } else { 1 }
+            );
+        }
+    }
     #[test]
     fn three_mf_keeps_color_ids_and_separate_plate_memberships() {
         let temp = tempfile::tempdir().unwrap();

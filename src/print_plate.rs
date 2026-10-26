@@ -415,14 +415,35 @@ pub fn arrange_colored(
     let materials: Vec<_> = paths.iter().map(|p| vec![c.slot(p)]).collect();
     arrange_materials(parts, &materials, c)
 }
+/// Physical print groups never share plates, even with identical material sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlateGroup {
+    Standard,
+    RemovableLabel,
+}
 /// A multi-material object is indivisible; group plates by the complete material set.
+#[cfg(test)]
 pub fn arrange_materials(
     parts: &[(String, Vec3, u32)],
     materials: &[Vec<u32>],
     c: &Config,
 ) -> Result<Vec<Placement>, String> {
+    arrange_grouped_materials(
+        parts,
+        materials,
+        &vec![PlateGroup::Standard; parts.len()],
+        c,
+    )
+}
+/// Keep detachable labels on dedicated plates, then split each group by material set.
+pub fn arrange_grouped_materials(
+    parts: &[(String, Vec3, u32)],
+    materials: &[Vec<u32>],
+    plate_groups: &[PlateGroup],
+    c: &Config,
+) -> Result<Vec<Placement>, String> {
     c.validate()?;
-    if parts.len() != materials.len() {
+    if parts.len() != materials.len() || parts.len() != plate_groups.len() {
         return Err("颜色配置与零件数量不一致".into());
     }
     if parts.iter().map(|p| u64::from(p.2)).sum::<u64>() > 1000 {
@@ -430,7 +451,7 @@ pub fn arrange_materials(
     }
     let mut all = Vec::new();
     let mut offset = 0;
-    let mut groups = std::collections::BTreeMap::<Vec<u32>, Vec<usize>>::new();
+    let mut groups = std::collections::BTreeMap::<(PlateGroup, Vec<u32>), Vec<usize>>::new();
     for (i, slots) in materials.iter().enumerate() {
         let mut key = slots.clone();
         key.sort_unstable();
@@ -438,9 +459,9 @@ pub fn arrange_materials(
         if key.is_empty() || key.iter().any(|s| !(1..=6).contains(s)) {
             return Err("无效耗材组合".into());
         }
-        groups.entry(key).or_default().push(i);
+        groups.entry((plate_groups[i], key)).or_default().push(i);
     }
-    for (slots, ids) in groups {
+    for ((_plate_group, slots), ids) in groups {
         let group: Vec<_> = ids.iter().map(|&i| parts[i].clone()).collect();
         let mut layout = arrange(&group, c).map_err(|e| format!("耗材组合 {slots:?}：{e}"))?;
         let count = layout.iter().map(|p| p.plate + 1).max().unwrap_or(0);
@@ -467,6 +488,56 @@ pub fn plate_origin(plate: usize, count: usize) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn labels_have_dedicated_plates_even_with_identical_materials() {
+        use PlateGroup::{RemovableLabel, Standard};
+        let c = Config {
+            center: true,
+            ..Default::default()
+        };
+        let parts = vec![
+            ("bin".into(), Vec3::new(42., 42., 60.), 1),
+            ("label A".into(), Vec3::new(36., 11., 1.4), 2),
+            ("label B".into(), Vec3::new(36., 11., 1.4), 1),
+            ("other tall part".into(), Vec3::new(42., 42., 80.), 1),
+        ];
+        for slots in [vec![1], vec![1, 2]] {
+            let materials = vec![slots; 4];
+            let layout = arrange_grouped_materials(
+                &parts,
+                &materials,
+                &[Standard, RemovableLabel, RemovableLabel, Standard],
+                &c,
+            )
+            .unwrap();
+            assert_eq!(layout.len(), 5);
+            let label_plate = layout.iter().find(|p| p.input == 1).unwrap().plate;
+            let standard_plate = layout.iter().find(|p| p.input == 0).unwrap().plate;
+            assert_ne!(label_plate, standard_plate);
+            for p in &layout {
+                assert_eq!(
+                    p.plate,
+                    if p.input == 1 || p.input == 2 {
+                        label_plate
+                    } else {
+                        standard_plate
+                    }
+                );
+            }
+        }
+        assert!(arrange_grouped_materials(&parts, &vec![vec![1]; 4], &[Standard], &c).is_err());
+        let parts = vec![
+            ("bin".into(), Vec3::new(230., 200., 60.), 1),
+            ("label overflow".into(), Vec3::new(230., 200., 1.2), 2),
+        ];
+        let out =
+            arrange_grouped_materials(&parts, &[vec![1], vec![1]], &[Standard, RemovableLabel], &c)
+                .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_ne!(out[0].plate, out[1].plate);
+        assert_ne!(out[0].plate, out[2].plate);
+        assert_ne!(out[1].plate, out[2].plate);
+    }
     #[test]
     fn material_sets_keep_text_with_body_and_separate_single_color() {
         let c = Config::default();

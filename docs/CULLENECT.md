@@ -11,7 +11,7 @@ This implementation generates solids in Rust using the existing manifold-rust de
 - Local adaptations: rectangular profile, reinforcement under the original shelf leaving 1 mm under the pocket, and a front finger opening. The label itself is the same size for all bin widths.
 - Text: 34 × 10 mm safe area; 0.2 mm recommended, limited to 0.4 mm to preserve the latch when engraved.
 
-The old integral shelf remains available; existing saved presets do not opt in automatically. STL exports separate files and 3MF exports separate printable objects with independent material assignments. Print the single-color body and multicolor labels in separate print jobs to keep the label prime tower short.
+The old integral shelf remains available; existing saved presets do not opt in automatically. STL exports separate files and 3MF exports separate printable objects with independent material assignments. Removable labels always occupy dedicated plates, even when their material set matches a bin or other tall part; label text remains part of the label object. Labels with different material sets or overflowing a plate use additional label-only plates. Print the single-color body and multicolor labels in separate print jobs to keep the label prime tower short.
 
 Nominal closed-solid, clearance, assembly-placement and export checks are software validation only. Physical snap force, printer tolerances, repeated removal, and cross-compatibility with other Cullenect implementations remain unverified.
 
