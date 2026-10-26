@@ -16,6 +16,7 @@ mod geared_rails;
 mod gridfinity;
 mod gridfinity_editor;
 mod label;
+mod label_preview;
 mod mesh;
 mod module_assembly;
 mod paths;

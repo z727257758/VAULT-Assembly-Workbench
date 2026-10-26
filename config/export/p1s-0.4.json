@@ -82,20 +82,20 @@
     "70"
   ],
   "cool_plate_temp": [
-    "45",
-    "45",
-    "45",
     "0",
-    "45",
-    "45"
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
   ],
   "cool_plate_temp_initial_layer": [
-    "45",
-    "45",
-    "45",
     "0",
-    "45",
-    "45"
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
   ],
   "cooling_filter_enabled": "0",
   "cooling_perimeter_transition_distance": [
@@ -123,36 +123,36 @@
     "0"
   ],
   "counter_coef_2": [
-    "0.025",
-    "0.025",
-    "0.025",
     "0.008",
-    "0.025",
-    "0.025"
+    "0.008",
+    "0.008",
+    "0.008",
+    "0.008",
+    "0.008"
   ],
   "counter_coef_3": [
-    "-0.11",
-    "-0.11",
-    "-0.11",
     "-0.041",
-    "-0.11",
-    "-0.11"
+    "-0.041",
+    "-0.041",
+    "-0.041",
+    "-0.041",
+    "-0.041"
   ],
   "counter_limit_max": [
-    "0.05",
-    "0.05",
-    "0.05",
     "0.033",
-    "0.05",
-    "0.05"
+    "0.033",
+    "0.033",
+    "0.033",
+    "0.033",
+    "0.033"
   ],
   "counter_limit_min": [
-    "-0.04",
-    "-0.04",
-    "-0.04",
     "-0.035",
-    "-0.04",
-    "-0.04"
+    "-0.035",
+    "-0.035",
+    "-0.035",
+    "-0.035",
+    "-0.035"
   ],
   "curr_bed_type": "Textured PEI Plate",
   "default_acceleration": [
@@ -168,7 +168,7 @@
     ""
   ],
   "default_filament_profile": [
-    "Bambu PLA Basic @BBL P1S 0.4 nozzle"
+    "Bambu PETG Basic @BBL X1C"
   ],
   "default_jerk": "0",
   "default_nozzle_volume_type": [
@@ -293,29 +293,29 @@
     "Direct Drive Standard,Direct Drive High Flow"
   ],
   "fan_cooling_layer_time": [
-    "25",
-    "25",
-    "25",
     "30",
-    "25",
-    "25"
+    "30",
+    "30",
+    "30",
+    "30",
+    "30"
   ],
   "fan_direction": "left",
   "fan_max_speed": [
-    "70",
-    "70",
-    "70",
-    "90",
-    "70",
-    "70"
+    "40",
+    "40",
+    "40",
+    "40",
+    "40",
+    "40"
   ],
   "fan_min_speed": [
-    "30",
-    "30",
-    "30",
-    "40",
-    "30",
-    "30"
+    "20",
+    "20",
+    "20",
+    "20",
+    "20",
+    "20"
   ],
   "filament_adaptive_volumetric_speed": [
     "0",
@@ -326,12 +326,12 @@
     "0"
   ],
   "filament_adhesiveness_category": [
-    "0",
-    "0",
-    "0",
     "300",
-    "0",
-    "0"
+    "300",
+    "300",
+    "300",
+    "300",
+    "300"
   ],
   "filament_bridge_speed": [
     "25",
@@ -370,32 +370,32 @@
     "0",
     "0",
     "0",
-    "2",
-    "1"
+    "0",
+    "0"
   ],
   "filament_cooling_before_tower": [
-    "10",
-    "10",
-    "10",
     "0",
-    "10",
-    "10"
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
   ],
   "filament_cost": [
     "24.99",
     "24.99",
     "24.99",
-    "30",
+    "24.99",
     "24.99",
     "24.99"
   ],
   "filament_density": [
-    "1.28",
-    "1.28",
-    "1.28",
-    "1.27",
-    "1.28",
-    "1.28"
+    "1.25",
+    "1.25",
+    "1.25",
+    "1.25",
+    "1.25",
+    "1.25"
   ],
   "filament_deretraction_speed": [
     "nil",
@@ -406,68 +406,68 @@
     "nil"
   ],
   "filament_dev_ams_drying_ams_limitations": [
-    "",
-    "",
-    "",
     "1",
-    "0",
-    ""
+    "1",
+    "1",
+    "1",
+    "1",
+    "1"
   ],
   "filament_dev_ams_drying_heat_distortion_temperature": [
-    "0",
-    "0",
-    "0",
     "75",
-    "0",
-    "0"
+    "75",
+    "75",
+    "75",
+    "75",
+    "75"
   ],
   "filament_dev_ams_drying_temperature": [
-    "0",
-    "0",
-    "0",
     "65",
     "65",
-    "55"
+    "65",
+    "65",
+    "65",
+    "65"
   ],
   "filament_dev_ams_drying_time": [
-    "0",
-    "0",
-    "0",
+    "12",
+    "12",
+    "12",
     "12",
     "12",
     "12"
   ],
   "filament_dev_chamber_drying_bed_temperature": [
-    "0",
-    "0",
-    "0",
     "80",
-    "0",
-    "0"
+    "80",
+    "80",
+    "80",
+    "80",
+    "80"
   ],
   "filament_dev_chamber_drying_time": [
-    "0",
-    "0",
-    "0",
-    "12",
-    "0",
-    "0"
+    "12.0",
+    "12.0",
+    "12.0",
+    "12.0",
+    "12.0",
+    "12.0"
   ],
   "filament_dev_drying_cooling_temperature": [
-    "0",
-    "0",
-    "0",
     "55",
-    "0",
-    "0"
+    "55",
+    "55",
+    "55",
+    "55",
+    "55"
   ],
   "filament_dev_drying_softening_temperature": [
-    "0",
-    "0",
-    "0",
     "60",
-    "0",
-    "0"
+    "60",
+    "60",
+    "60",
+    "60",
+    "60"
   ],
   "filament_diameter": [
     "1.75",
@@ -486,12 +486,12 @@
     "1"
   ],
   "filament_end_gcode": [
-    "; filament end gcode \nM106 P3 S0\n",
-    "; filament end gcode \nM106 P3 S0\n",
-    "; filament end gcode \nM106 P3 S0\n",
     "; filament end gcode \n\n",
-    "; filament end gcode \nM106 P3 S0\n",
-    "; filament end gcode \nM106 P3 S0\n"
+    "; filament end gcode \n\n",
+    "; filament end gcode \n\n",
+    "; filament end gcode \n\n",
+    "; filament end gcode \n\n",
+    "; filament end gcode \n\n"
   ],
   "filament_extruder_variant": [
     "Direct Drive Standard",
@@ -502,12 +502,12 @@
     "Direct Drive Standard"
   ],
   "filament_flow_ratio": [
-    "0.98",
-    "0.98",
-    "0.98",
     "0.95",
-    "0.98",
-    "0.98"
+    "0.95",
+    "0.95",
+    "0.95",
+    "0.95",
+    "0.95"
   ],
   "filament_flush_temp": [
     "0",
@@ -526,12 +526,12 @@
     "0"
   ],
   "filament_ids": [
-    "P1bb8cdf",
-    "P1bb8cdf",
-    "P1bb8cdf",
-    "P17c316a",
-    "P1bb8cdf",
-    "P1bb8cdf"
+    "GFG00",
+    "GFG00",
+    "GFG00",
+    "GFG00",
+    "GFG00",
+    "GFG00"
   ],
   "filament_is_support": [
     "0",
@@ -542,12 +542,12 @@
     "0"
   ],
   "filament_long_retractions_when_cut": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "1",
+    "1",
+    "1",
+    "1",
+    "1",
+    "1"
   ],
   "filament_map": [
     "1",
@@ -559,12 +559,12 @@
   ],
   "filament_map_mode": "Auto For Flush",
   "filament_max_volumetric_speed": [
-    "21",
-    "21",
-    "21",
-    "12",
-    "21",
-    "21"
+    "15",
+    "15",
+    "15",
+    "15",
+    "15",
+    "15"
   ],
   "filament_minimal_purge_on_wipe_tower": [
     "15",
@@ -600,28 +600,28 @@
     "0"
   ],
   "filament_overhang_2_4_speed": [
-    "0",
-    "0",
-    "0",
     "50",
-    "0",
-    "0"
+    "50",
+    "50",
+    "50",
+    "50",
+    "50"
   ],
   "filament_overhang_3_4_speed": [
-    "0",
-    "0",
-    "0",
     "30",
-    "0",
-    "0"
+    "30",
+    "30",
+    "30",
+    "30",
+    "30"
   ],
   "filament_overhang_4_4_speed": [
-    "0",
-    "0",
-    "0",
     "10",
-    "0",
-    "0"
+    "10",
+    "10",
+    "10",
+    "10",
+    "10"
   ],
   "filament_overhang_totally_speed": [
     "10",
@@ -712,12 +712,12 @@
     "nil"
   ],
   "filament_retract_length_nc": [
-    "10",
-    "10",
-    "10",
     "14",
-    "10",
-    "10"
+    "14",
+    "14",
+    "14",
+    "14",
+    "14"
   ],
   "filament_retract_restart_extra": [
     "nil",
@@ -736,20 +736,20 @@
     "nil"
   ],
   "filament_retraction_distances_when_cut": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "18",
+    "18",
+    "18",
+    "18",
+    "18",
+    "18"
   ],
   "filament_retraction_length": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "0.4",
+    "0.4",
+    "0.4",
+    "0.4",
+    "0.4",
+    "0.4"
   ],
   "filament_retraction_minimum_travel": [
     "nil",
@@ -768,20 +768,20 @@
     "nil"
   ],
   "filament_scarf_gap": [
-    "0",
-    "0",
-    "0",
-    "0%",
-    "0",
-    "0"
-  ],
-  "filament_scarf_height": [
     "0%",
     "0%",
     "0%",
-    "10%",
+    "0%",
     "0%",
     "0%"
+  ],
+  "filament_scarf_height": [
+    "10%",
+    "10%",
+    "10%",
+    "10%",
+    "10%",
+    "10%"
   ],
   "filament_scarf_length": [
     "10",
@@ -808,12 +808,12 @@
     "6"
   ],
   "filament_settings_id": [
-    "VAULT PETG 1 @P1S 0.4",
-    "VAULT PETG 2 @P1S 0.4",
-    "VAULT PETG 3 @P1S 0.4",
-    "VAULT PETG 4 @P1S 0.4",
-    "VAULT PETG 5 @P1S 0.4",
-    "VAULT PETG 6 @P1S 0.4"
+    "Bambu PETG Basic @BBL X1C",
+    "Bambu PETG Basic @BBL X1C",
+    "Bambu PETG Basic @BBL X1C",
+    "Bambu PETG Basic @BBL X1C",
+    "Bambu PETG Basic @BBL X1C",
+    "Bambu PETG Basic @BBL X1C"
   ],
   "filament_shrink": [
     "100%",
@@ -896,12 +896,12 @@
     "1"
   ],
   "filament_vendor": [
-    "Aliz",
-    "Aliz",
-    "Aliz",
-    "塞纳",
-    "Aliz",
-    "Aliz"
+    "Bambu Lab",
+    "Bambu Lab",
+    "Bambu Lab",
+    "Bambu Lab",
+    "Bambu Lab",
+    "Bambu Lab"
   ],
   "filament_volume_map": [
     "0",
@@ -912,20 +912,20 @@
     "0"
   ],
   "filament_wipe": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "1",
+    "1",
+    "1",
+    "1",
+    "1",
+    "1"
   ],
   "filament_wipe_distance": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "1",
+    "1",
+    "1",
+    "1",
+    "1",
+    "1"
   ],
   "filament_z_hop": [
     "nil",
@@ -936,12 +936,12 @@
     "nil"
   ],
   "filament_z_hop_types": [
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil",
-    "nil"
+    "Spiral Lift",
+    "Spiral Lift",
+    "Spiral Lift",
+    "Spiral Lift",
+    "Spiral Lift",
+    "Spiral Lift"
   ],
   "filename_format": "{input_filename_base}_{filament_type[0]}_{print_time}.gcode",
   "fill_multiline": "1",
@@ -1048,36 +1048,36 @@
     "0"
   ],
   "hole_coef_2": [
-    "-0.025",
-    "-0.025",
-    "-0.025",
     "-0.008",
-    "-0.025",
-    "-0.025"
+    "-0.008",
+    "-0.008",
+    "-0.008",
+    "-0.008",
+    "-0.008"
   ],
   "hole_coef_3": [
-    "0.28",
-    "0.28",
-    "0.28",
     "0.23415",
-    "0.28",
-    "0.28"
+    "0.23415",
+    "0.23415",
+    "0.23415",
+    "0.23415",
+    "0.23415"
   ],
   "hole_limit_max": [
-    "0.25",
-    "0.25",
-    "0.25",
     "0.22",
-    "0.25",
-    "0.25"
+    "0.22",
+    "0.22",
+    "0.22",
+    "0.22",
+    "0.22"
   ],
   "hole_limit_min": [
-    "0.08",
-    "0.08",
-    "0.08",
     "0.088",
-    "0.08",
-    "0.08"
+    "0.088",
+    "0.088",
+    "0.088",
+    "0.088",
+    "0.088"
   ],
   "host_type": "octoprint",
   "hot_plate_temp": [
@@ -1105,12 +1105,12 @@
     "2"
   ],
   "impact_strength_z": [
-    "0",
-    "0",
-    "0",
-    "10",
-    "0",
-    "0"
+    "13.6",
+    "13.6",
+    "13.6",
+    "13.6",
+    "13.6",
+    "13.6"
   ],
   "independent_support_layer_height": "1",
   "infill_combination": "0",
@@ -1326,20 +1326,20 @@
   ],
   "nozzle_height": "4.2",
   "nozzle_temperature": [
-    "245",
-    "245",
-    "245",
-    "235",
-    "245",
-    "245"
+    "255",
+    "255",
+    "255",
+    "255",
+    "255",
+    "255"
   ],
   "nozzle_temperature_initial_layer": [
-    "235",
-    "235",
-    "235",
-    "240",
-    "235",
-    "235"
+    "245",
+    "245",
+    "245",
+    "245",
+    "245",
+    "245"
   ],
   "nozzle_temperature_range_high": [
     "270",
@@ -1353,7 +1353,7 @@
     "230",
     "230",
     "230",
-    "220",
+    "230",
     "230",
     "230"
   ],
@@ -1401,12 +1401,12 @@
     "10"
   ],
   "overhang_fan_speed": [
-    "100",
-    "100",
-    "100",
     "90",
-    "100",
-    "100"
+    "90",
+    "90",
+    "90",
+    "90",
+    "90"
   ],
   "overhang_fan_threshold": [
     "10%",
@@ -1442,12 +1442,12 @@
   ],
   "post_process": [],
   "pre_start_fan_time": [
-    "0",
-    "0",
-    "0",
-    "0",
-    "0",
-    "0"
+    "2",
+    "2",
+    "2",
+    "2",
+    "2",
+    "2"
   ],
   "precise_outer_wall": "0",
   "precise_z_height": "0",
@@ -1572,12 +1572,12 @@
     "18"
   ],
   "retraction_distances_when_ec": [
-    "10",
-    "10",
-    "10",
     "0",
-    "10",
-    "10"
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
   ],
   "retraction_length": [
     "0.8",
@@ -1634,12 +1634,12 @@
     "12"
   ],
   "slow_down_min_speed": [
-    "20",
-    "20",
-    "20",
-    "20",
-    "20",
-    "20"
+    "10",
+    "10",
+    "10",
+    "10",
+    "10",
+    "10"
   ],
   "slowdown_end_acc": [
     "100000",
@@ -1701,20 +1701,20 @@
     "54x245"
   ],
   "supertack_plate_temp": [
-    "35",
-    "35",
-    "35",
     "70",
-    "35",
-    "35"
+    "70",
+    "70",
+    "70",
+    "70",
+    "70"
   ],
   "supertack_plate_temp_initial_layer": [
-    "35",
-    "35",
-    "35",
     "70",
-    "35",
-    "35"
+    "70",
+    "70",
+    "70",
+    "70",
+    "70"
   ],
   "support_air_filtration": "0",
   "support_angle": "0",
@@ -1760,12 +1760,12 @@
   "support_type": "tree(auto)",
   "symmetric_infill_y_axis": "0",
   "temperature_vitrification": [
-    "70",
-    "70",
-    "70",
-    "70",
-    "70",
-    "70"
+    "60",
+    "60",
+    "60",
+    "60",
+    "60",
+    "60"
   ],
   "template_custom_gcode": "",
   "textured_plate_temp": [
@@ -1854,12 +1854,12 @@
     "80%"
   ],
   "volumetric_speed_coefficients": [
-    "",
-    "",
-    "",
     "0 0 0 0 0 0",
-    "",
-    ""
+    "0 0 0 0 0 0",
+    "0 0 0 0 0 0",
+    "0 0 0 0 0 0",
+    "0 0 0 0 0 0",
+    "0 0 0 0 0 0"
   ],
   "wall_distribution_count": "1",
   "wall_filament": "0",
@@ -1911,5 +1911,21 @@
   "z_hop_types": [
     "Auto Lift",
     "Auto Lift"
+  ],
+  "filament_long_retractions_when_ec": [
+    "nil",
+    "nil",
+    "nil",
+    "nil",
+    "nil",
+    "nil"
+  ],
+  "filament_retraction_distances_when_ec": [
+    "nil",
+    "nil",
+    "nil",
+    "nil",
+    "nil",
+    "nil"
   ]
 }

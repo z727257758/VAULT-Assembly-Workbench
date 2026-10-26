@@ -655,6 +655,32 @@ endsolid t";
                 .unwrap();
         assert_eq!(json["filament_colour"][0], "#F0141E");
         assert_eq!(json["filament_colour"][1], "#0A64DC");
+        // Validate the actual packaged settings, including all six material slots.
+        for (key, value) in [
+            ("filament_type", "PETG"),
+            ("filament_vendor", "Bambu Lab"),
+            ("filament_ids", "GFG00"),
+            ("filament_settings_id", "Bambu PETG Basic @BBL X1C"),
+            ("nozzle_temperature_initial_layer", "245"),
+            ("nozzle_temperature", "255"),
+            ("textured_plate_temp", "70"),
+            ("textured_plate_temp_initial_layer", "70"),
+            ("filament_flow_ratio", "0.95"),
+            ("filament_density", "1.25"),
+            ("filament_max_volumetric_speed", "15"),
+        ] {
+            let slots = json[key].as_array().unwrap();
+            assert_eq!(slots.len(), 6, "{key}");
+            assert!(
+                slots.iter().all(|slot| slot == value),
+                "{key} must use PETG Basic in every slot"
+            );
+        }
+        assert_eq!(
+            json["default_filament_profile"][0],
+            "Bambu PETG Basic @BBL X1C"
+        );
+        assert_eq!(json["printer_settings_id"], "Bambu Lab P1S 0.4 nozzle");
     }
     #[test]
     fn legacy_open_bambu_migrates_without_launch_and_settings_roundtrip() {

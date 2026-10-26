@@ -96,94 +96,109 @@ struct InlineLabel {
 }
 #[derive(Default)]
 pub struct Editor {
+    preview: crate::label_preview::Preview,
     inline: Option<InlineLabel>,
     shared_error: Option<String>,
     drag: Option<Drag>,
     pub error: Option<String>,
 }
 impl Editor {
+    fn preview_bin(&self, layout: &Layout, selected: Option<u32>) -> Option<Bin> {
+        let mut bin = layout.bins.iter().find(|b| Some(b.id) == selected)?.clone();
+        if let Some(edit) = self.inline.as_ref().filter(|edit| edit.id == bin.id) {
+            bin.label.text = edit.text.clone();
+            bin.label.enabled = !edit.text.trim().is_empty();
+            if bin.label.enabled {
+                bin.tab = true;
+                bin.label.size = bin.label.size.max(bin.label.min_size());
+                if bin.detachable() {
+                    bin.label.depth = bin.label.depth.min(0.4);
+                }
+            }
+        }
+        Some(bin)
+    }
+    pub fn selected_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: &Layout,
+        selected: Option<u32>,
+        colors: &crate::print_plate::Config,
+    ) {
+        let bin = self.preview_bin(layout, selected);
+        self.preview.show(
+            ui,
+            bin.as_ref(),
+            colors,
+            self.inline.as_ref().is_some_and(|e| Some(e.id) == selected),
+        );
+    }
     pub fn shared_ui(&mut self, ui: &mut egui::Ui, layout: &mut Layout, s: &Selection) {
         let mut settings = layout.shared.clone();
         let before = settings.clone();
         let grid = gridfinity::grid_for(s, &layout.baseplate).unwrap_or([1, 1]);
         let max = gridfinity::max_units(s).unwrap_or(3);
-        egui::CollapsingHeader::new("所有小盒统一配置")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.small(
-                    "修改立即作用于全部小盒，新增小盒自动沿用；位置、宽度和标签文本逐盒保留。",
-                );
-                ui.add_enabled_ui(!self.active(), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("统一深度（格）");
-                        ui.add(egui::DragValue::new(&mut settings.depth_cells).range(1..=grid[1]));
-                        ui.checkbox(&mut settings.auto_height, "自动高度");
-                        if !settings.auto_height {
-                            ui.label("高度 U");
-                            ui.add(egui::DragValue::new(&mut settings.height_units).range(3..=max));
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut settings.scoop, "取物圆弧");
-                        ui.checkbox(&mut settings.tab, "标签台");
-                        if settings.tab
-                            && ui
-                                .checkbox(&mut settings.detachable_label, "Cullenect 可拆标牌")
-                                .changed()
-                            && settings.detachable_label
-                        {
-                            settings.depth = 0.2;
-                        }
-                    });
-                    if settings.tab {
-                        ui.horizontal(|ui| {
-                            ui.radio_value(
-                                &mut settings.style,
-                                crate::label::Style::Raised,
-                                "凸字",
-                            );
-                            ui.radio_value(
-                                &mut settings.style,
-                                crate::label::Style::Engraved,
-                                "凹字",
-                            );
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            for (font, name) in [
-                                (crate::label::Font::Chinese, "微软雅黑"),
-                                (crate::label::Font::ChineseBold, "微软雅黑粗体"),
-                                (crate::label::Font::Arial, "Arial"),
-                                (crate::label::Font::ArialBold, "Arial Bold"),
-                            ] {
-                                ui.selectable_value(&mut settings.font, font, name);
-                            }
-                        });
-                        let minimum = layout
-                            .bins
-                            .iter()
-                            .filter(|b| b.label.active())
-                            .map(|b| b.label.min_size())
-                            .fold(4., f32::max);
-                        ui.add(
-                            egui::Slider::new(&mut settings.size, minimum..=12.)
-                                .text("统一字号 mm"),
-                        );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut settings.depth,
-                                0.2..=if settings.detachable_label { 0.4 } else { 0.8 },
-                            )
-                            .text("统一字高 / 刻深 mm"),
-                        );
-                        ui.horizontal(|ui| {
-                            ui.label("文字偏移 X / Y mm");
-                            for offset in &mut settings.offset {
-                                ui.add(egui::DragValue::new(offset).speed(0.1).range(-10. ..=10.));
-                            }
-                        });
+        ui.strong("所有小盒统一配置");
+        ui.small("修改立即作用于全部小盒，新增小盒自动沿用；位置、宽度和标签文本逐盒保留。");
+        ui.add_enabled_ui(!self.active(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("统一深度（格）");
+                ui.add(egui::DragValue::new(&mut settings.depth_cells).range(1..=grid[1]));
+                ui.checkbox(&mut settings.auto_height, "自动高度");
+                if !settings.auto_height {
+                    ui.label("高度 U");
+                    ui.add(egui::DragValue::new(&mut settings.height_units).range(3..=max));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut settings.scoop, "取物圆弧");
+                ui.checkbox(&mut settings.tab, "标签台");
+                if settings.tab
+                    && ui
+                        .checkbox(&mut settings.detachable_label, "Cullenect 可拆标牌")
+                        .changed()
+                    && settings.detachable_label
+                {
+                    settings.depth = 0.2;
+                }
+            });
+            if settings.tab {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut settings.style, crate::label::Style::Raised, "凸字");
+                    ui.radio_value(&mut settings.style, crate::label::Style::Engraved, "凹字");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (font, name) in [
+                        (crate::label::Font::Chinese, "微软雅黑"),
+                        (crate::label::Font::ChineseBold, "微软雅黑粗体"),
+                        (crate::label::Font::Arial, "Arial"),
+                        (crate::label::Font::ArialBold, "Arial Bold"),
+                    ] {
+                        ui.selectable_value(&mut settings.font, font, name);
                     }
                 });
-            });
+                let minimum = layout
+                    .bins
+                    .iter()
+                    .filter(|b| b.label.active())
+                    .map(|b| b.label.min_size())
+                    .fold(4., f32::max);
+                ui.add(egui::Slider::new(&mut settings.size, minimum..=12.).text("统一字号 mm"));
+                ui.add(
+                    egui::Slider::new(
+                        &mut settings.depth,
+                        0.2..=if settings.detachable_label { 0.4 } else { 0.8 },
+                    )
+                    .text("统一字高 / 刻深 mm"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("文字偏移 X / Y mm");
+                    for offset in &mut settings.offset {
+                        ui.add(egui::DragValue::new(offset).speed(0.1).range(-10. ..=10.));
+                    }
+                });
+            }
+        });
         if settings != before {
             self.shared_error = layout.set_shared(settings, s).err();
         }
@@ -668,6 +683,36 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_preview_tracks_inline_draft_without_changing_layout() {
+        let mut layout = Layout::default();
+        let s = Selection::default();
+        layout.add(&s, None).unwrap();
+        layout.add(&s, None).unwrap();
+        layout.shared.size = 4.;
+        layout.sync_shared();
+        layout.bins[0].label.text = "M3".into();
+        layout.bins[0].label.enabled = true;
+        let saved = layout.clone();
+        let mut editor = Editor::default();
+        editor.begin_label(&layout, 2);
+        editor.inline.as_mut().unwrap().text = "电阻".into();
+        let preview = editor.preview_bin(&layout, Some(2)).unwrap();
+        assert_eq!(preview.label.text, "电阻");
+        assert!(preview.label.active());
+        assert_eq!(preview.label.size, 5.);
+        assert_eq!(
+            editor.preview_bin(&layout, Some(1)).unwrap().label.text,
+            "M3"
+        );
+        assert_eq!(layout, saved);
+        editor.cancel();
+        assert_eq!(
+            editor.preview_bin(&layout, Some(2)).unwrap(),
+            layout.bins[1]
+        );
+        assert!(editor.preview_bin(&layout, None).is_none());
+    }
     #[test]
     fn shared_controls_update_all_bins_and_stamped_bins_inherit() {
         fn frame(

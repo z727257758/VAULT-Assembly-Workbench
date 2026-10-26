@@ -2343,7 +2343,8 @@ impl App {
         let max = crate::gridfinity::max_units(&self.selection).unwrap_or(3);
         egui::Window::new(t(self.zh, "Gridfinity 盒子编辑", "Gridfinity bin editor"))
             .open(&mut open)
-            .default_width(560.)
+            .default_width(820.)
+            .default_height((ctx.content_rect().height()-120.).max(420.))
             .max_height((ctx.content_rect().height() - 120.).max(300.))
             .vscroll(true)
             .resizable(true)
@@ -2396,8 +2397,18 @@ impl App {
                     }
                 });
                 ui.small("俯视：上方为抽屉后部；双击盒内或选中后直接输入标签，F2 也可编辑。输入后自动启用标签文字。");
-                self.gridfinity_editor
-                    .canvas(ui, &mut draft, &self.selection, &mut selected);
+                let available=ui.available_width();
+                let preview_width=(available*0.32).clamp(180.,240.).min(available-100.);
+                let grid_width=(available-preview_width-16.).min(grid[0] as f32*58.);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(grid_width,0.),egui::Layout::top_down(egui::Align::Min),|ui| {
+                        self.gridfinity_editor.canvas(ui,&mut draft,&self.selection,&mut selected);
+                    });
+                    ui.add_space(8.);
+                    ui.allocate_ui_with_layout(egui::vec2(preview_width,0.),egui::Layout::top_down(egui::Align::Min),|ui| {
+                        self.gridfinity_editor.selected_preview(ui,&draft,selected,&self.export_options.plate);
+                    });
+                });
                 if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
                     ui.separator();
                     ui.strong(format!("盒子 {} · 位置、宽度和文本", b.id));
@@ -2552,12 +2563,12 @@ impl App {
         let mut changed = false;
         egui::Window::new(t(z,"配色与分盘","Colors and plates")).id(egui::Id::new("print-colors"))
             .open(&mut open).default_width(570.).default_height(650.).vscroll(true).show(ctx,|ui| {
-            ui.label(t(z,"编辑 6 个 PETG 颜色槽；小盒和可拆标牌分别按同类型统一配色，其他零件的同源份数共用颜色。","Edit six PETG slots. Bins and removable labels each share type colors; other source copies share colors."));
+            ui.label(t(z,"编辑 6 个 Bambu PETG Basic 颜色槽；小盒和可拆标牌分别按同类型统一配色，其他零件的同源份数共用颜色。","Edit six Bambu PETG Basic slots. Bins and removable labels each share type colors; other source copies share colors."));
             ui.add_enabled_ui(self.export_rx.is_none(),|ui| {
                 let c=&mut self.export_options.plate;
                 egui::Grid::new("color-palette").num_columns(3).show(ui,|ui| {
                     for i in 0..6 {
-                        ui.label(format!("PETG {}",i+1));
+                        ui.label(format!("Bambu PETG Basic {}",i+1));
                         if ui.color_edit_button_srgb(&mut c.palette[i]).changed(){changed=true;c.preview_colors=true;}
                         ui.monospace(c.color_hex(i as u32+1));ui.end_row();
                     }
@@ -2669,7 +2680,7 @@ impl App {
                         ui.label(t(z,"按耗材组合分盘，文字与底板同盘；多色打印请在 Bambu Studio 确认 AMS 映射、冲刷和擦拭塔。","Separate plates per color slot; overflow adds plates within that slot."));
                         if ui.button(t(z,"配置零件颜色…","Configure part colors…")).clicked(){self.colors_open=true;}
                         ui.checkbox(&mut p.support_by_name,t(z,"为 Turn On Supports 零件启用支撑","Enable support for Turn On Supports parts"));
-                        ui.small(t(z,"使用参考工程的 PETG 参数。保留原始打印朝向，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses reference PETG settings. Original print orientation; unsliced. Review supports, filament and first layer in Bambu Studio."));
+                        ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。保留原始打印朝向，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings. Original print orientation; unsliced. Review supports, filament and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled(!selected.is_empty() && !self.busy && !self.preview.has_pending(),
                         egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
