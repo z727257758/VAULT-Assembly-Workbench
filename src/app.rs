@@ -1477,7 +1477,9 @@ impl App {
             .scene
             .parts
             .iter()
-            .filter(|p| p.pose.path == path)
+            .filter(|p| {
+                crate::print_plate::color_key(&p.pose.path) == crate::print_plate::color_key(&path)
+            })
             .count();
         let has_text = path == crate::label::PATH
             || self.gridfinity.bins.iter().any(|b| {
@@ -1490,7 +1492,7 @@ impl App {
         ui.strong(t(z, "打印颜色", "Print color"));
         ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
             let c = &mut self.export_options.plate;
-            let old = c.part_filaments.get(&path).copied().unwrap_or(0);
+            let old = c.part_assignment(&path);
             let mut choice = old;
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut choice, 0, t(z, "跟随默认", "Use default"));
@@ -1518,17 +1520,13 @@ impl App {
                 }
             });
             if choice != old {
-                if choice == 0 {
-                    c.part_filaments.remove(&path);
-                } else {
-                    c.part_filaments.insert(path.clone(), choice);
-                }
+                c.set_part_slot(&path,choice);
                 c.preview_colors = true;
                 changed = true;
             }
             if has_text {
                 ui.label(t(z, "文字颜色", "Text color"));
-                let old_text = c.text_filaments.get(&path).copied().unwrap_or(0);
+                let old_text = c.text_assignment(&path);
                 let mut text_choice = old_text;
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut text_choice, 0, t(z, "跟随底板", "Match body"));
@@ -1556,11 +1554,7 @@ impl App {
                     }
                 });
                 if text_choice != old_text {
-                    if text_choice == 0 {
-                        c.text_filaments.remove(&path);
-                    } else {
-                        c.text_filaments.insert(path.clone(), text_choice);
-                    }
+                    c.set_text_slot(&path,text_choice);
                     c.preview_colors = true;
                     changed = true;
                 }
@@ -1576,15 +1570,12 @@ impl App {
                 c.slot(&path),
                 c.color_hex(c.slot(&path))
             ));
-            ui.small(format!(
-                "{} {linked} {}",
-                t(z, "同步修改同源的", "Applies to"),
-                t(
-                    z,
-                    "个展示部件；同一源文件的所有份数共用颜色。",
-                    "display parts; all source copies share the color."
-                )
-            ));
+            if crate::print_plate::color_key(&path)!=path {
+                ui.small(t(z,"同类型统一配色：小盒与可拆标牌分别同步，新增同类零件自动继承；文字颜色也按类型同步。","Colors are shared by type: bins and removable labels are separate groups, including future parts and text colors."));
+                ui.small(format!("{} {linked}",t(z,"当前同步部件数","Linked display parts")));
+            } else {
+                ui.small(format!("{} {linked} {}",t(z,"同步修改同源的","Applies to"),t(z,"个展示部件；同一源文件的所有份数共用颜色。","display parts; all source copies share the color.")));
+            }
             if ui
                 .small_button(t(z, "编辑颜色槽…", "Edit palette…"))
                 .clicked()
@@ -2366,6 +2357,7 @@ impl App {
                     max * 7
                 ));
                 ui.small("使用 Gridfinity Rebuilt 标准底脚与堆叠边；盒子与收纳隔板互斥。");
+                self.gridfinity_editor.shared_ui(ui,&mut draft,&self.selection);
                 ui.horizontal_wrapped(|ui| {
                     let add = ui.add(
                         egui::Button::new("添加盒子 / 拖入").sense(egui::Sense::click_and_drag()),
@@ -2403,96 +2395,32 @@ impl App {
                         selected = None;
                     }
                 });
-                ui.small("俯视：上方为抽屉后部；可以从上方按钮拖入，或在空白网格拖框添加。");
+                ui.small("俯视：上方为抽屉后部；双击盒内或选中后直接输入标签，F2 也可编辑。输入后自动启用标签文字。");
                 self.gridfinity_editor
                     .canvas(ui, &mut draft, &self.selection, &mut selected);
-                ui.separator();
-                self.gridfinity_editor.batch_ui(ui, &mut draft, &self.selection, selected);
                 if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
                     ui.separator();
-                    ui.strong(format!("盒子 {}", b.id));
+                    ui.strong(format!("盒子 {} · 位置、宽度和文本", b.id));
                     ui.horizontal(|ui| {
-                        for (axis, name) in ["起始列", "起始行"].iter().enumerate() {
-                            let mut n = b.cell[axis] + 1;
-                            ui.label(*name);
-                            ui.add(egui::DragValue::new(&mut n).range(1..=grid[axis]));
-                            b.cell[axis] = n - 1;
+                        for (axis,name) in ["起始列","起始行"].iter().enumerate() {
+                            let mut n=b.cell[axis]+1;ui.label(*name);ui.add(egui::DragValue::new(&mut n).range(1..=grid[axis]));b.cell[axis]=n-1;
                         }
+                        ui.label("宽度（格）");ui.add(egui::DragValue::new(&mut b.span[0]).range(1..=grid[0]));
                     });
-                    ui.horizontal(|ui| {
-                        for (axis, name) in ["宽度（格）", "深度（格）"].iter().enumerate()
-                        {
-                            ui.label(*name);
-                            ui.add(egui::DragValue::new(&mut b.span[axis]).range(1..=grid[axis]));
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut b.auto_height, "根据抽屉层高自动配置");
-                        if !b.auto_height {
-                            ui.label("高度 U");
-                            ui.add(egui::DragValue::new(&mut b.height_units).range(3..=max));
-                        }
-                    });
-                    ui.checkbox(&mut b.scoop, "取物圆弧").on_hover_text(
-                        "在盒底与侧壁之间增加圆弧，方便取出小零件；开启或关闭会更新盒体。",
-                    );
-                    ui.checkbox(&mut b.tab, "标签台");
-                    if b.tab {
-                        if ui.checkbox(&mut b.detachable_label, "Cullenect 可拆标牌").changed() && b.detachable_label { b.label.depth = 0.2; }
-                        if b.detachable() { ui.small("标牌单独导出；36 × 11 × 1.2 mm。卡扣配合待试打印确认。"); }
-                    }
-                }
-                if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
                     if b.tab {
                         ui.strong("本盒标签文本（单独设置）");
-                        ui.checkbox(&mut b.label.enabled, "标签文字");
+                        ui.checkbox(&mut b.label.enabled,"标签文字");
                         if b.label.enabled {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut b.label.text)
-                                    .desired_rows(2)
-                                    .char_limit(48)
-                                    .hint_text("最多两行，34 × 10 mm 安全区；留空保留空白标签台"),
-                            );
-                            ui.horizontal(|ui| {
-                                ui.radio_value(
-                                    &mut b.label.style,
-                                    crate::label::Style::Raised,
-                                    "凸字",
-                                );
-                                ui.radio_value(
-                                    &mut b.label.style,
-                                    crate::label::Style::Engraved,
-                                    "凹字",
-                                );
-                                ui.radio_value(
-                                    &mut b.label.font,
-                                    crate::label::Font::Chinese,
-                                    "微软雅黑",
-                                );
-                                ui.radio_value(
-                                    &mut b.label.font,
-                                    crate::label::Font::Arial,
-                                    "Arial",
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut b.label.font, crate::label::Font::ChineseBold, "微软雅黑粗体（推荐）");
-                                ui.selectable_value(&mut b.label.font, crate::label::Font::ArialBold, "Arial Bold");
-                            });
-                            crate::label::stroke_check_ui(ui, &b.label);
-                            let minimum = b.label.min_size();
-                            ui.add(egui::Slider::new(&mut b.label.size, minimum..=12.).text("字号 mm"));
-                            ui.small("0.4 mm 喷嘴经验建议：优先粗体；字号为字体 em 尺寸，非实际字高。复杂汉字需放大并检查切片。笔画检查结果见下方。");
-                            ui.add(
-                                egui::Slider::new(&mut b.label.depth, 0.2..=if b.detachable_label { 0.4 } else { 0.8 })
-                                    .text("字高 / 刻深 mm"),
-                            );
+                            ui.add(egui::TextEdit::multiline(&mut b.label.text).desired_rows(2).char_limit(48).hint_text("最多两行；字体、字号、凹凸字及刻深在上方统一配置"));
+                            crate::label::stroke_check_ui(ui,&b.label);
                         }
                     }
-                    if ui.button("单独预览此盒子").clicked() {
-                        preview = Some(b.path());
-                    }
+                    if ui.button("单独预览此盒子").clicked() {preview=Some(b.path());}
                 }
+                // Any newly entered script requiring a larger minimum font size raises
+                // the shared size for the whole layout, never an individual override.
+                for b in draft.bins.iter().filter(|b|b.label.active()) {draft.shared.size=draft.shared.size.max(b.label.min_size());}
+                draft.sync_shared();
                 if let Some(e) = &self.gridfinity_error {
                     ui.colored_label(Color32::LIGHT_RED, e);
                 }
@@ -2624,7 +2552,7 @@ impl App {
         let mut changed = false;
         egui::Window::new(t(z,"配色与分盘","Colors and plates")).id(egui::Id::new("print-colors"))
             .open(&mut open).default_width(570.).default_height(650.).vscroll(true).show(ctx,|ui| {
-            ui.label(t(z,"编辑 6 个 PETG 颜色槽，并为整件模型指定颜色。同一源文件的所有份数共用颜色。","Edit six PETG color slots and assign whole-part colors. Copies of the same source share a color."));
+            ui.label(t(z,"编辑 6 个 PETG 颜色槽；小盒和可拆标牌分别按同类型统一配色，其他零件的同源份数共用颜色。","Edit six PETG slots. Bins and removable labels each share type colors; other source copies share colors."));
             ui.add_enabled_ui(self.export_rx.is_none(),|ui| {
                 let c=&mut self.export_options.plate;
                 egui::Grid::new("color-palette").num_columns(3).show(ui,|ui| {
@@ -2642,18 +2570,26 @@ impl App {
                     if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();changed=true;}
                 });
                 ui.separator();
+                let mut color_rows=std::collections::BTreeSet::new();
                 for item in self.bom.iter().filter(|b|b.enabled) {
+                    let key=crate::print_plate::color_key(&item.path);
+                    if !color_rows.insert(key.to_owned()) {continue;}
+                    let quantity:u32=self.bom.iter().filter(|b|b.enabled && crate::print_plate::color_key(&b.path)==key).map(|b|b.qty).sum();
                     ui.push_id(&item.path,|ui| {ui.horizontal(|ui| {
-                        let slot=c.slot(&item.path);let mut choice=c.part_filaments.get(&item.path).copied().unwrap_or(0);
+                        let slot=c.slot(&item.path);let mut choice=c.part_assignment(&item.path);
                         let [r,g,b]=c.palette[(slot-1) as usize];ui.colored_label(Color32::from_rgb(r,g,b),"●");
-                        let name=crate::accessories::info(&item.path,z).map_or_else(||item.name().to_string(),|m|m.name);
-                        ui.label(format!("{name} ×{}",item.qty));
+                        let name=match key {
+                            crate::print_plate::BIN_COLOR_KEY=>t(z,"Gridfinity 小盒（同类型）","Gridfinity bins (shared type)").to_owned(),
+                            crate::print_plate::LABEL_COLOR_KEY=>t(z,"Cullenect 可拆标牌（同类型）","Cullenect labels (shared type)").to_owned(),
+                            _=>crate::accessories::info(&item.path,z).map_or_else(||item.name().to_string(),|m|m.name)
+                        };
+                        ui.label(format!("{name} ×{quantity}"));
                         egui::ComboBox::from_id_salt("part-color").selected_text(if choice==0 {format!("{} · {}",t(z,"默认","Default"),c.color_hex(slot))}else{format!("{slot} · {}",c.color_hex(slot))}).show_ui(ui,|ui| {
                             ui.selectable_value(&mut choice,0,t(z,"跟随默认颜色","Use default"));
                             for slot in 1..=6 {ui.selectable_value(&mut choice,slot,format!("{slot} · {}",c.color_hex(slot)));}
                         });
-                        if choice!=c.part_filaments.get(&item.path).copied().unwrap_or(0) {
-                            if choice==0 {c.part_filaments.remove(&item.path);}else{c.part_filaments.insert(item.path.clone(),choice);}
+                        if choice!=c.part_assignment(&item.path) {
+                            c.set_part_slot(&item.path,choice);
                             c.preview_colors=true;changed=true;
                         }
                     });});
@@ -3261,6 +3197,17 @@ impl eframe::App for App {
                                         ..Default::default()
                                     },
                                 ];
+                                self.gridfinity.adopt_shared();
+                                self.export_options
+                                    .plate
+                                    .set_part_slot(&self.gridfinity.bins[0].path(), 3);
+                                self.export_options
+                                    .plate
+                                    .set_part_slot(&self.gridfinity.bins[0].label_path(), 4);
+                                self.export_options
+                                    .plate
+                                    .set_text_slot(&self.gridfinity.bins[0].label_path(), 1);
+                                self.export_options.plate.preview_colors = true;
                                 self.gridfinity_selected = Some(1);
                                 self.assembly(ctx);
                             }

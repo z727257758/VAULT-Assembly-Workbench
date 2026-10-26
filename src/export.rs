@@ -513,7 +513,14 @@ endsolid t";
                 ..Default::default()
             };
             let layout = crate::gridfinity::Layout {
-                bins: vec![bin.clone()],
+                bins: vec![
+                    bin.clone(),
+                    crate::gridfinity::Bin {
+                        id: 2,
+                        cell: [1, 0],
+                        ..bin.clone()
+                    },
+                ],
                 ..Default::default()
             };
             let items = vec![
@@ -530,9 +537,18 @@ endsolid t";
                     group: crate::gridfinity::GROUP.into(),
                 },
             ];
+            let mut items = items;
+            items.push(Bom {
+                path: layout.bins[1].label_path(),
+                qty: 1,
+                enabled: true,
+                group: crate::gridfinity::GROUP.into(),
+            });
             let mut options = Options::default();
+            options.plate.set_part_slot(&bin.label_path(), 3);
+            options.plate.set_part_slot("tall.stl", 3);
             if multicolor {
-                options.plate.text_filaments.insert(bin.label_path(), 2);
+                options.plate.set_text_slot(&bin.label_path(), 2);
             }
             let destination = temp.path().join(format!("separate-{multicolor}.3mf"));
             run_configured(
@@ -557,7 +573,7 @@ endsolid t";
                 .map(|p| p.split("</plate>").next().unwrap())
                 .collect();
             let label_plate = plates.iter().find(|p| p.contains("可拆标牌")).unwrap();
-            assert_eq!(label_plate.matches("<model_instance>").count(), 1);
+            assert_eq!(label_plate.matches("<model_instance>").count(), 2);
             let other_plate = plates.iter().find(|p| !p.contains("可拆标牌")).unwrap();
             assert_eq!(other_plate.matches("<model_instance>").count(), 2);
             let label_object = settings
@@ -574,6 +590,22 @@ endsolid t";
             let membership = format!("key=\"object_id\" value=\"{id}\"");
             assert!(label_plate.contains(&membership));
             assert!(!other_plate.contains(&membership));
+            let second = settings
+                .split("<object id=\"")
+                .skip(1)
+                .find(|o| {
+                    o.split("</object>")
+                        .next()
+                        .unwrap()
+                        .contains("Cullenect-2.stl")
+                })
+                .unwrap();
+            let second = second.split("</object>").next().unwrap();
+            assert!(second.contains("key=\"extruder\" value=\"3\""));
+            assert_eq!(
+                second.matches("key=\"extruder\" value=\"2\"").count(),
+                if multicolor { 1 } else { 0 }
+            );
             assert_eq!(
                 label_object
                     .split("</object>")

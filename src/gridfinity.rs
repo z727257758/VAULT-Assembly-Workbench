@@ -60,36 +60,87 @@ impl Bin {
         format!("{PREFIX}Gridfinity-{}.stl", self.id)
     }
 }
-/// Explicit batch fields; identity, placement and individual text are never copied.
-#[derive(Clone, Debug)]
-pub struct BatchFields {
-    pub span: bool,
-    pub height: bool,
+/// One persistent configuration for all bins; only X span, placement and text vary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharedConfig {
+    pub depth_cells: u32,
+    pub auto_height: bool,
+    pub height_units: u32,
     pub scoop: bool,
     pub tab: bool,
-    pub lettering: bool,
+    pub detachable_label: bool,
+    pub font: crate::label::Font,
+    pub style: crate::label::Style,
+    pub size: f32,
+    pub depth: f32,
+    pub offset: [f32; 2],
 }
-impl Default for BatchFields {
+impl Default for SharedConfig {
     fn default() -> Self {
+        let mut settings = Self::from_bin(&Bin::default());
+        settings.size = 5.;
+        settings
+    }
+}
+impl SharedConfig {
+    pub fn from_bin(b: &Bin) -> Self {
         Self {
-            span: false,
-            height: true,
-            scoop: true,
-            tab: true,
-            lettering: false,
+            depth_cells: b.span[1],
+            auto_height: b.auto_height,
+            height_units: b.height_units,
+            scoop: b.scoop,
+            tab: b.tab,
+            detachable_label: b.detachable_label,
+            font: b.label.font,
+            style: b.label.style,
+            size: b.label.size,
+            depth: b.label.depth,
+            offset: b.label.offset,
         }
     }
-}
-impl BatchFields {
-    pub fn any(&self) -> bool {
-        self.span || self.height || self.scoop || self.tab || self.lettering
+    pub fn apply(&self, b: &mut Bin) {
+        b.span[1] = self.depth_cells;
+        b.auto_height = self.auto_height;
+        b.height_units = self.height_units;
+        b.scoop = self.scoop;
+        b.tab = self.tab;
+        b.detachable_label = self.detachable_label;
+        b.label.font = self.font;
+        b.label.style = self.style;
+        b.label.size = self.size;
+        b.label.depth = self.depth;
+        b.label.offset = self.offset;
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Layout {
     pub baseplate: String,
     pub bins: Vec<Bin>,
+    pub shared: SharedConfig,
+}
+impl<'de> Deserialize<'de> for Layout {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Saved {
+            baseplate: String,
+            bins: Vec<Bin>,
+            shared: Option<SharedConfig>,
+        }
+        let saved = Saved::deserialize(deserializer)?;
+        let mut layout = Self {
+            baseplate: saved.baseplate,
+            bins: saved.bins,
+            shared: saved.shared.clone().unwrap_or_default(),
+        };
+        if saved.shared.is_none() {
+            layout.adopt_shared();
+        } else {
+            layout.sync_shared();
+        }
+        Ok(layout)
+    }
 }
 pub fn grid(s: &Selection) -> Result<[u32; 2], String> {
     let x = match s.width.as_str() {
@@ -134,72 +185,53 @@ pub fn units(b: &Bin, s: &Selection) -> Result<u32, String> {
     })
 }
 impl Layout {
-    /// Apply to a candidate layout and commit only if every target remains valid.
-    pub fn apply_batch(
-        &mut self,
-        source: u32,
-        targets: &[u32],
-        fields: &BatchFields,
-        s: &Selection,
-    ) -> Result<usize, String> {
-        let template = self
-            .bins
-            .iter()
-            .find(|b| b.id == source)
-            .cloned()
-            .ok_or("来源盒子不存在")?;
-        if !fields.any() {
-            return Err("请勾选要批量同步的参数".into());
+    pub fn sync_shared(&mut self) {
+        for bin in &mut self.bins {
+            self.shared.apply(bin);
+        }
+    }
+    /// Migrate old presets from the lowest ID; shrinking to minimum existing depth
+    /// preserves placement and avoids introducing overlaps while unifying them.
+    pub fn adopt_shared(&mut self) {
+        if let Some(first) = self.bins.iter().min_by_key(|b| b.id) {
+            self.shared = SharedConfig::from_bin(first);
+            self.shared.depth_cells = self.bins.iter().map(|b| b.span[1]).min().unwrap_or(1);
+            for b in self.bins.iter().filter(|b| b.label.active()) {
+                self.shared.size = self.shared.size.max(b.label.min_size());
+            }
+            if self.shared.detachable_label {
+                self.shared.depth = self.shared.depth.min(0.4);
+            }
+        }
+        self.sync_shared();
+    }
+    pub fn set_shared(&mut self, settings: SharedConfig, s: &Selection) -> Result<(), String> {
+        let grid = grid_for(s, &self.baseplate)?;
+        if settings.depth_cells == 0 || settings.depth_cells > grid[1] {
+            return Err("统一深度超出抽屉网格".into());
+        }
+        if !settings.auto_height && !(3..=max_units(s)?).contains(&settings.height_units) {
+            return Err("统一盒高超出抽屉净空限制".into());
+        }
+        crate::label::Config {
+            enabled: true,
+            text: "X".into(),
+            font: settings.font,
+            style: settings.style,
+            size: settings.size,
+            depth: settings.depth,
+            offset: settings.offset,
+        }
+        .validate()?;
+        if settings.tab && settings.detachable_label && settings.depth > 0.4 {
+            return Err("统一可拆标牌刻深不能超过 0.4 mm".into());
         }
         let mut next = self.clone();
-        let mut count = 0;
-        for id in targets
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            if id == source {
-                continue;
-            }
-            let b = next
-                .bins
-                .iter_mut()
-                .find(|b| b.id == id)
-                .ok_or("目标盒子不存在")?;
-            if fields.span {
-                b.span = template.span;
-            }
-            if fields.height {
-                b.auto_height = template.auto_height;
-                b.height_units = template.height_units;
-            }
-            if fields.scoop {
-                b.scoop = template.scoop;
-            }
-            if fields.tab {
-                b.tab = template.tab;
-                b.detachable_label = template.detachable_label;
-            }
-            if fields.lettering {
-                let text = std::mem::take(&mut b.label.text);
-                let enabled = b.label.enabled;
-                b.label = template.label.clone();
-                b.label.text = text;
-                b.label.enabled = enabled;
-            }
-            if b.tab && b.label.active() {
-                b.label.validate().map_err(|e| format!("盒子 {id}：{e}"))?;
-                if b.detachable() && b.label.depth > 0.4 {
-                    return Err(format!(
-                        "盒子 {id}：可拆标牌刻深超过 0.4 mm；请先单独调低刻深，或勾选文字样式同步"
-                    ));
-                }
-            }
-            count += 1;
-        }
+        next.shared = settings;
+        next.sync_shared();
         next.validate(s)?;
         *self = next;
-        Ok(count)
+        Ok(())
     }
     pub fn validate(&self, s: &Selection) -> Result<(), String> {
         if self.bins.is_empty() {
@@ -238,6 +270,7 @@ impl Layout {
     pub fn add(&mut self, s: &Selection, template: Option<Bin>) -> Result<u32, String> {
         let g = grid_for(s, &self.baseplate)?;
         let mut b = template.unwrap_or_default();
+        self.shared.apply(&mut b);
         b.id = self
             .bins
             .iter()
@@ -319,14 +352,21 @@ fn script(home: &Path, b: &Bin, s: &Selection) -> Result<String, String> {
         .to_string_lossy()
         .replace('\\', "/");
     let h = units(b, s)? as f32 * 7.;
+    // Upstream's scoop is fixed at -Y. Rotate only the cutter to place it at
+    // +Y (drawer front), and counter-rotate the tab angle to keep the rear shelf.
+    let cutter_rotation = if b.scoop { 180 } else { 0 };
+    let tab_angle = if b.scoop { 90 } else { 270 };
     let mut scad = format!(
-        "use <{lib}/bin.scad>\nuse <{lib}/cutouts.scad>\n$fa=6; $fs=0.5;\nb=new_bin([{},{}],{h},include_lip=true);\nmodule box() {{ bin_render(b) compartment_cutter(bin_get_infill_size_mm(b)-[0.6,0.6,0],tab_width={},tab_angle=270{}); }}\n",
+        "use <{lib}/bin.scad>\nuse <{lib}/cutouts.scad>\n$fa=6; $fs=0.5;\nb=new_bin([{},{}],{h},include_lip=true);\nmodule box() {{ bin_render(b) rotate([0,0,{cutter_rotation}]) compartment_cutter(bin_get_infill_size_mm(b)-[0.6,0.6,0],tab_width={},tab_angle={tab_angle}{}); }}\n",
         b.span[0],
         b.span[1],
         if b.tab { 38 } else { 0 },
         if b.scoop { ",scoop_percent=1" } else { "" }
     );
     scad += "box();\n";
+    if !b.scoop {
+        scad = scad.replace(" rotate([0,0,0])", "");
+    }
     Ok(scad)
 }
 #[cfg(test)]
@@ -548,10 +588,15 @@ fn proxy(b: &Bin, s: &Selection) -> Result<Arc<Mesh>, String> {
     block(min, Vec3::new(max.x, max.y, min.z + 1.2));
     block(Vec3::new(min.x, min.y, max.z - 1.2), max);
     if b.tab {
+        let tab_center = z / 2. - 1.25 - 15.85 / 2.;
+        let top = min.y + units(b, s)? as f32 * 7. - 1.2;
         block(
-            Vec3::new(min.x + 1.2, max.y - 5., max.z - 16.),
-            Vec3::new(max.x - 1.2, max.y - 3.5, max.z - 1.2),
+            Vec3::new(-19., top - 1.2, tab_center - 15.85 / 2.),
+            Vec3::new(19., top, tab_center + 15.85 / 2.),
         );
+    }
+    if b.scoop {
+        proxy_scoop(&mut vertices, min, max, units(b, s)?);
     }
     Ok(Arc::new(Mesh {
         vertices,
@@ -559,6 +604,45 @@ fn proxy(b: &Bin, s: &Selection) -> Result<Arc<Mesh>, String> {
         max,
         size: Vec3::new(x, z, h),
     }))
+}
+
+// Display-only quarter-circle at the front (-viewer Z / +print Y).
+fn proxy_scoop(vertices: &mut Vec<crate::mesh::Vertex>, min: Vec3, max: Vec3, units: u32) {
+    let floor = min.y + 5.;
+    let front = min.z + 1.2;
+    let radius = ((units as f32 * 7. - 6.2) / 2.).min(max.z - min.z - 2.4);
+    let mut polygon = vec![[floor, front]];
+    for i in 0..=20 {
+        let angle = i as f32 / 20. * std::f32::consts::FRAC_PI_2;
+        polygon.push([
+            floor + radius * (1. - angle.cos()),
+            front + radius * (1. - angle.sin()),
+        ]);
+    }
+    let point = |x: f32, i: usize| Vec3::new(x, polygon[i][0], polygon[i][1]);
+    let (left, right) = (min.x + 1.2, max.x - 1.2);
+    let mut triangle = |points: [Vec3; 3]| {
+        let normal = (points[1] - points[0])
+            .cross(points[2] - points[0])
+            .normalize_or_zero()
+            .to_array();
+        for p in points {
+            vertices.push(crate::mesh::Vertex {
+                position: p.to_array(),
+                normal,
+                shade: 1.,
+            });
+        }
+    };
+    for i in 1..polygon.len() - 1 {
+        triangle([point(left, 0), point(left, i), point(left, i + 1)]);
+        triangle([point(right, 0), point(right, i + 1), point(right, i)]);
+    }
+    for i in 0..polygon.len() {
+        let j = (i + 1) % polygon.len();
+        triangle([point(left, i), point(right, i), point(right, j)]);
+        triangle([point(left, i), point(right, j), point(left, j)]);
+    }
 }
 
 // A bounded shared cache keeps unrelated boxes and blank bodies available during typing.
@@ -939,139 +1023,118 @@ pub fn apply_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn batch_layout() -> Layout {
-        Layout {
-            bins: (0..3)
-                .map(|i| Bin {
-                    id: i + 1,
-                    cell: [i, 0],
-                    label: crate::label::Config {
-                        enabled: i != 2,
-                        text: format!("Part {i}"),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
     #[test]
-    fn batch_parameters_preserve_text_identity_and_unselected_bins() {
-        let mut layout = batch_layout();
-        layout.bins[0].auto_height = false;
-        layout.bins[0].height_units = 3;
-        layout.bins[0].scoop = false;
-        layout.bins[0].detachable_label = true;
-        layout.bins[0].label.depth = 0.2;
-        layout.bins[0].label.font = crate::label::Font::ArialBold;
-        let before = layout.clone();
-        let fields = BatchFields {
-            lettering: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            layout
-                .apply_batch(1, &[1, 2, 2], &fields, &Selection::default())
-                .unwrap(),
-            1
-        );
-        assert_eq!(layout.bins[0], before.bins[0]);
-        assert_eq!(layout.bins[2], before.bins[2]);
-        let target = &layout.bins[1];
-        assert_eq!(
-            (target.id, target.cell, target.span),
-            (before.bins[1].id, before.bins[1].cell, before.bins[1].span)
-        );
-        assert_eq!(target.label.text, before.bins[1].label.text);
-        assert_eq!(target.label.enabled, before.bins[1].label.enabled);
-        assert!(target.detachable());
-        assert_eq!(target.label.depth, 0.2);
-        assert!(!target.auto_height);
-        assert!(!target.scoop);
-        layout
-            .apply_batch(1, &[2, 3], &fields, &Selection::default())
-            .unwrap();
-        assert!(!layout.bins[2].label.enabled);
-        assert_eq!(layout.bins[2].label.text, before.bins[2].label.text);
-        let round: Layout = toml::from_str(&toml::to_string(&layout).unwrap()).unwrap();
-        assert_eq!(round, layout);
-    }
-    #[test]
-    fn batch_rejects_size_conflicts_and_incompatible_labels_atomically() {
-        let s = Selection::default();
-        let mut layout = batch_layout();
-        layout.bins[0].span = [1, 2];
-        layout.bins[2].cell = [2, 2];
-        let before = layout.clone();
-        assert!(
-            layout
-                .apply_batch(
-                    1,
-                    &[2, 3],
-                    &BatchFields {
-                        span: true,
-                        ..Default::default()
-                    },
-                    &s
-                )
-                .is_err()
-        );
-        assert_eq!(layout, before);
-        layout.bins[0].span = [2, 1];
+    fn shared_parameters_update_all_and_new_bins_without_copying_text() {
+        let selection = Selection::default();
+        let mut layout = Layout::default();
+        layout.add(&selection, None).unwrap();
+        layout.add(&selection, None).unwrap();
+        layout.bins[0].label.text = "M3".into();
+        layout.bins[0].label.enabled = true;
+        layout.bins[1].label.text = "Hidden".into();
+        layout.bins[1].span[0] = 2;
         layout.bins[1].cell = [0, 1];
-        layout.bins[2].cell = [1, 1];
         let before = layout.clone();
-        assert!(
-            layout
-                .apply_batch(
-                    1,
-                    &[2, 3],
-                    &BatchFields {
-                        span: true,
-                        ..Default::default()
-                    },
-                    &s
-                )
-                .is_err()
+        let settings = SharedConfig {
+            scoop: false,
+            detachable_label: true,
+            depth: 0.2,
+            style: crate::label::Style::Engraved,
+            auto_height: false,
+            height_units: 3,
+            ..layout.shared.clone()
+        };
+        layout.set_shared(settings.clone(), &selection).unwrap();
+        for (b, old) in layout.bins.iter().zip(&before.bins) {
+            assert_eq!(SharedConfig::from_bin(b), settings);
+            assert_eq!((b.id, b.cell, b.span[0]), (old.id, old.cell, old.span[0]));
+            assert_eq!(
+                (&b.label.text, b.label.enabled),
+                (&old.label.text, old.label.enabled)
+            );
+        }
+        layout.add(&selection, None).unwrap();
+        assert_eq!(
+            SharedConfig::from_bin(layout.bins.last().unwrap()),
+            settings
         );
-        assert_eq!(layout, before);
-        let mut layout = batch_layout();
-        layout.bins[0].detachable_label = true;
-        layout.bins[0].label.depth = 0.2;
-        let before = layout.clone();
-        assert!(
-            layout
-                .apply_batch(1, &[3, 2], &BatchFields::default(), &s)
-                .is_err()
+        let restored: Layout = toml::from_str(&toml::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(restored, layout);
+        let mut stale = serde_json::to_value(&layout).unwrap();
+        stale["bins"][0]["scoop"] = serde_json::json!(true);
+        stale["bins"][0]["label"]["style"] = serde_json::json!("Raised");
+        let normalized: Layout = serde_json::from_value(stale).unwrap();
+        assert_eq!(
+            normalized, layout,
+            "saved shared settings override obsolete per-bin copies"
         );
-        assert_eq!(layout, before);
-        assert!(
-            layout
-                .apply_batch(1, &[3, 99], &BatchFields::default(), &s)
-                .is_err()
-        );
-        assert_eq!(layout, before);
     }
     #[test]
-    fn batch_geometry_does_not_copy_individual_label_settings() {
-        let mut layout = batch_layout();
-        layout.bins[0].scoop = false;
-        layout.bins[0].label.size = 7.;
-        layout.bins[0].label.offset = [1., 2.];
-        let labels: Vec<_> = layout.bins.iter().map(|b| b.label.clone()).collect();
-        layout
-            .apply_batch(1, &[2, 3], &BatchFields::default(), &Selection::default())
-            .unwrap();
-        assert_eq!(
-            labels,
+    fn shared_depth_changes_reject_overlap_or_bounds_atomically() {
+        let selection = Selection::default();
+        let mut layout = Layout::default();
+        layout.add(&selection, None).unwrap();
+        layout.add(&selection, None).unwrap();
+        layout.bins[1].cell = [0, 1];
+        let before = layout.clone();
+        let settings = SharedConfig {
+            depth_cells: 2,
+            ..layout.shared.clone()
+        };
+        assert!(layout.set_shared(settings.clone(), &selection).is_err());
+        assert_eq!(layout, before);
+        layout.bins[1].cell = [1, 2];
+        let before = layout.clone();
+        assert!(layout.set_shared(settings.clone(), &selection).is_err());
+        assert_eq!(layout, before);
+        layout.bins[1].cell = [1, 0];
+        layout.set_shared(settings, &selection).unwrap();
+        assert!(layout.bins.iter().all(|b| b.span[1] == 2));
+        layout.add(&selection, None).unwrap();
+        assert_eq!(layout.bins.last().unwrap().span[1], 2);
+    }
+    #[test]
+    fn old_presets_unify_settings_and_preserve_text_and_positions() {
+        let data = r#"
+[[bins]]
+id=2
+cell=[1,0]
+span=[1,1]
+scoop=true
+[bins.label]
+enabled=false
+text="second"
+style="Raised"
+[[bins]]
+id=1
+cell=[0,0]
+span=[1,2]
+scoop=false
+detachable_label=true
+[bins.label]
+enabled=true
+text="M3"
+style="Engraved"
+depth=0.2
+"#;
+        let layout: Layout = toml::from_str(data).unwrap();
+        assert_eq!(layout.shared.depth_cells, 1);
+        assert!(!layout.shared.scoop);
+        assert!(layout.shared.detachable_label);
+        assert_eq!(layout.bins[0].cell, [1, 0]);
+        assert_eq!(layout.bins[0].label.text, "second");
+        assert!(!layout.bins[0].label.enabled);
+        assert_eq!(layout.bins[1].label.text, "M3");
+        assert!(
             layout
                 .bins
                 .iter()
-                .map(|b| b.label.clone())
-                .collect::<Vec<_>>()
+                .all(|b| SharedConfig::from_bin(b) == layout.shared)
         );
-        assert!(layout.bins.iter().all(|b| !b.scoop));
+        assert_eq!(
+            layout,
+            toml::from_str(&toml::to_string(&layout).unwrap()).unwrap()
+        );
     }
     #[test]
     fn four_unit_bins_fit_real_one_floor_drawers() {
@@ -1117,6 +1180,7 @@ mod tests {
                             },
                             ..Default::default()
                         }],
+                        ..Default::default()
                     };
                     layout.sync_bom(&mut items);
                     apply_preview(&mut scene, home, &layout, &selection, &items, false, None)
@@ -1447,7 +1511,7 @@ mod tests {
         let s = Selection::default();
         let b = Bin::default();
         let draft = preview_mesh(dir.path(), &b, &s).unwrap();
-        assert!(draft.vertices.len() < 300);
+        assert!(draft.vertices.len() < 600, "curved draft stays lightweight");
         assert!(
             draft
                 .vertices
@@ -1589,6 +1653,9 @@ mod tests {
         let curved = script(home, &bin, &selection).unwrap();
         assert_ne!(plain, curved);
         assert!(curved.contains("scoop_percent=1"));
+        assert!(curved.contains("rotate([0,0,180])"));
+        assert!(curved.contains("tab_angle=90"));
+        assert!(plain.contains("tab_angle=270"));
         assert_eq!(
             bin,
             toml::from_str::<Bin>(&toml::to_string(&bin).unwrap()).unwrap()
@@ -1599,6 +1666,110 @@ mod tests {
         assert_eq!(plain, script(home, &bin, &selection).unwrap());
     }
 
+    #[test]
+    fn scoop_proxy_is_opposite_rear_label_and_matches_label_height() {
+        let selection = Selection::default();
+        let mut bin = Bin {
+            scoop: false,
+            tab: false,
+            ..Default::default()
+        };
+        let shell = proxy(&bin, &selection).unwrap();
+        bin.tab = true;
+        let rear = proxy(&bin, &selection).unwrap();
+        let (offset, top) = label_seat(&bin, &selection, &rear).unwrap();
+        let shelf = &rear.vertices[shell.vertices.len()..];
+        assert!(shelf.iter().all(|v| v.position[2] > 0.));
+        let shelf_top = shelf
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let shelf_min = shelf
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::INFINITY, f32::min);
+        let shelf_max = shelf
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((shelf_top - top).abs() < 0.001);
+        assert!(((shelf_min + shelf_max) / 2. + offset).abs() < 0.001);
+        bin.scoop = true;
+        let front = proxy(&bin, &selection).unwrap();
+        assert!(front.vertices.len() > rear.vertices.len());
+        assert!(
+            front.vertices[rear.vertices.len()..]
+                .iter()
+                .all(|v| v.position[2] < 0.)
+        );
+        assert_eq!(front.min, rear.min);
+        assert_eq!(front.max, rear.max);
+    }
+    #[test]
+    fn real_scoop_is_at_front_and_preserves_rear_shelf() {
+        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
+            return;
+        }
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let selection = Selection::default();
+        let bins: Vec<_> = [([1, 1], true), ([1, 2], true), ([1, 1], false)]
+            .into_iter()
+            .flat_map(|(span, tab)| {
+                [false, true].map(|scoop| Bin {
+                    span,
+                    tab,
+                    scoop,
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let meshes =
+            generate_many(home, &bins.iter().collect::<Vec<_>>(), &selection, None).unwrap();
+        let out = home.join("output/scoop-direction");
+        std::fs::create_dir_all(&out).unwrap();
+        use manifold_rust::{
+            linalg::{Vec2 as D2, Vec3 as D3},
+            manifold::Manifold,
+        };
+        let rear_mask = Manifold::extrude(
+            &vec![vec![
+                D2::new(-1000., -1000.),
+                D2::new(1000., -1000.),
+                D2::new(1000., 0.),
+                D2::new(-1000., 0.),
+            ]],
+            2000.,
+            0,
+            0.,
+            D2::new(1., 1.),
+        )
+        .translate(D3::new(0., 0., -1000.));
+        for (bins, meshes) in bins.chunks_exact(2).zip(meshes.chunks_exact(2)) {
+            let plain = crate::label::solid(&meshes[0]).unwrap();
+            let curved = crate::label::solid(&meshes[1]).unwrap();
+            assert!((meshes[0].min - meshes[1].min).length() < 0.005);
+            assert!((meshes[0].max - meshes[1].max).length() < 0.005);
+            let added = curved.difference(&plain);
+            assert!(added.volume() > 1.);
+            assert!(
+                added.intersection(&rear_mask).volume().abs() < 0.001,
+                "added scoop volume belongs at print +Y / viewer -Z, opposite rear shelf"
+            );
+            assert!(
+                plain.difference(&curved).volume().abs() < 0.02,
+                "rear label shelf and base remain unchanged"
+            );
+            assert_eq!(curved.decompose().len(), 1);
+            crate::label::write_stl(
+                &meshes[1],
+                &out.join(format!(
+                    "bin-{}x{}-tab-{}-front-scoop.stl",
+                    bins[1].span[0], bins[1].span[1], bins[1].tab
+                )),
+            )
+            .unwrap();
+        }
+    }
     #[test]
     fn scoop_geometry_keeps_mounting_bounds_and_adds_material() {
         if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
@@ -1677,6 +1848,7 @@ mod tests {
                 },
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let out = home.join("output/gridfinity");
         std::fs::create_dir_all(&out).unwrap();

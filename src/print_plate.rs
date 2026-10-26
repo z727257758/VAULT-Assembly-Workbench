@@ -1,6 +1,49 @@
 //! P1S print-bed packing and Bambu project settings. No assembly transforms.
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
+pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
+fn generated_color_type(path: &str) -> Option<(&'static str, u32)> {
+    let file = path
+        .strip_prefix(crate::gridfinity::PREFIX)?
+        .strip_suffix(".stl")?;
+    let (key, id) = if let Some(id) = file.strip_prefix("Gridfinity-") {
+        (BIN_COLOR_KEY, id)
+    } else {
+        (LABEL_COLOR_KEY, file.strip_prefix("Cullenect-")?)
+    };
+    let id = id.parse::<u32>().ok()?;
+    (id > 0).then_some((key, id))
+}
+/// Generated bins and removable labels each share an assignment across all IDs.
+pub fn color_key(path: &str) -> &str {
+    generated_color_type(path).map_or(path, |(key, _)| key)
+}
+fn assignment(map: &std::collections::BTreeMap<String, u32>, path: &str) -> Option<u32> {
+    let key = color_key(path);
+    map.get(key).copied().or_else(|| {
+        if key == path {
+            return None;
+        }
+        // Older presets stored one assignment per ID. Use the lowest configured
+        // ID consistently until the next edit consolidates the whole type.
+        map.iter()
+            .filter_map(|(p, slot)| {
+                generated_color_type(p)
+                    .filter(|(family, _)| *family == key)
+                    .map(|(_, id)| (id, *slot))
+            })
+            .min_by_key(|(id, _)| *id)
+            .map(|(_, slot)| slot)
+    })
+}
+fn set_assignment(map: &mut std::collections::BTreeMap<String, u32>, path: &str, slot: u32) {
+    let key = color_key(path).to_owned();
+    map.retain(|p, _| color_key(p) != key);
+    if slot != 0 {
+        map.insert(key, slot);
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -73,17 +116,25 @@ impl Config {
         }
         Ok(())
     }
+    pub fn part_assignment(&self, path: &str) -> u32 {
+        assignment(&self.part_filaments, path).unwrap_or(0)
+    }
+    pub fn text_assignment(&self, path: &str) -> u32 {
+        assignment(&self.text_filaments, path).unwrap_or(0)
+    }
+    pub fn set_part_slot(&mut self, path: &str, slot: u32) {
+        set_assignment(&mut self.part_filaments, path, slot);
+    }
+    pub fn set_text_slot(&mut self, path: &str, slot: u32) {
+        set_assignment(&mut self.text_filaments, path, slot);
+    }
     pub fn slot(&self, path: &str) -> u32 {
-        self.part_filaments
-            .get(path)
-            .copied()
+        assignment(&self.part_filaments, path)
             .unwrap_or(self.filament)
             .clamp(1, 6)
     }
     pub fn text_slot(&self, path: &str) -> u32 {
-        self.text_filaments
-            .get(path)
-            .copied()
+        assignment(&self.text_filaments, path)
             .unwrap_or_else(|| self.slot(path))
             .clamp(1, 6)
     }
@@ -488,6 +539,67 @@ pub fn plate_origin(plate: usize, count: usize) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_type_colors_follow_future_ids_and_keep_text_separate() {
+        let a = crate::gridfinity::Bin::default();
+        let b = crate::gridfinity::Bin {
+            id: 2,
+            ..Default::default()
+        };
+        let future = crate::gridfinity::Bin {
+            id: 99,
+            ..Default::default()
+        };
+        let mut c = Config::default();
+        c.set_part_slot(&a.path(), 3);
+        c.set_part_slot(&a.label_path(), 4);
+        c.set_text_slot(&b.label_path(), 2);
+        for bin in [&a, &b, &future] {
+            assert_eq!(c.slot(&bin.path()), 3);
+            assert_eq!(c.slot(&bin.label_path()), 4);
+            assert_eq!(c.text_slot(&bin.label_path()), 2);
+            assert_eq!(c.text_slot(&bin.path()), 3);
+            assert_eq!(c.color(&bin.label_path()), c.slot_color(4));
+        }
+        c.set_part_slot(crate::label::PATH, 6);
+        let round: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(round.slot(&future.path()), 3);
+        assert_eq!(round.text_slot(&future.label_path()), 2);
+        assert_eq!(round.slot(crate::label::PATH), 6);
+        c.set_part_slot(&b.label_path(), 0);
+        assert_eq!(c.slot(&a.label_path()), c.filament);
+        assert_eq!(c.text_slot(&a.label_path()), 2);
+        c.set_text_slot(&future.label_path(), 0);
+        assert_eq!(c.text_slot(&a.label_path()), c.filament);
+        assert_eq!(c.slot(&a.path()), 3);
+    }
+    #[test]
+    fn old_generated_assignments_converge_by_id_and_reset_without_resurrection() {
+        let mut c = Config::default();
+        let first = "generated/gridfinity/Cullenect-2.stl";
+        let later = "generated/gridfinity/Cullenect-10.stl";
+        c.part_filaments.insert(later.into(), 5);
+        c.part_filaments.insert(first.into(), 3);
+        c.part_filaments.insert("other.stl".into(), 6);
+        assert_eq!(c.part_assignment(first), 3);
+        assert_eq!(c.part_assignment(later), 3);
+        c.set_part_slot(later, 4);
+        assert_eq!(c.slot(first), 4);
+        assert!(!c.part_filaments.contains_key(first));
+        assert!(!c.part_filaments.contains_key(later));
+        assert_eq!(c.part_filaments.get(LABEL_COLOR_KEY), Some(&4));
+        c.set_part_slot(first, 0);
+        assert_eq!(c.slot(later), c.filament);
+        assert_eq!(c.slot("other.stl"), 6);
+        assert_eq!(
+            color_key("library/Gridfinity-2.stl"),
+            "library/Gridfinity-2.stl"
+        );
+        assert_eq!(
+            color_key("generated/gridfinity/Cullenect-custom.stl"),
+            "generated/gridfinity/Cullenect-custom.stl"
+        );
+    }
     #[test]
     fn labels_have_dedicated_plates_even_with_identical_materials() {
         use PlateGroup::{RemovableLabel, Standard};
