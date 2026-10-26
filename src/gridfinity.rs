@@ -91,14 +91,15 @@ pub fn grid_for(s: &Selection, path: &str) -> Result<[u32; 2], String> {
 }
 pub fn max_units(s: &Selection) -> Result<u32, String> {
     // Drawer internal heights measured from the source floor to its rim.
-    // Reserve 1.3 mm seating offset, 4.4 mm nominal lip, 0.8 mm text, 2 mm clearance.
+    // Rebuilt measures 7*U + 3.55 mm overall. Text stays below the stacking rim.
+    // Reserve 1.3 mm seating offset and at least 1.5 mm above the actual rim.
     let clear = match s.height.as_str() {
         "1F" => 34.5_f32,
         "2F" => 82.5,
         "4F" => 178.5,
         _ => return Err("无效抽屉层高".into()),
     };
-    Ok(((clear - 1.3 - 4.4 - 0.8 - 2.) / 7.).floor() as u32)
+    Ok(((clear - 1.3 - 3.55 - 1.5) / 7.).floor() as u32)
 }
 pub fn units(b: &Bin, s: &Selection) -> Result<u32, String> {
     Ok(if b.auto_height {
@@ -847,6 +848,91 @@ pub fn apply_preview(
 mod tests {
     use super::*;
     #[test]
+    fn four_unit_bins_fit_real_one_floor_drawers() {
+        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
+            return;
+        }
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
+        for width in ["S", "M", "L"] {
+            let selection = Selection {
+                width: width.into(),
+                height: "1F".into(),
+                depth: 3,
+                ..Default::default()
+            };
+            assert_eq!(max_units(&selection).unwrap(), 4);
+            let plates: Vec<_> = catalog
+                .accessories(&selection)
+                .into_iter()
+                .filter(|e| e.path.contains("/Gridfinity Baseplate/"))
+                .collect();
+            assert!(!plates.is_empty());
+            for plate in plates {
+                for detachable in [false, true] {
+                    let mut items = catalog.bom(&selection);
+                    crate::catalog::Catalog::set_accessory(&mut items, plate.path.clone(), true, 1);
+                    let mut scene =
+                        Scene::load(&catalog.root, &items, "4U clearance".into(), true).unwrap();
+                    let layout = Layout {
+                        baseplate: plate.path.clone(),
+                        bins: vec![Bin {
+                            detachable_label: detachable,
+                            label: crate::label::Config {
+                                enabled: true,
+                                text: "M3".into(),
+                                font: crate::label::Font::ArialBold,
+                                size: 4.,
+                                depth: 0.4,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }],
+                    };
+                    layout.sync_bom(&mut items);
+                    apply_preview(&mut scene, home, &layout, &selection, &items, false, None)
+                        .unwrap();
+                    let drawer = scene
+                        .parts
+                        .iter()
+                        .find(|p| p.pose.path.contains("/Boxes/"))
+                        .unwrap();
+                    let ceiling = drawer
+                        .pose
+                        .matrix(0.)
+                        .transform_point3(Vec3::new(0., drawer.mesh.max.y, 0.))
+                        .y;
+                    for part in scene
+                        .parts
+                        .iter()
+                        .filter(|p| p.pose.path.starts_with(PREFIX))
+                    {
+                        let top = part
+                            .mesh
+                            .vertices
+                            .iter()
+                            .map(|v| {
+                                part.pose
+                                    .matrix(0.)
+                                    .transform_point3(Vec3::from(v.position))
+                                    .y
+                            })
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        assert!(
+                            ceiling - top >= 1.5,
+                            "{width} {} gap {}",
+                            plate.path,
+                            ceiling - top
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn detachable_real_geometry_and_export() {
         if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
             return;
@@ -1162,7 +1248,7 @@ mod tests {
         layout.bins[0].span = [4, 1];
         assert!(layout.validate(&s).is_err());
         layout.bins[0].span = [1, 1];
-        for (height, expected) in [("1F", 3), ("2F", 10), ("4F", 24)] {
+        for (height, expected) in [("1F", 4), ("2F", 10), ("4F", 24)] {
             let selection = Selection {
                 height: height.into(),
                 ..s.clone()
@@ -1171,6 +1257,8 @@ mod tests {
         }
         layout.bins[0].auto_height = false;
         layout.bins[0].height_units = 4;
+        assert!(layout.validate(&s).is_ok());
+        layout.bins[0].height_units = 5;
         assert!(layout.validate(&s).is_err());
         let mut bom = vec![];
         layout.sync_bom(&mut bom);
