@@ -88,12 +88,81 @@ impl Drag {
         Candidate { bin: b, cell: lo }
     }
 }
+struct BatchPanel {
+    all: bool,
+    targets: std::collections::BTreeSet<u32>,
+    fields: gridfinity::BatchFields,
+    message: Option<Result<usize, String>>,
+}
+impl Default for BatchPanel {
+    fn default() -> Self {
+        Self {
+            all: true,
+            targets: Default::default(),
+            fields: Default::default(),
+            message: None,
+        }
+    }
+}
 #[derive(Default)]
 pub struct Editor {
+    batch: BatchPanel,
     drag: Option<Drag>,
     pub error: Option<String>,
 }
 impl Editor {
+    pub fn batch_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: &mut Layout,
+        s: &Selection,
+        selected: Option<u32>,
+    ) {
+        egui::CollapsingHeader::new("批量设置小盒参数").default_open(true).show(ui, |ui| {
+            let Some(source)=selected.and_then(|id|layout.bins.iter().find(|b|b.id==id)).cloned() else {
+                ui.label("先在网格中选择一个盒子，作为参数来源。"); return;
+            };
+            ui.label(format!("以盒子 {} 的当前参数为来源；标签文本和文字启用状态逐盒保留。",source.id));
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.batch.fields.span,"宽度 / 深度");
+                ui.checkbox(&mut self.batch.fields.height,"自动高度 / 高度 U");
+                ui.checkbox(&mut self.batch.fields.scoop,"取物圆弧");
+                ui.checkbox(&mut self.batch.fields.tab,"标签台 / 可拆结构");
+                ui.checkbox(&mut self.batch.fields.lettering,"字体 / 凹凸字 / 字号 / 刻深");
+            });
+            ui.small("宽深不默认同步；改变宽深会保留位置，发生重叠或越界时整次取消。文字样式包含偏移，不复制文本。");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.batch.all,true,"全部其他盒子");
+                ui.radio_value(&mut self.batch.all,false,"勾选目标盒子");
+            });
+            self.batch.targets.retain(|id|layout.bins.iter().any(|b|b.id==*id));
+            if !self.batch.all {
+                ui.horizontal(|ui| {
+                    if ui.small_button("全选目标").clicked() {self.batch.targets=layout.bins.iter().filter(|b|b.id!=source.id).map(|b|b.id).collect();}
+                    if ui.small_button("清空目标").clicked() {self.batch.targets.clear();}
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for b in layout.bins.iter().filter(|b|b.id!=source.id) {
+                        let mut checked=self.batch.targets.contains(&b.id);
+                        let caption=if b.label.active() {format!("盒子 {} · {}",b.id,b.label.text.replace('\n'," / "))} else {format!("盒子 {}",b.id)};
+                        if ui.checkbox(&mut checked,caption).changed() {
+                            if checked {self.batch.targets.insert(b.id);} else {self.batch.targets.remove(&b.id);}
+                        }
+                    }
+                });
+            }
+            let targets: Vec<_>=layout.bins.iter().filter(|b|b.id!=source.id && (self.batch.all || self.batch.targets.contains(&b.id))).map(|b|b.id).collect();
+            if ui.add_enabled(!targets.is_empty() && self.batch.fields.any() && !self.active(),egui::Button::new(format!("应用到 {} 个盒子",targets.len()))).clicked() {
+                self.batch.message=Some(layout.apply_batch(source.id,&targets,&self.batch.fields,s));
+            }
+            if let Some(message)=&self.batch.message {
+                match message {
+                    Ok(n)=>{ui.colored_label(Color32::LIGHT_GREEN,format!("已同步 {n} 个盒子；各盒标签文本保持原样。"));}
+                    Err(e)=>{ui.colored_label(Color32::LIGHT_RED,format!("批量设置未应用：{e}"));}
+                }
+            }
+        });
+    }
     pub fn cancel(&mut self) {
         self.drag = None;
     }
@@ -384,6 +453,115 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_buttons_apply_all_or_checked_targets_without_copying_text() {
+        fn frame(
+            ctx: &egui::Context,
+            editor: &mut Editor,
+            layout: &mut Layout,
+            time: &mut f64,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            *time += 0.1;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 1000.))),
+                    time: Some(*time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        editor.batch_ui(ui, layout, &Selection::default(), Some(1))
+                    });
+                },
+            )
+        }
+        fn text_center(out: &egui::FullOutput, text: &str) -> Pos2 {
+            out.shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::epaint::Shape::Text(t) = &shape.shape {
+                        (t.galley.text() == text)
+                            .then(|| Rect::from_min_size(t.pos, t.galley.size()).center())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| panic!("missing UI control: {text}"))
+        }
+        fn click(
+            ctx: &egui::Context,
+            editor: &mut Editor,
+            layout: &mut Layout,
+            time: &mut f64,
+            text: &str,
+        ) -> egui::FullOutput {
+            let out = frame(ctx, editor, layout, time, vec![]);
+            let pos = text_center(&out, text);
+            frame(
+                ctx,
+                editor,
+                layout,
+                time,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            frame(
+                ctx,
+                editor,
+                layout,
+                time,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            )
+        }
+        let ctx = egui::Context::default();
+        let mut time = 0.;
+        let mut editor = Editor::default();
+        let mut layout = Layout {
+            bins: (0..3)
+                .map(|i| Bin {
+                    id: i + 1,
+                    cell: [i, 0],
+                    label: crate::label::Config {
+                        enabled: false,
+                        text: format!("unique-{i}"),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        layout.bins[0].scoop = false;
+        frame(&ctx, &mut editor, &mut layout, &mut time, vec![]);
+        click(&ctx, &mut editor, &mut layout, &mut time, "应用到 2 个盒子");
+        assert!(layout.bins.iter().all(|b| !b.scoop));
+        assert!(matches!(editor.batch.message, Some(Ok(2))));
+        layout.bins[1].scoop = true;
+        layout.bins[2].scoop = true;
+        click(&ctx, &mut editor, &mut layout, &mut time, "勾选目标盒子");
+        click(&ctx, &mut editor, &mut layout, &mut time, "盒子 2");
+        click(&ctx, &mut editor, &mut layout, &mut time, "应用到 1 个盒子");
+        assert!(!layout.bins[1].scoop);
+        assert!(layout.bins[2].scoop);
+        for (i, b) in layout.bins.iter().enumerate() {
+            assert_eq!(b.label.text, format!("unique-{i}"));
+            assert!(!b.label.enabled);
+        }
+    }
     struct Harness {
         ctx: egui::Context,
         editor: Editor,

@@ -60,6 +60,31 @@ impl Bin {
         format!("{PREFIX}Gridfinity-{}.stl", self.id)
     }
 }
+/// Explicit batch fields; identity, placement and individual text are never copied.
+#[derive(Clone, Debug)]
+pub struct BatchFields {
+    pub span: bool,
+    pub height: bool,
+    pub scoop: bool,
+    pub tab: bool,
+    pub lettering: bool,
+}
+impl Default for BatchFields {
+    fn default() -> Self {
+        Self {
+            span: false,
+            height: true,
+            scoop: true,
+            tab: true,
+            lettering: false,
+        }
+    }
+}
+impl BatchFields {
+    pub fn any(&self) -> bool {
+        self.span || self.height || self.scoop || self.tab || self.lettering
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
@@ -109,6 +134,73 @@ pub fn units(b: &Bin, s: &Selection) -> Result<u32, String> {
     })
 }
 impl Layout {
+    /// Apply to a candidate layout and commit only if every target remains valid.
+    pub fn apply_batch(
+        &mut self,
+        source: u32,
+        targets: &[u32],
+        fields: &BatchFields,
+        s: &Selection,
+    ) -> Result<usize, String> {
+        let template = self
+            .bins
+            .iter()
+            .find(|b| b.id == source)
+            .cloned()
+            .ok_or("来源盒子不存在")?;
+        if !fields.any() {
+            return Err("请勾选要批量同步的参数".into());
+        }
+        let mut next = self.clone();
+        let mut count = 0;
+        for id in targets
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if id == source {
+                continue;
+            }
+            let b = next
+                .bins
+                .iter_mut()
+                .find(|b| b.id == id)
+                .ok_or("目标盒子不存在")?;
+            if fields.span {
+                b.span = template.span;
+            }
+            if fields.height {
+                b.auto_height = template.auto_height;
+                b.height_units = template.height_units;
+            }
+            if fields.scoop {
+                b.scoop = template.scoop;
+            }
+            if fields.tab {
+                b.tab = template.tab;
+                b.detachable_label = template.detachable_label;
+            }
+            if fields.lettering {
+                let text = std::mem::take(&mut b.label.text);
+                let enabled = b.label.enabled;
+                b.label = template.label.clone();
+                b.label.text = text;
+                b.label.enabled = enabled;
+            }
+            if b.tab && b.label.active() {
+                b.label.validate().map_err(|e| format!("盒子 {id}：{e}"))?;
+                if b.detachable() && b.label.depth > 0.4 {
+                    return Err(format!(
+                        "盒子 {id}：可拆标牌刻深超过 0.4 mm；请先单独调低刻深，或勾选文字样式同步"
+                    ));
+                }
+            }
+            count += 1;
+        }
+        next.validate(s)?;
+        *self = next;
+        Ok(count)
+    }
     pub fn validate(&self, s: &Selection) -> Result<(), String> {
         if self.bins.is_empty() {
             return Ok(());
@@ -847,6 +939,140 @@ pub fn apply_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn batch_layout() -> Layout {
+        Layout {
+            bins: (0..3)
+                .map(|i| Bin {
+                    id: i + 1,
+                    cell: [i, 0],
+                    label: crate::label::Config {
+                        enabled: i != 2,
+                        text: format!("Part {i}"),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn batch_parameters_preserve_text_identity_and_unselected_bins() {
+        let mut layout = batch_layout();
+        layout.bins[0].auto_height = false;
+        layout.bins[0].height_units = 3;
+        layout.bins[0].scoop = false;
+        layout.bins[0].detachable_label = true;
+        layout.bins[0].label.depth = 0.2;
+        layout.bins[0].label.font = crate::label::Font::ArialBold;
+        let before = layout.clone();
+        let fields = BatchFields {
+            lettering: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            layout
+                .apply_batch(1, &[1, 2, 2], &fields, &Selection::default())
+                .unwrap(),
+            1
+        );
+        assert_eq!(layout.bins[0], before.bins[0]);
+        assert_eq!(layout.bins[2], before.bins[2]);
+        let target = &layout.bins[1];
+        assert_eq!(
+            (target.id, target.cell, target.span),
+            (before.bins[1].id, before.bins[1].cell, before.bins[1].span)
+        );
+        assert_eq!(target.label.text, before.bins[1].label.text);
+        assert_eq!(target.label.enabled, before.bins[1].label.enabled);
+        assert!(target.detachable());
+        assert_eq!(target.label.depth, 0.2);
+        assert!(!target.auto_height);
+        assert!(!target.scoop);
+        layout
+            .apply_batch(1, &[2, 3], &fields, &Selection::default())
+            .unwrap();
+        assert!(!layout.bins[2].label.enabled);
+        assert_eq!(layout.bins[2].label.text, before.bins[2].label.text);
+        let round: Layout = toml::from_str(&toml::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(round, layout);
+    }
+    #[test]
+    fn batch_rejects_size_conflicts_and_incompatible_labels_atomically() {
+        let s = Selection::default();
+        let mut layout = batch_layout();
+        layout.bins[0].span = [1, 2];
+        layout.bins[2].cell = [2, 2];
+        let before = layout.clone();
+        assert!(
+            layout
+                .apply_batch(
+                    1,
+                    &[2, 3],
+                    &BatchFields {
+                        span: true,
+                        ..Default::default()
+                    },
+                    &s
+                )
+                .is_err()
+        );
+        assert_eq!(layout, before);
+        layout.bins[0].span = [2, 1];
+        layout.bins[1].cell = [0, 1];
+        layout.bins[2].cell = [1, 1];
+        let before = layout.clone();
+        assert!(
+            layout
+                .apply_batch(
+                    1,
+                    &[2, 3],
+                    &BatchFields {
+                        span: true,
+                        ..Default::default()
+                    },
+                    &s
+                )
+                .is_err()
+        );
+        assert_eq!(layout, before);
+        let mut layout = batch_layout();
+        layout.bins[0].detachable_label = true;
+        layout.bins[0].label.depth = 0.2;
+        let before = layout.clone();
+        assert!(
+            layout
+                .apply_batch(1, &[3, 2], &BatchFields::default(), &s)
+                .is_err()
+        );
+        assert_eq!(layout, before);
+        assert!(
+            layout
+                .apply_batch(1, &[3, 99], &BatchFields::default(), &s)
+                .is_err()
+        );
+        assert_eq!(layout, before);
+    }
+    #[test]
+    fn batch_geometry_does_not_copy_individual_label_settings() {
+        let mut layout = batch_layout();
+        layout.bins[0].scoop = false;
+        layout.bins[0].label.size = 7.;
+        layout.bins[0].label.offset = [1., 2.];
+        let labels: Vec<_> = layout.bins.iter().map(|b| b.label.clone()).collect();
+        layout
+            .apply_batch(1, &[2, 3], &BatchFields::default(), &Selection::default())
+            .unwrap();
+        assert_eq!(
+            labels,
+            layout
+                .bins
+                .iter()
+                .map(|b| b.label.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(layout.bins.iter().all(|b| !b.scoop));
+    }
     #[test]
     fn four_unit_bins_fit_real_one_floor_drawers() {
         if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {

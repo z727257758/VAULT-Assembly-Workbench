@@ -2406,6 +2406,8 @@ impl App {
                 ui.small("俯视：上方为抽屉后部；可以从上方按钮拖入，或在空白网格拖框添加。");
                 self.gridfinity_editor
                     .canvas(ui, &mut draft, &self.selection, &mut selected);
+                ui.separator();
+                self.gridfinity_editor.batch_ui(ui, &mut draft, &self.selection, selected);
                 if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
                     ui.separator();
                     ui.strong(format!("盒子 {}", b.id));
@@ -2438,6 +2440,11 @@ impl App {
                     if b.tab {
                         if ui.checkbox(&mut b.detachable_label, "Cullenect 可拆标牌").changed() && b.detachable_label { b.label.depth = 0.2; }
                         if b.detachable() { ui.small("标牌单独导出；36 × 11 × 1.2 mm。卡扣配合待试打印确认。"); }
+                    }
+                }
+                if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
+                    if b.tab {
+                        ui.strong("本盒标签文本（单独设置）");
                         ui.checkbox(&mut b.label.enabled, "标签文字");
                         if b.label.enabled {
                             ui.add(
