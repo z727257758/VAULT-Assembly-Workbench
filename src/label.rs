@@ -19,6 +19,7 @@ pub enum Style {
     #[default]
     Raised,
     Engraved,
+    Flat,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Font {
@@ -82,7 +83,7 @@ impl Config {
             || self.offset.iter().any(|x| !x.is_finite() || x.abs() > 10.)
         {
             return Err(format!(
-                "字号需为 {}–12 mm（英文/数字最低 4 mm，中文及其他文字最低 5 mm），字高/刻深需为 0.2–0.8 mm，偏移不可超过 10 mm",
+                "字号需为 {}–12 mm（英文/数字最低 4 mm，中文及其他文字最低 5 mm），字高/刻深/颜色层厚需为 0.2–0.8 mm，偏移不可超过 10 mm",
                 self.min_size()
             ));
         }
@@ -363,6 +364,7 @@ pub(crate) fn apply_text(
     let (z, h) = match config.style {
         Style::Raised => (top - 0.12, config.depth as f64 + 0.12),
         Style::Engraved => (top - config.depth as f64, config.depth as f64 + 0.12),
+        Style::Flat => (top - config.depth as f64, config.depth as f64 + 0.12),
     };
     let text = Manifold::extrude(polygons, h, 0, 0., D2::new(1., 1.))
         .translate(D3::new(offset[0], offset[1], z));
@@ -373,6 +375,21 @@ pub(crate) fn apply_text(
     let result = match config.style {
         Style::Raised => base.union(&text),
         Style::Engraved => base.difference(&text),
+        Style::Flat => {
+            // Property discontinuities retain the glyph edges on the coplanar
+            // top surface. Union removes internal interfaces, leaving one closed
+            // manufacturing solid with exactly the original exterior.
+            let ink = base
+                .intersection(&text)
+                .set_properties(1, |p, _, _| p[0] = 0.45);
+            let body = base
+                .difference(&text)
+                .set_properties(1, |p, _, _| p[0] = 1.);
+            if ink.volume() <= 0. || body.volume() <= 0. {
+                return Err("平面文字没有与标签正面正确相交".into());
+            }
+            body.union(&ink)
+        }
     };
     if result.status() != Error::NoError || result.volume() <= 0. {
         return Err(format!("标签布尔运算失败：{:?}", result.status()));
@@ -380,6 +397,7 @@ pub(crate) fn apply_text(
     let delta = result.volume() - base.volume();
     if (config.style == Style::Raised && delta <= 0.)
         || (config.style == Style::Engraved && delta >= 0.)
+        || (config.style == Style::Flat && delta.abs() > 0.01_f64.max(base.volume() * 1e-6))
     {
         return Err("文字没有与标签正面正确相交".into());
     }
@@ -412,6 +430,9 @@ pub(crate) fn apply_text(
                 Style::Engraved => {
                     (center.y - (top as f32 - config.depth)).abs() < 0.001 && normal.y > 0.9
                 }
+                Style::Flat => t.iter().all(|i| {
+                    output.vert_properties[*i as usize * output.num_prop as usize + 3] < 0.9
+                }),
             };
         for p in points {
             min = min.min(p);
@@ -431,6 +452,19 @@ pub(crate) fn apply_text(
         size: Vec3::new(extent.x, extent.z, extent.y),
     }))
 }
+/// Even-odd fill, including counters in glyphs such as A, B, 8 and Chinese text.
+/// Used when an STL cache reload has discarded the preview color property.
+pub(crate) fn flat_text_contains(polygons: &[Vec<D2>], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    for contour in polygons {
+        for (a, b) in contour.iter().zip(contour.iter().cycle().skip(1)) {
+            if (a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
 /// Split the finished solid into disjoint material volumes without changing its shape.
 /// Engraving colors a 0.4 mm floor below the recess; it never fills the recess.
 pub(crate) fn color_regions(
@@ -441,21 +475,13 @@ pub(crate) fn color_regions(
 ) -> Result<Vec<Arc<Mesh>>, String> {
     config.validate()?;
     let polygons = text_polygons(config)?;
-    let floor = match config.style {
-        Style::Raised => top,
-        Style::Engraved => top - config.depth as f64,
+    let (bottom, height) = match config.style {
+        Style::Raised => (top - 0.4, config.depth as f64 + 0.5),
+        Style::Engraved => (top - config.depth as f64 - 0.4, 0.40001),
+        Style::Flat => (top - config.depth as f64, config.depth as f64 + 0.00001),
     };
-    let mask = Manifold::extrude(
-        &polygons,
-        match config.style {
-            Style::Raised => config.depth as f64 + 0.5,
-            Style::Engraved => 0.40001,
-        },
-        0,
-        0.,
-        D2::new(1., 1.),
-    )
-    .translate(D3::new(offset[0], offset[1], floor - 0.4));
+    let mask = Manifold::extrude(&polygons, height, 0, 0., D2::new(1., 1.))
+        .translate(D3::new(offset[0], offset[1], bottom));
     let whole = solid(mesh)?;
     let lettering = whole.intersection(&mask);
     let body = whole.difference(&mask);
@@ -693,7 +719,7 @@ mod tests {
         let mesh = Mesh::load(&file).unwrap();
         let volume = solid(&mesh).unwrap().volume();
         for (case, text) in [("single", "收纳 A8"), ("double", "收纳\nA8")] {
-            for style in [Style::Raised, Style::Engraved] {
+            for style in [Style::Raised, Style::Engraved, Style::Flat] {
                 let config = Config {
                     enabled: true,
                     text: text.into(),
@@ -720,10 +746,10 @@ mod tests {
                     assert!(regions[1].max.y <= mesh.max.y - config.depth + 0.001);
                 }
 
-                assert!(if style == Style::Raised {
-                    v > volume
-                } else {
-                    v < volume
+                assert!(match style {
+                    Style::Raised => v > volume,
+                    Style::Engraved => v < volume,
+                    Style::Flat => (v - volume).abs() < 0.001,
                 });
                 assert!((result.min.y - mesh.min.y).abs() < 0.001);
                 assert!((result.size.x - mesh.size.x).abs() < 0.001);

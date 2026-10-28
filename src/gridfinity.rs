@@ -762,6 +762,15 @@ fn generate_cancel(
                 crate::label::Style::Engraved => {
                     (c.y - (top - b.label.depth)).abs() < 0.001 && tri[0].normal[1] > 0.9
                 }
+                crate::label::Style::Flat => {
+                    (c.y - top).abs() < 0.001
+                        && tri[0].normal[1] > 0.9
+                        && crate::label::flat_text_contains(
+                            &polygons,
+                            c.x as f64,
+                            (-c.z - tab_y) as f64,
+                        )
+                }
             };
         for v in tri {
             v.shade = if lettering { 0.45 } else { 1. };
@@ -1582,25 +1591,26 @@ depth=0.2
         let base_volume = crate::label::solid(&blank).unwrap().volume();
         let mut timings = String::new();
         for (text, style) in [
-            ("电阻\nA1", crate::label::Style::Raised),
-            ("电容\nB8", crate::label::Style::Engraved),
+            ("电阻 A1", crate::label::Style::Raised),
+            ("电容 B8", crate::label::Style::Engraved),
             ("螺丝", crate::label::Style::Raised),
+            ("收纳 B8", crate::label::Style::Flat),
         ] {
             bin.label = crate::label::Config {
                 enabled: true,
                 text: text.into(),
                 style,
-                size: 4.,
+                size: 5.,
                 ..Default::default()
             };
             let start = Instant::now();
             let mesh = generate(home, &bin, &selection).unwrap();
             let elapsed = start.elapsed();
             let volume = crate::label::solid(&mesh).unwrap().volume();
-            assert!(if style == crate::label::Style::Raised {
-                volume > base_volume
-            } else {
-                volume < base_volume
+            assert!(match style {
+                crate::label::Style::Raised => volume > base_volume,
+                crate::label::Style::Engraved => volume < base_volume,
+                crate::label::Style::Flat => (volume - base_volume).abs() < 0.02,
             });
             assert!((mesh.min - blank.min).abs().max_element() < 0.001);
             assert!((mesh.max - blank.max).abs().max_element() < 0.001);

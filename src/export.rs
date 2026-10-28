@@ -526,6 +526,65 @@ endloop
 endfacet
 endsolid t";
     #[test]
+    fn flat_cullenect_color_sample() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/flat-text");
+        std::fs::create_dir_all(&out).unwrap();
+        let bin = crate::gridfinity::Bin {
+            detachable_label: true,
+            label: crate::label::Config {
+                enabled: true,
+                text: "收纳 B8".into(),
+                style: crate::label::Style::Flat,
+                size: 5.,
+                depth: 0.4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let layout = crate::gridfinity::Layout {
+            bins: vec![bin.clone()],
+            ..Default::default()
+        };
+        let item = Bom {
+            path: bin.label_path(),
+            qty: 1,
+            enabled: true,
+            group: "Test".into(),
+        };
+        let generated = [(
+            item.path.clone(),
+            crate::cullenect::label(&bin.label).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+        let mut c = crate::print_plate::Config {
+            center: true,
+            ..Default::default()
+        };
+        c.set_part_slot(&item.path, 3);
+        c.set_text_slot(&item.path, 1);
+        let path = out.join("Cullenect-flat.3mf");
+        write_3mf(
+            &mut File::create(&path).unwrap(),
+            &[(item, PathBuf::new())],
+            &Default::default(),
+            &generated,
+            &c,
+            Some((&layout, &Default::default())),
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let mut config = String::new();
+        zip.by_name("Metadata/model_settings.config")
+            .unwrap()
+            .read_to_string(&mut config)
+            .unwrap();
+        assert_eq!(config.matches("<part ").count(), 2);
+        assert_eq!(config.matches("<plate>").count(), 1);
+        assert!(config.contains(r#"key="extruder" value="3""#));
+        assert!(config.contains(r#"key="extruder" value="1""#));
+    }
+    #[test]
     fn final_vertices_override_stale_size_and_local_origin() {
         let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/export-smoke");
         std::fs::create_dir_all(&out).unwrap();
@@ -710,11 +769,16 @@ endsolid t";
         let root = temp.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("tall.stl"), TRI).unwrap();
-        for multicolor in [false, true] {
+        for (multicolor, style) in [
+            (false, crate::label::Style::Raised),
+            (true, crate::label::Style::Raised),
+            (true, crate::label::Style::Flat),
+        ] {
             let bin = crate::gridfinity::Bin {
                 detachable_label: true,
                 label: crate::label::Config {
                     enabled: multicolor,
+                    style,
                     text: "M3".into(),
                     font: crate::label::Font::ArialBold,
                     size: 4.,
@@ -761,7 +825,9 @@ endsolid t";
             if multicolor {
                 options.plate.set_text_slot(&bin.label_path(), 2);
             }
-            let destination = temp.path().join(format!("separate-{multicolor}.3mf"));
+            let destination = temp
+                .path()
+                .join(format!("separate-{multicolor}-{style:?}.3mf"));
             run_configured(
                 &root,
                 &items,
@@ -995,7 +1061,11 @@ endsolid t";
             enabled: true,
             group: "Label".into(),
         };
-        for style in [crate::label::Style::Raised, crate::label::Style::Engraved] {
+        for style in [
+            crate::label::Style::Raised,
+            crate::label::Style::Engraved,
+            crate::label::Style::Flat,
+        ] {
             let label = crate::label::Config {
                 enabled: true,
                 text: "收纳\nA8".into(),

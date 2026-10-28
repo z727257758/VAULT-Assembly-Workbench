@@ -33,3 +33,7 @@ Bambu Studio 02.05.00.66 checks the convex hull of all non-custom extrusion path
 ## Parallel elongated parts
 
 After safe MaxRects packing, a plate-local preference groups Runner Guide/Slide or repeated copies of another named part with XY aspect ratio >= 3. It tries a single end-aligned parallel band along X and Y, using the actual long axes, existing Brim envelopes and part gap. Other parts stay fixed. Legal candidates are ranked by whole-plate bounding-box area, then remaining short-side space. Rotation locks, exclusions and whole-plate hull clearance remain mandatory. If no band fits, the original placement remains. Membership, materials and plate count never change. Hulls are rebuilt before optional centering, and the final layout also checks pairwise spacing.
+
+## Flush text colors
+
+`label::Style::Flat` partitions text from the top of the original solid down by the configured color depth. The body and lettering are disjoint volumes whose union retains the original shape; neither relief nor an engraved void is added. 3MF uses the existing body/text filament slots and keeps both volumes in one object. STL preserves the flat geometry only. Native preview retains coplanar glyph boundaries via Manifold vertex properties, including glyph holes; the Gridfinity STL cache restores text shading from the actual font outlines. Existing Raised/Engraved settings and defaults remain compatible.

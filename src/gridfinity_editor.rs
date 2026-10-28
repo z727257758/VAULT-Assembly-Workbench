@@ -166,6 +166,7 @@ impl Editor {
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut settings.style, crate::label::Style::Raised, "凸字");
                     ui.radio_value(&mut settings.style, crate::label::Style::Engraved, "凹字");
+                    ui.radio_value(&mut settings.style, crate::label::Style::Flat, "平面分色");
                 });
                 ui.horizontal_wrapped(|ui| {
                     for (font, name) in [
@@ -189,8 +190,15 @@ impl Editor {
                         &mut settings.depth,
                         0.2..=if settings.detachable_label { 0.4 } else { 0.8 },
                     )
-                    .text("统一字高 / 刻深 mm"),
+                    .text(if settings.style == crate::label::Style::Flat {
+                        "颜色层厚 mm"
+                    } else {
+                        "统一字高 / 刻深 mm"
+                    }),
                 );
+                if settings.style == crate::label::Style::Flat {
+                    ui.small("文字与底板齐平；选择不同的文字耗材槽，导出 3MF 保留分色。");
+                }
                 ui.horizontal(|ui| {
                     ui.label("文字偏移 X / Y mm");
                     for offset in &mut settings.offset {

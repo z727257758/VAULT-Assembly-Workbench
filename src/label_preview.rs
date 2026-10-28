@@ -190,7 +190,12 @@ impl Preview {
                 } else {
                     Color32::from_white_alpha(90)
                 };
-                for (offset, color) in [(offset, shadow), (Vec2::ZERO, rgba(ink))] {
+                let layers = if bin.label.style == Style::Flat {
+                    vec![(Vec2::ZERO, rgba(ink))]
+                } else {
+                    vec![(offset, shadow), (Vec2::ZERO, rgba(ink))]
+                };
+                for (offset, color) in layers {
                     let mut shape = egui::Mesh::default();
                     for p in &glyph.points {
                         let i = shape.vertices.len() as u32;
@@ -241,10 +246,10 @@ impl Preview {
             size[0],
             size[1],
             bin.label.size,
-            if bin.label.style == Style::Raised {
-                "凸字"
-            } else {
-                "凹字"
+            match bin.label.style {
+                Style::Raised => "凸字",
+                Style::Engraved => "凹字",
+                Style::Flat => "平面分色 · 颜色层厚",
             },
             bin.label.depth
         ));

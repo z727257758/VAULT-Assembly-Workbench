@@ -114,6 +114,62 @@ pub fn socket(body: &Arc<Mesh>, offset: f32, top: f32) -> Result<Arc<Mesh>, Stri
 mod tests {
     use super::*;
     #[test]
+    fn flat_lettering_preserves_shape_and_has_disjoint_flush_color_volumes() {
+        let c = Config {
+            enabled: true,
+            text: "B8".into(),
+            font: crate::label::Font::ArialBold,
+            size: 4.,
+            depth: 0.4,
+            style: crate::label::Style::Flat,
+            ..Default::default()
+        };
+        let original = blank();
+        let m = label(&c).unwrap();
+        let whole = crate::label::solid(&m).unwrap();
+        assert_eq!(whole.status(), Error::NoError);
+        assert!((whole.volume() - original.volume()).abs() < 0.001);
+        assert!(whole.difference(&original).volume().abs() < 0.001);
+        assert!(original.difference(&whole).volume().abs() < 0.001);
+        assert!((m.size - Vec3::new(36., 11., 1.2)).abs().max_element() < 0.001);
+        let regions = crate::label::color_regions(&m, &c, [0., 0.], 1.2).unwrap();
+        let body = crate::label::solid(&regions[0]).unwrap();
+        let ink = crate::label::solid(&regions[1]).unwrap();
+        assert!(body.intersection(&ink).volume().abs() < 0.001);
+        assert!((body.volume() + ink.volume() - original.volume()).abs() < 0.001);
+        assert!((regions[1].min.y - 0.8).abs() < 0.001);
+        assert!((regions[1].max.y - 1.2).abs() < 0.001);
+        let shaded: Vec<_> = m
+            .vertices
+            .chunks_exact(3)
+            .filter(|t| t[0].shade < 0.9)
+            .collect();
+        assert!(!shaded.is_empty());
+        let mut area = 0.;
+        let polygons = crate::label::text_polygons(&c).unwrap();
+        for tri in shaded {
+            assert!(
+                tri.iter()
+                    .all(|v| (v.position[1] - 1.2).abs() < 0.001 && v.normal[1] > 0.99)
+            );
+            let [a, b, c] = [
+                Vec3::from(tri[0].position),
+                Vec3::from(tri[1].position),
+                Vec3::from(tri[2].position),
+            ];
+            area += (b - a).cross(c - a).length() / 2.;
+            let p = (a + b + c) / 3.;
+            assert!(crate::label::flat_text_contains(
+                &polygons,
+                p.x as f64,
+                -p.z as f64
+            ));
+        }
+        assert!((area as f64 - ink.volume() / 0.4).abs() < 0.001);
+        let saved = toml::to_string(&c).unwrap();
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap(), c);
+    }
+    #[test]
     fn nominal_latch_and_socket_clearance() {
         let plate = blank();
         assert_eq!(plate.status(), Error::NoError);
