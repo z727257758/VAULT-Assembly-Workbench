@@ -22,6 +22,7 @@ mod module_assembly;
 mod paths;
 mod preview;
 mod print_plate;
+mod print_support;
 mod render;
 mod runners;
 mod scene;

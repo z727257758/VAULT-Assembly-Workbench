@@ -50,6 +50,27 @@ impl Bom {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 }
+/// Standard unsplit drawer modules have two lower clip seats, or four on L.
+pub fn module_clip_count(path: &str) -> Option<usize> {
+    let segments: Vec<_> = path.split('/').collect();
+    let ["01. DRAWERS", family, size, "Modules", file] = segments.as_slice() else {
+        return None;
+    };
+    let (width, count) = match *family {
+        "01. S Families" => ("S", 2),
+        "02. M Families" => ("M", 2),
+        "03. L Families" => ("L", 4),
+        _ => return None,
+    };
+    if !(3..=7).any(|depth| *size == format!("{width}{depth}")) {
+        return None;
+    }
+    ["1F", "2F", "4F"]
+        .into_iter()
+        .any(|height| *file == format!("{size} Module {height}.stl"))
+        .then_some(count)
+}
+
 impl Catalog {
     pub fn scan(root: PathBuf) -> Result<Self, String> {
         fn visit(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<(), String> {

@@ -1,5 +1,5 @@
 //! P1S print-bed packing and Bambu project settings. No assembly transforms.
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
@@ -58,6 +58,7 @@ pub struct Config {
     pub infill: u32,
     pub textured: bool,
     pub support_by_name: bool,
+    pub module_clip_supports: bool,
     pub filament: u32,
     pub palette: [[u8; 3]; 6],
     pub part_filaments: std::collections::BTreeMap<String, u32>,
@@ -78,6 +79,7 @@ impl Default for Config {
             infill: 15,
             textured: true,
             support_by_name: true,
+            module_clip_supports: true,
             filament: 1,
             palette: [
                 [22, 22, 22],
@@ -264,21 +266,56 @@ fn subtract(free: &mut Vec<Rect>, used: Rect) {
         .map(|(_, r)| *r)
         .collect();
 }
-fn empty_plate(c: &Config) -> Vec<Rect> {
+// Bambu subtracts this offset when writing G-code. Read the same embedded
+// machine profile that project_json exports; never silently change calibration.
+fn nozzle_offset() -> Result<Vec2, String> {
+    #[derive(Deserialize)]
+    struct Machine {
+        extruder_offset: Vec<String>,
+    }
+    let machine: Machine = serde_json::from_str(include_str!("../config/export/p1s-0.4.json"))
+        .map_err(|e| e.to_string())?;
+    let [offset] = machine.extruder_offset.as_slice() else {
+        return Err("P1S 摆盘只支持单喷嘴偏移配置".into());
+    };
+    let (x, y) = offset.split_once('x').ok_or("无效喷嘴偏移")?;
+    let offset = Vec2::new(
+        x.parse().map_err(|_| "无效喷嘴 X 偏移")?,
+        y.parse().map_err(|_| "无效喷嘴 Y 偏移")?,
+    );
+    if !offset.is_finite() {
+        return Err("无效喷嘴偏移".into());
+    }
+    Ok(offset)
+}
+fn usable_bed(c: &Config, offset: Vec2) -> Rect {
+    // Intersection of model-space bed and machine-space bed translated back
+    // into model coordinates. Both must contain the complete print footprint.
+    let min = offset.max(Vec2::ZERO) + Vec2::splat(c.margin);
+    let max = Vec2::splat(256. - c.margin) + offset.min(Vec2::ZERO);
+    Rect {
+        x: min.x,
+        y: min.y,
+        w: max.x - min.x,
+        h: max.y - min.y,
+    }
+}
+fn empty_plate(c: &Config, offset: Vec2) -> Vec<Rect> {
+    let bed = usable_bed(c, offset);
     let mut free = vec![Rect {
-        x: c.margin - c.gap / 2.,
-        y: c.margin - c.gap / 2.,
-        w: 256. - 2. * c.margin + c.gap,
-        h: 256. - 2. * c.margin + c.gap,
+        x: bed.x - c.gap / 2.,
+        y: bed.y - c.gap / 2.,
+        w: bed.w + c.gap,
+        h: bed.h + c.gap,
     }];
     // P1S front-left keep-out; add the requested clearance around it.
     subtract(
         &mut free,
         Rect {
-            x: -c.gap,
-            y: -c.gap,
-            w: 18. + c.margin + c.gap * 1.5,
-            h: 28. + c.margin + c.gap * 1.5,
+            x: offset.x.min(0.) - c.gap,
+            y: offset.y.min(0.) - c.gap,
+            w: 18. + offset.x.abs() + c.margin + c.gap * 1.5,
+            h: 28. + offset.y.abs() + c.margin + c.gap * 1.5,
         },
     );
     free
@@ -320,7 +357,12 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
     jobs.sort_by(|a, b| {
         (parts[b.0].1.x * parts[b.0].1.y).total_cmp(&(parts[a.0].1.x * parts[a.0].1.y))
     });
-    let mut plates = vec![empty_plate(c)];
+    let offset = nozzle_offset()?;
+    let bed = usable_bed(c, offset);
+    if bed.w <= 0. || bed.h <= 0. {
+        return Err("喷嘴偏移与边距超出可用打印区域".into());
+    }
+    let mut plates = vec![empty_plate(c, offset)];
     let mut placed = Vec::new();
     for (input, copy) in jobs {
         let raw_size = parts[input].1;
@@ -368,13 +410,13 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
             if candidate.is_some() {
                 break;
             }
-            if plates.last().unwrap().len() == empty_plate(c).len()
+            if plates.last().unwrap().len() == empty_plate(c, offset).len()
                 && placed
                     .iter()
                     .all(|p: &Placement| p.plate != plates.len() - 1)
             {
                 return Err(format!(
-                    "{}：{:.1} × {:.1} mm，无法放入 P1S 可用区域；请使用分体版本或调整边距",
+                    "{}：{:.1} × {:.1} mm，无法放入计入喷嘴偏移后的 P1S 可用区域；请使用分体版本或调整边距",
                     parts[input].0, size.x, size.y
                 ));
             }
@@ -384,7 +426,7 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
             if plates.len() >= 36 {
                 return Err("导出超过 36 个打印盘，请减少零件份数".into());
             }
-            plates.push(empty_plate(c));
+            plates.push(empty_plate(c, offset));
         }
         let (_, plate, r, rotated) = candidate.unwrap();
         subtract(&mut plates[plate], r);
@@ -424,10 +466,10 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
             let dx = 128. - (min_x + max_x) / 2.;
             let dy = 128. - (min_y + max_y) / 2.;
             let keepout = Rect {
-                x: 0.,
-                y: 0.,
-                w: 18. + c.margin + c.gap,
-                h: 28. + c.margin + c.gap,
+                x: offset.x.min(0.),
+                y: offset.y.min(0.),
+                w: 18. + offset.x.abs() + c.margin + c.gap,
+                h: 28. + offset.y.abs() + c.margin + c.gap,
             };
             let safe = group.iter().all(|p| {
                 let r = Rect {
@@ -436,10 +478,10 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                     w: p.width,
                     h: p.depth,
                 };
-                r.x >= c.margin - 0.0001
-                    && r.y >= c.margin - 0.0001
-                    && r.right() <= 256. - c.margin + 0.0001
-                    && r.top() <= 256. - c.margin + 0.0001
+                r.x >= bed.x - 0.0001
+                    && r.y >= bed.y - 0.0001
+                    && r.right() <= bed.right() + 0.0001
+                    && r.top() <= bed.top() + 0.0001
                     && !r.intersects(keepout)
             });
             // Rigid translation preserves spacing and brim; keep valid packing if blocked.
@@ -539,6 +581,114 @@ pub fn plate_origin(plate: usize, count: usize) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_machine_safe(layout: &[Placement], c: &Config) {
+        let offset = nozzle_offset().unwrap();
+        assert_eq!(offset, Vec2::new(0., 2.));
+        for p in layout {
+            for origin in [Vec2::ZERO, offset] {
+                let r = Rect {
+                    x: p.x - p.width / 2. - origin.x,
+                    y: p.y - p.depth / 2. - origin.y,
+                    w: p.width,
+                    h: p.depth,
+                };
+                assert!(
+                    r.x >= c.margin - 0.001
+                        && r.y >= c.margin - 0.001
+                        && r.right() <= 256. - c.margin + 0.001
+                        && r.top() <= 256. - c.margin + 0.001,
+                    "Unsafe model/machine footprint: {p:?}, offset {origin:?}"
+                );
+                assert!(!r.intersects(Rect {
+                    x: 0.,
+                    y: 0.,
+                    w: 18.,
+                    h: 28.
+                }));
+            }
+        }
+    }
+    #[test]
+    fn m4_packing_reserves_nozzle_offset_before_rotation_and_centering() {
+        let parts = vec![
+            (
+                "M4 Module 1F".into(),
+                Vec3::new(254.173, 57.009, 188.101),
+                1,
+            ),
+            ("M4 Baseplate".into(), Vec3::new(214.699, 176., 4.), 1),
+            ("Facade Cap".into(), Vec3::new(9.84, 9.84, 3.8), 3),
+            ("Label".into(), Vec3::new(47.857, 20.627, 2.), 1),
+            ("Key Cap".into(), Vec3::new(37.799, 13.172, 11.673), 1),
+        ];
+        for center in [false, true] {
+            for margin in [0., 0.5] {
+                let c = Config {
+                    center,
+                    margin,
+                    ..Default::default()
+                };
+                let layout = arrange(&parts, &c).unwrap();
+                assert_machine_safe(&layout, &c);
+                assert!(
+                    !layout[0].rotated,
+                    "254 mm module cannot fit along offset Y axis"
+                );
+                assert!(layout.iter().any(|p| p.plate > 0));
+                assert!(arrange(&parts, &Config { split: false, ..c }).is_err());
+            }
+        }
+        let c = Config {
+            rotate: false,
+            center: true,
+            brim: 2.,
+            margin: 0.5,
+            ..Default::default()
+        };
+        let layout = arrange(&[("brimmed".into(), Vec3::new(90., 100., 10.), 8)], &c).unwrap();
+        assert_machine_safe(&layout, &c);
+    }
+    #[test]
+    fn nozzle_envelope_handles_both_offset_signs() {
+        let c = Config::default();
+        let area = usable_bed(&c, Vec2::new(-3., 2.));
+        assert_eq!(
+            (area.x, area.y, area.right(), area.top()),
+            (0.5, 2.5, 252.5, 255.5)
+        );
+    }
+    /// Optional external regression fixture: dimensions only, no model library copy.
+    #[test]
+    fn repack_external_plate_fixture() {
+        let Ok(path) = std::env::var("VAULT_PACKING_FIXTURE") else {
+            return;
+        };
+        #[derive(Deserialize)]
+        struct Fixture {
+            config: Config,
+            plates: Vec<Vec<(String, Vec3, u32)>>,
+        }
+        let fixture: Fixture = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut result = Vec::new();
+        let mut offset = 0;
+        for (old_plate, parts) in fixture.plates.iter().enumerate() {
+            let placements = arrange(parts, &fixture.config).unwrap();
+            assert_machine_safe(&placements, &fixture.config);
+            let count = placements.iter().map(|p| p.plate + 1).max().unwrap_or(0);
+            for p in placements {
+                result.push(serde_json::json!({"old_plate":old_plate,"input":p.input,
+                    "plate":p.plate+offset,"x":p.x,"y":p.y,"rotated":p.rotated}));
+            }
+            offset += count;
+        }
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("output/packing-boundary");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("fixed-layout.json"),
+            serde_json::to_vec_pretty(&result).unwrap(),
+        )
+        .unwrap();
+    }
     #[test]
     fn generated_type_colors_follow_future_ids_and_keep_text_separate() {
         let a = crate::gridfinity::Bin::default();
@@ -819,6 +969,7 @@ mod tests {
         .unwrap();
         assert!(result.iter().any(|p| p.plate > 0));
         assert_eq!(result.len(), 15);
+        assert_machine_safe(&result, &c);
         for (i, p) in result.iter().enumerate() {
             let r = Rect {
                 x: p.x - p.width / 2.,

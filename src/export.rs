@@ -249,10 +249,11 @@ fn write_3mf(
         zip.write_all(content.as_bytes()).map_err(err)?;
     }
     zip.start_file("3D/3dmodel.model", options).map_err(err)?;
-    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="VAULT:Generator">VAULT 装配工作台 · P1S exporter</metadata><resources>"#).map_err(err)?;
+    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="BambuStudio:FdmSupportsPaintingVersion">0</metadata><metadata name="VAULT:Generator">VAULT 装配工作台 · P1S exporter</metadata><resources>"#).map_err(err)?;
     let mut sizes = Vec::new();
     let mut resources = Vec::new();
     let mut material_ids = Vec::<Vec<(usize, u32)>>::new();
+    let mut local_supports = Vec::new();
     for (item, source) in inputs {
         let mesh = if let Some(mesh) = generated.get(&item.path) {
             mesh.clone()
@@ -303,18 +304,29 @@ fn write_3mf(
             vec![mesh.clone()]
         };
         let mut ids = Vec::new();
+        let mut painted = false;
         for (i, region) in meshes.into_iter().enumerate() {
             let slot = if i == 0 { base_slot } else { text_slot };
+            let support_mask = if plate.module_clip_supports {
+                crate::catalog::module_clip_count(&item.path)
+                    .map(|count| crate::print_support::module_clips(&region, count))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            painted |= support_mask.iter().any(|&marked| marked);
             ids.push((resources.len() + 1, slot));
             resources.push((
                 region,
                 mesh.min.y,
                 format!("{}{}", item.name(), if i == 0 { "" } else { " · 文字" }),
+                support_mask,
             ));
         }
         material_ids.push(ids);
+        local_supports.push(painted);
     }
-    for (index, (mesh, floor, name)) in resources.iter().enumerate() {
+    for (index, (mesh, floor, name, support_mask)) in resources.iter().enumerate() {
         // Weld by exact source coordinates, preserving triangle order and disconnected bodies.
         let mut map = HashMap::<[u32; 3], usize>::new();
         let mut vertices = Vec::<[f32; 3]>::new();
@@ -341,10 +353,16 @@ fn write_3mf(
             writeln!(zip, r#"<vertex x="{x}" y="{y}" z="{z}"/>"#).map_err(err)?;
         }
         writeln!(zip, "</vertices><triangles>").map_err(err)?;
-        for t in triangles.chunks_exact(3) {
+        for (index, t) in triangles.chunks_exact(3).enumerate() {
+            // Bambu TriangleSelector: unsplit ENFORCER (1 << 2) = hex 4.
+            let paint = if support_mask.get(index) == Some(&true) {
+                r#" paint_supports="4""#
+            } else {
+                ""
+            };
             writeln!(
                 zip,
-                r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
+                r#"<triangle v1="{}" v2="{}" v3="{}"{paint}/>"#,
                 t[0], t[1], t[2]
             )
             .map_err(err)?;
@@ -396,7 +414,9 @@ fn write_3mf(
             r#"<object id="{object}"><metadata key="name" value="{name}"/><metadata key="extruder" value="{}"/>"#,
             plate.slot(&inputs[p.input].0.path)
         );
-        if plate.support_by_name
+        if local_supports[p.input] {
+            config += r#"<metadata key="enable_support" value="1"/><metadata key="support_type" value="tree(manual)"/><metadata key="support_on_build_plate_only" value="1"/>"#;
+        } else if plate.support_by_name
             && inputs[p.input]
                 .0
                 .path
@@ -491,6 +511,128 @@ vertex 0 1 0
 endloop
 endfacet
 endsolid t";
+    #[test]
+    fn local_support_painting_survives_copies_and_respects_toggle() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/custom-supports");
+        std::fs::create_dir_all(&out).unwrap();
+        let temp = tempfile::tempdir_in(out).unwrap();
+        let module = "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl";
+        let key = "Key (Turn On Supports).stl";
+        let inputs: Vec<_> = [module, key]
+            .into_iter()
+            .map(|path| {
+                (
+                    Bom {
+                        path: path.into(),
+                        qty: 2,
+                        enabled: true,
+                        group: "Test".into(),
+                    },
+                    PathBuf::new(),
+                )
+            })
+            .collect();
+        let mesh = std::sync::Arc::new(crate::print_support::tests::fixture());
+        let generated = [module, key]
+            .into_iter()
+            .map(|p| (p.into(), mesh.clone()))
+            .collect();
+        for enabled in [true, false] {
+            let config = crate::print_plate::Config {
+                module_clip_supports: enabled,
+                ..Default::default()
+            };
+            let destination = temp.path().join(format!("supports-{enabled}.3mf"));
+            write_3mf(
+                &mut File::create(&destination).unwrap(),
+                &inputs,
+                &Default::default(),
+                &generated,
+                &config,
+                None,
+            )
+            .unwrap();
+            let mut zip = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+            let mut model = String::new();
+            zip.by_name("3D/3dmodel.model")
+                .unwrap()
+                .read_to_string(&mut model)
+                .unwrap();
+            assert_eq!(
+                model.matches("paint_supports=\"4\"").count(),
+                if enabled { 4 } else { 0 }
+            );
+            assert_eq!(model.matches("<triangle ").count(), 12);
+            assert_eq!(model.matches("<component objectid=\"1\"").count(), 2);
+            let mut settings = String::new();
+            zip.by_name("Metadata/model_settings.config")
+                .unwrap()
+                .read_to_string(&mut settings)
+                .unwrap();
+            assert_eq!(
+                settings
+                    .matches("key=\"enable_support\" value=\"1\"")
+                    .count(),
+                if enabled { 4 } else { 2 }
+            );
+            assert_eq!(
+                settings.matches("tree(manual)").count(),
+                if enabled { 2 } else { 0 }
+            );
+        }
+        let old: crate::print_plate::Config = toml::from_str("support_by_name = false").unwrap();
+        assert!(old.module_clip_supports);
+        let config = crate::print_plate::Config {
+            module_clip_supports: false,
+            ..old
+        };
+        let saved = toml::to_string(&config).unwrap();
+        assert!(
+            !toml::from_str::<crate::print_plate::Config>(&saved)
+                .unwrap()
+                .module_clip_supports
+        );
+    }
+    #[test]
+    fn local_module_support_sample() {
+        let Ok(root) = std::env::var("VAULT_EXPORT_TEST_ROOT") else {
+            return;
+        };
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/custom-supports");
+        std::fs::create_dir_all(&out).unwrap();
+        let item = Bom {
+            path: "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl".into(),
+            qty: 1,
+            enabled: true,
+            group: "Module".into(),
+        };
+        for enabled in [true, false] {
+            let mut options = Options::default();
+            options.plate.module_clip_supports = enabled;
+            options.plate.center = true;
+            let destination = out.join(if enabled {
+                "S3-module-local-supports.3mf"
+            } else {
+                "S3-module-baseline.3mf"
+            });
+            run_configured(
+                Path::new(&root),
+                std::slice::from_ref(&item),
+                &destination,
+                &options,
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+            let mut zip = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+            let mut model = String::new();
+            zip.by_name("3D/3dmodel.model")
+                .unwrap()
+                .read_to_string(&mut model)
+                .unwrap();
+            assert_eq!(model.contains("paint_supports=\"4\""), enabled);
+        }
+    }
     #[test]
     fn removable_labels_export_on_dedicated_plates() {
         let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/cullenect-validation");
@@ -681,6 +823,7 @@ endsolid t";
             "Bambu PETG Basic @BBL X1C"
         );
         assert_eq!(json["printer_settings_id"], "Bambu Lab P1S 0.4 nozzle");
+        assert_eq!(json["extruder_offset"], serde_json::json!(["0x2"]));
     }
     #[test]
     fn legacy_open_bambu_migrates_without_launch_and_settings_roundtrip() {

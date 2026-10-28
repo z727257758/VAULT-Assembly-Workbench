@@ -2680,6 +2680,7 @@ impl App {
                         ui.label(t(z,"按耗材组合分盘，文字与底板同盘；多色打印请在 Bambu Studio 确认 AMS 映射、冲刷和擦拭塔。","Separate plates per color slot; overflow adds plates within that slot."));
                         if ui.button(t(z,"配置零件颜色…","Configure part colors…")).clicked(){self.colors_open=true;}
                         ui.checkbox(&mut p.support_by_name,t(z,"为 Turn On Supports 零件启用支撑","Enable support for Turn On Supports parts"));
+                        ui.checkbox(&mut p.module_clip_supports,t(z,"模块底部卡扣局部支撑","Local supports under module clips")).on_hover_text(t(z,"为识别到的标准 S/M/L Module 底部卡扣写入强制支撑涂绘，使用手动树状支撑；切片后生成，可在 Bambu Studio 修改。","Paint recognized lower clips of standard S/M/L modules with manual tree supports; generated on slicing and editable in Bambu Studio."));
                         ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。保留原始打印朝向，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings. Original print orientation; unsliced. Review supports, filament and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled(!selected.is_empty() && !self.busy && !self.preview.has_pending(),
