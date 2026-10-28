@@ -471,6 +471,135 @@ pub struct Placement {
     pub width: f32,
     pub depth: f32,
 }
+impl Placement {
+    fn footprint(&self) -> Rect {
+        Rect {
+            x: self.x - self.width / 2.,
+            y: self.y - self.depth / 2.,
+            w: self.width,
+            h: self.depth,
+        }
+    }
+}
+fn parallel_family(name: &str, size: Vec3) -> Option<&str> {
+    if size.x.max(size.y) < 3. * size.x.min(size.y) {
+        return None;
+    }
+    Some(crate::catalog::print_alignment_family(name))
+}
+// Optimize within existing plates only: this preference must never increase
+// plate count or change material groups. A group is a parallel, end-aligned band.
+// If the entire band cannot fit safely, preserve the valid MaxRects result.
+fn align_parallel_groups(
+    parts: &[(String, Vec3, u32)],
+    placed: &mut [Placement],
+    c: &Config,
+    offset: Vec2,
+) {
+    let mut groups = std::collections::BTreeMap::<(usize, &str), Vec<usize>>::new();
+    for (i, p) in placed.iter().enumerate() {
+        if let Some(family) = parallel_family(&parts[p.input].0, parts[p.input].1) {
+            groups.entry((p.plate, family)).or_default().push(i);
+        }
+    }
+    for ((plate, _), mut ids) in groups {
+        if ids.len() < 2 {
+            continue;
+        }
+        // Longest first, stable source/copy tie-breaks. Both source orientations
+        // are normalized by long axis; equal rotated flags are not required.
+        ids.sort_by(|&a, &b| {
+            placed[b]
+                .width
+                .max(placed[b].depth)
+                .total_cmp(&placed[a].width.max(placed[a].depth))
+                .then((placed[a].input, placed[a].copy).cmp(&(placed[b].input, placed[b].copy)))
+        });
+        let members: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+        let fixed: Vec<_> = placed
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| p.plate == plate && !members.contains(i))
+            .map(|(_, p)| p.footprint())
+            .collect();
+        let mut free = empty_plate(c, offset);
+        let mut fixed_hull = Vec::new();
+        for r in &fixed {
+            subtract(&mut free, r.expanded(c.gap / 2.));
+            fixed_hull = extend_hull(&fixed_hull, *r);
+        }
+        let long = ids
+            .iter()
+            .map(|&i| placed[i].width.max(placed[i].depth))
+            .fold(0., f32::max);
+        let band = ids
+            .iter()
+            .map(|&i| placed[i].width.min(placed[i].depth))
+            .sum::<f32>()
+            + c.gap * (ids.len() - 1) as f32;
+        let mut best: Option<((f32, f32), Rect, bool)> = None;
+        for horizontal in [true, false] {
+            if !c.rotate
+                && ids.iter().any(|&i| {
+                    let s = parts[placed[i].input].1;
+                    (s.x >= s.y) != horizontal
+                })
+            {
+                continue;
+            }
+            let (w, h) = if horizontal {
+                (long, band)
+            } else {
+                (band, long)
+            };
+            for r in &free {
+                if w + c.gap > r.w + 0.0001 || h + c.gap > r.h + 0.0001 {
+                    continue;
+                }
+                let rect = Rect {
+                    x: r.x + c.gap / 2.,
+                    y: r.y + c.gap / 2.,
+                    w,
+                    h,
+                };
+                let hull = extend_hull(&fixed_hull, rect);
+                if hull_intersects(&hull, hull_keepout(c, offset)) {
+                    continue;
+                }
+                let min = hull
+                    .iter()
+                    .copied()
+                    .fold(Vec2::splat(f32::INFINITY), Vec2::min);
+                let max = hull
+                    .iter()
+                    .copied()
+                    .fold(Vec2::splat(f32::NEG_INFINITY), Vec2::max);
+                let score = ((max.x - min.x) * (max.y - min.y), (r.w - w).min(r.h - h));
+                if best.as_ref().is_none_or(|(old, _, _)| score < *old) {
+                    best = Some((score, rect, horizontal));
+                }
+            }
+        }
+        if let Some((_, rect, horizontal)) = best {
+            let mut along_band = 0.;
+            for i in ids {
+                let p = &mut placed[i];
+                let long = p.width.max(p.depth);
+                let short = p.width.min(p.depth);
+                (p.width, p.depth) = if horizontal {
+                    (long, short)
+                } else {
+                    (short, long)
+                };
+                p.x = rect.x + p.width / 2. + if horizontal { 0. } else { along_band };
+                p.y = rect.y + p.depth / 2. + if horizontal { along_band } else { 0. };
+                let s = parts[p.input].1;
+                p.rotated = (s.x >= s.y) != horizontal;
+                along_band += short + c.gap;
+            }
+        }
+    }
+}
 pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placement>, String> {
     c.validate()?;
     let mut jobs = Vec::new();
@@ -592,6 +721,14 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
             depth: r.h - c.gap,
         });
     }
+    align_parallel_groups(parts, &mut placed, c, offset);
+    // Groups may have moved; centering must use their new hulls.
+    for (plate, hull) in hulls.iter_mut().enumerate() {
+        hull.clear();
+        for p in placed.iter().filter(|p| p.plate == plate) {
+            *hull = extend_hull(hull, p.footprint());
+        }
+    }
     if c.center {
         for (plate, hull) in hulls.iter().enumerate() {
             let group: Vec<_> = placed.iter().filter(|p| p.plate == plate).collect();
@@ -668,6 +805,22 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
         }
         if hull_intersects(&hull, hull_keepout(c, offset)) {
             return Err(format!("第 {} 盘：整盘轮廓凸包进入左前禁放区", plate + 1));
+        }
+    }
+    for (i, p) in placed.iter().enumerate() {
+        for q in &placed[i + 1..] {
+            if p.plate == q.plate
+                && p.footprint()
+                    .expanded(c.gap / 2.)
+                    .intersects(q.footprint().expanded(c.gap / 2.))
+            {
+                return Err(format!(
+                    "第 {} 盘：{} 与 {} 的最终占地间距不足",
+                    p.plate + 1,
+                    parts[p.input].0,
+                    parts[q.input].0
+                ));
+            }
         }
     }
     Ok(placed)
@@ -756,6 +909,165 @@ pub fn plate_origin(plate: usize, count: usize) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runner_plate_forms_a_parallel_aligned_compact_band() {
+        let parts = vec![
+            ("x4 Runner Guide.stl".into(), Vec3::new(27., 185.5, 9.4), 1),
+            (
+                "x4 Runner Slide.stl".into(),
+                Vec3::new(18.221, 160., 8.979),
+                2,
+            ),
+        ];
+        for center in [false, true] {
+            for brim in [0., 2.] {
+                let c = Config {
+                    center,
+                    brim,
+                    ..Default::default()
+                };
+                let result = arrange(&parts, &c).unwrap();
+                assert_eq!(result.len(), 3);
+                assert!(result.iter().all(|p| p.plate == 0));
+                assert_machine_safe(&result, &c);
+                let horizontal = result[0].width > result[0].depth;
+                let anchor = result[0].footprint();
+                for p in &result {
+                    assert_eq!(p.width > p.depth, horizontal);
+                    let r = p.footprint();
+                    assert!(
+                        (if horizontal {
+                            r.x - anchor.x
+                        } else {
+                            r.y - anchor.y
+                        })
+                        .abs()
+                            < 0.001
+                    );
+                }
+                let min = result
+                    .iter()
+                    .flat_map(|p| p.footprint().corners())
+                    .fold(Vec2::splat(f32::INFINITY), Vec2::min);
+                let max = result
+                    .iter()
+                    .flat_map(|p| p.footprint().corners())
+                    .fold(Vec2::splat(f32::NEG_INFINITY), Vec2::max);
+                let size = max - min;
+                assert!(
+                    (size.max_element() - (185.5 + 2. * c.brim_extent().unwrap())).abs() < 0.001
+                );
+                assert!(
+                    (size.min_element()
+                        - (27. + 2. * 18.221 + 12. + 6. * c.brim_extent().unwrap()))
+                    .abs()
+                        < 0.001
+                );
+            }
+        }
+    }
+    #[test]
+    fn parallel_preference_uses_long_axes_and_honors_rotation_lock() {
+        let parts = vec![
+            ("x4 Runner Guide.stl".into(), Vec3::new(27., 185.5, 9.4), 1),
+            (
+                "x4 Runner Slide.stl".into(),
+                Vec3::new(160., 18.221, 8.979),
+                2,
+            ),
+        ];
+        let enabled = arrange(&parts, &Config::default()).unwrap();
+        assert!(enabled.iter().all(|p| p.plate == 0));
+        assert!(
+            enabled
+                .iter()
+                .all(|p| (p.width > p.depth) == (enabled[0].width > enabled[0].depth))
+        );
+        assert_ne!(enabled[0].rotated, enabled[1].rotated);
+        let c = Config {
+            rotate: false,
+            ..Default::default()
+        };
+        let locked = arrange(&parts, &c).unwrap();
+        assert!(locked.iter().all(|p| !p.rotated));
+        assert_machine_safe(&locked, &c);
+        let mut unchanged = locked.clone();
+        align_parallel_groups(&parts, &mut unchanged, &c, nozzle_offset().unwrap());
+        for (a, b) in unchanged.iter().zip(&locked) {
+            assert_eq!(
+                (a.plate, a.x, a.y, a.rotated),
+                (b.plate, b.x, b.y, b.rotated)
+            );
+        }
+    }
+    #[test]
+    fn oversized_parallel_band_preserves_existing_mixed_layout() {
+        let parts = vec![("long rail".into(), Vec3::new(180., 30., 5.), 8)];
+        let c = Config::default();
+        let mut placed: Vec<_> = (0..8)
+            .map(|copy| {
+                let (x, y, width, depth, rotated) = if copy < 6 {
+                    (90.5, 51.5 + copy as f32 * 36., 180., 30., false)
+                } else {
+                    (201.5 + (copy - 6) as f32 * 36., 126.5, 30., 180., true)
+                };
+                Placement {
+                    input: 0,
+                    copy,
+                    plate: 0,
+                    x,
+                    y,
+                    width,
+                    depth,
+                    rotated,
+                }
+            })
+            .collect();
+        assert_machine_safe(&placed, &c);
+        let before = placed.clone();
+        // A parallel band is 282 mm wide; the mixed orientation layout fits.
+        align_parallel_groups(&parts, &mut placed, &c, nozzle_offset().unwrap());
+        for (a, b) in before.iter().zip(&placed) {
+            assert_eq!(
+                (a.x, a.y, a.rotated, a.plate),
+                (b.x, b.y, b.rotated, b.plate)
+            );
+        }
+    }
+    #[test]
+    fn parallel_groups_keep_plates_materials_and_unrelated_parts() {
+        let parts = vec![
+            ("x4 Runner Guide.stl".into(), Vec3::new(27., 185.5, 9.4), 4),
+            (
+                "x4 Runner Slide.stl".into(),
+                Vec3::new(160., 18.221, 8.979),
+                8,
+            ),
+            ("unrelated".into(), Vec3::new(100., 100., 10.), 3),
+        ];
+        let c = Config::default();
+        let mut result = arrange(&parts, &c).unwrap();
+        let before = result.clone();
+        align_parallel_groups(&parts, &mut result, &c, nozzle_offset().unwrap());
+        for (a, b) in before.iter().zip(&result) {
+            assert_eq!((a.input, a.copy, a.plate), (b.input, b.copy, b.plate));
+            if a.input == 2 {
+                assert_eq!((a.x, a.y, a.rotated), (b.x, b.y, b.rotated));
+            }
+        }
+        assert_machine_safe(&result, &c);
+        let separate = arrange_materials(&parts[..2], &[vec![1], vec![2]], &c).unwrap();
+        assert!(separate.iter().all(|a| {
+            separate
+                .iter()
+                .all(|b| a.plate != b.plate || a.input == b.input)
+        }));
+        assert!(parallel_family("square", Vec3::new(20., 20., 2.)).is_none());
+        assert_ne!(
+            parallel_family("unrelated A", Vec3::new(100., 10., 2.)),
+            parallel_family("unrelated B", Vec3::new(100., 10., 2.))
+        );
+    }
     #[test]
     fn individually_clear_parts_can_fail_bambu_whole_plate_hull() {
         // The user's plate 4: the baseplate is left of the cap. Neither part

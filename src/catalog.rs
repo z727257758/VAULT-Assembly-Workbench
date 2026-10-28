@@ -29,6 +29,18 @@ impl Default for Selection {
         }
     }
 }
+/// Stable family key for parallel print placement; unknown parts group only with copies.
+pub fn print_alignment_family(name: &str) -> &str {
+    // The external regression fixture appends the copy number to display names.
+    let name = name
+        .rsplit_once(" #")
+        .filter(|(_, n)| n.parse::<u32>().is_ok())
+        .map_or(name, |(base, _)| base);
+    match name {
+        "x4 Runner Guide.stl" | "x4 Runner Slide.stl" => "@runner-guide-slide",
+        _ => name, // Other elongated parts align with copies of the same part.
+    }
+}
 /// Exposed screw recesses; the label covers one additional recess.
 pub fn facade_cap_count(s: &Selection) -> u32 {
     match (s.width.as_str(), s.height.as_str()) {
