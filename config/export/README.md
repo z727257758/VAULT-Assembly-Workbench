@@ -37,3 +37,7 @@ After safe MaxRects packing, a plate-local preference groups Runner Guide/Slide 
 ## Flush text colors
 
 `label::Style::Flat` partitions text from the top of the original solid down by the configured color depth. The body and lettering are disjoint volumes whose union retains the original shape; neither relief nor an engraved void is added. 3MF uses the existing body/text filament slots and keeps both volumes in one object. STL preserves the flat geometry only. Native preview retains coplanar glyph boundaries via Manifold vertex properties, including glyph holes; the Gridfinity STL cache restores text shading from the actual font outlines. Existing Raised/Engraved settings and defaults remain compatible.
+
+## Face-down flat labels
+
+`flat_text_face_down` defaults to true. Active Flat text on standalone Label.stl or detachable Cullenect labels enables a proper 180-degree X rotation on the whole build instance, followed by the optional packing Z rotation. The shared translation uses the actual final mesh height so the original text surface is at Z=0. Body and text resources and their filament assignments stay unchanged. XY footprint dimensions, keep-outs and plate membership use the same packing rules. Integrated bin shelves, Raised/Engraved text and blank labels remain upright. This print-only 3MF option persists with plate settings; it does not affect assembly/display processing or STL geometry.

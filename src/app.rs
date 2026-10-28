@@ -2676,6 +2676,7 @@ impl App {
                         ui.add(egui::Slider::new(&mut p.gap,0.0..=30.0).text(t(z,"零件间距 mm","Part spacing mm")));
                         ui.add(egui::Slider::new(&mut p.brim,0.0..=10.0).text(t(z,"外侧 Brim mm（0 关闭）","Outer brim mm (0 off)")));
                         ui.checkbox(&mut p.rotate,t(z,"允许平面旋转 90°","Allow 90° rotation on bed"));
+                        ui.checkbox(&mut p.flat_text_face_down,t(z,"平面分色标牌字面朝下","Print flat-color labels face down")).on_hover_text(t(z,"独立 Label 与 Cullenect 可拆标牌的平面文字朝向热床；盒子一体标签台保持原朝向。仅影响 3MF 打印摆盘。","Place flat text against the bed for standalone Label and Cullenect labels. Integral bin shelves keep their orientation. Applies to 3MF print placement only."));
                         ui.checkbox(&mut p.split,t(z,"同色零件放不下时自动增加打印盘","Add plates when one color overflows"));
                         ui.checkbox(&mut p.center,t(z,"每盘零件整体居中","Center each plate’s parts")).on_hover_text(t(z,"保留间距整体居中；若触及禁放区则保留原摆放。","Preserve spacing; keep original placement if centering hits the keep-out."));
                         ui.separator();
@@ -2686,7 +2687,7 @@ impl App {
                         if ui.button(t(z,"配置零件颜色…","Configure part colors…")).clicked(){self.colors_open=true;}
                         ui.checkbox(&mut p.support_by_name,t(z,"为 Turn On Supports 零件启用支撑","Enable support for Turn On Supports parts"));
                         ui.checkbox(&mut p.module_clip_supports,t(z,"模块底部卡扣局部支撑","Local supports under module clips")).on_hover_text(t(z,"为识别到的标准 S/M/L Module 底部卡扣写入强制支撑涂绘，使用手动树状支撑；切片后生成，可在 Bambu Studio 修改。","Paint recognized lower clips of standard S/M/L modules with manual tree supports; generated on slicing and editable in Bambu Studio."));
-                        ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。保留原始打印朝向，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings. Original print orientation; unsliced. Review supports, filament and first layer in Bambu Studio."));
+                        ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。按上述朝向选项摆盘，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings and the orientation options above; unsliced. Review supports, filament and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled(!selected.is_empty() && !self.busy && !self.preview.has_pending(),
                         egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}

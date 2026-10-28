@@ -43,6 +43,16 @@ fn xml(s: &str) -> String {
         .replace('"', "&quot;")
         .replace(char::from(39), "&apos;")
 }
+fn build_orientation(rotated: bool, face_down: bool) -> &'static str {
+    // Rotate 180 degrees about print X, then optionally 90 degrees about Z.
+    // Both are proper rotations: never mirror the lettering or triangle winding.
+    match (rotated, face_down) {
+        (false, false) => "1 0 0 0 1 0 0 0 1",
+        (true, false) => "0 1 0 -1 0 0 0 0 1",
+        (false, true) => "1 0 0 0 -1 0 0 0 -1",
+        (true, true) => "0 1 0 1 0 0 0 0 -1",
+    }
+}
 fn sources(root: &Path, items: &[Bom], destination: &Path) -> Result<Vec<(Bom, PathBuf)>, String> {
     let root = root.canonicalize().map_err(err)?;
     let parent = destination
@@ -254,6 +264,7 @@ fn write_3mf(
     let mut resources = Vec::new();
     let mut material_ids = Vec::<Vec<(usize, u32)>>::new();
     let mut local_supports = Vec::new();
+    let mut face_down = Vec::new();
     for (item, source) in inputs {
         let mesh = if let Some(mesh) = generated.get(&item.path) {
             mesh.clone()
@@ -295,6 +306,20 @@ fn write_3mf(
         } else {
             None
         };
+        let standalone_label = item.path == crate::label::PATH
+            || gridfinity.is_some_and(|(layout, _)| {
+                layout
+                    .bins
+                    .iter()
+                    .any(|b| b.detachable() && b.label_path() == item.path)
+            });
+        face_down.push(
+            plate.flat_text_face_down
+                && standalone_label
+                && text_spec
+                    .as_ref()
+                    .is_some_and(|(config, _, _)| config.style == crate::label::Style::Flat),
+        );
         let meshes = if text_slot != base_slot
             && let Some((config, offset, top)) = text_spec
         {
@@ -452,14 +477,15 @@ fn write_3mf(
         let object = resources.len() + i + 1;
         let [ox, oy] = crate::print_plate::plate_origin(p.plate, plate_count);
         let (x, y) = (ox + p.x, oy + p.y);
-        let rotation = if p.rotated {
-            "0 1 0 -1 0 0 0 0 1"
+        let rotation = build_orientation(p.rotated, face_down[p.input]);
+        let z = if face_down[p.input] {
+            sizes[p.input].z
         } else {
-            "1 0 0 0 1 0 0 0 1"
+            0.
         };
         writeln!(
             zip,
-            r#"<item objectid="{object}" transform="{rotation} {x} {y} 0" printable="1"/>"#
+            r#"<item objectid="{object}" transform="{rotation} {x} {y} {z}" printable="1"/>"#
         )
         .map_err(err)?;
     }
@@ -526,6 +552,238 @@ endloop
 endfacet
 endsolid t";
     #[test]
+    fn face_down_keeps_integral_bin_upright() {
+        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
+            return;
+        }
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out = home.join("output/face-down");
+        std::fs::create_dir_all(&out).unwrap();
+        let bin = crate::gridfinity::Bin {
+            label: crate::label::Config {
+                enabled: true,
+                text: "B8".into(),
+                font: crate::label::Font::ArialBold,
+                size: 4.,
+                depth: 0.4,
+                style: crate::label::Style::Flat,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let selection = Default::default();
+        let mesh = crate::gridfinity::generate(home, &bin, &selection).unwrap();
+        let item = Bom {
+            path: bin.path(),
+            qty: 1,
+            enabled: true,
+            group: "Test".into(),
+        };
+        let generated = [(item.path.clone(), mesh)].into_iter().collect();
+        let layout = crate::gridfinity::Layout {
+            bins: vec![bin],
+            ..Default::default()
+        };
+        let mut c = crate::print_plate::Config {
+            flat_text_face_down: true,
+            ..Default::default()
+        };
+        c.set_part_slot(&item.path, 3);
+        c.set_text_slot(&item.path, 1);
+        let path = out.join("Gridfinity-flat-bin-upright.3mf");
+        write_3mf(
+            &mut File::create(&path).unwrap(),
+            &[(item, PathBuf::new())],
+            &Default::default(),
+            &generated,
+            &c,
+            Some((&layout, &selection)),
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let mut model = String::new();
+        zip.by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model)
+            .unwrap();
+        let t: Vec<f32> = model
+            .split("<item ")
+            .nth(1)
+            .unwrap()
+            .split("transform=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(t[8], 1.);
+        assert_eq!(t[11], 0.);
+    }
+    #[test]
+    fn face_down_rotations_are_proper_for_both_packing_orientations() {
+        for rotated in [false, true] {
+            for down in [false, true] {
+                let m: Vec<f32> = build_orientation(rotated, down)
+                    .split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect();
+                let rotation = glam::Mat3::from_cols_array(&m.try_into().unwrap());
+                assert!((rotation.determinant() - 1.).abs() < 0.0001);
+                let normal = rotation * glam::Vec3::Z;
+                assert_eq!(normal, if down { -glam::Vec3::Z } else { glam::Vec3::Z });
+                let expected = if down {
+                    glam::Vec3::new(2., -3., -5.)
+                } else {
+                    glam::Vec3::new(2., 3., 5.)
+                };
+                let expected = if rotated {
+                    glam::Vec3::new(-expected.y, expected.x, expected.z)
+                } else {
+                    expected
+                };
+                assert_eq!(rotation * glam::Vec3::new(2., 3., 5.), expected);
+            }
+        }
+        let old: crate::print_plate::Config = toml::from_str("rotate = false").unwrap();
+        assert!(old.flat_text_face_down);
+        let disabled = crate::print_plate::Config {
+            flat_text_face_down: false,
+            ..old
+        };
+        let restored: crate::print_plate::Config =
+            toml::from_str(&toml::to_string(&disabled).unwrap()).unwrap();
+        assert!(!restored.flat_text_face_down);
+    }
+    fn resource_points(xml: &str) -> Vec<glam::Vec3> {
+        xml.split("<vertex ")
+            .skip(1)
+            .map(|s| {
+                let coordinate = |key: &str| {
+                    s.split_once(&format!("{key}=\""))
+                        .unwrap()
+                        .1
+                        .split('"')
+                        .next()
+                        .unwrap()
+                        .parse::<f32>()
+                        .unwrap()
+                };
+                glam::Vec3::new(coordinate("x"), coordinate("y"), coordinate("z"))
+            })
+            .collect()
+    }
+    #[test]
+    fn flat_label_copies_flip_together_without_changing_resources() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/face-down");
+        std::fs::create_dir_all(&out).unwrap();
+        let bin = crate::gridfinity::Bin {
+            detachable_label: true,
+            label: crate::label::Config {
+                enabled: true,
+                text: "收纳 B8".into(),
+                style: crate::label::Style::Flat,
+                size: 5.,
+                depth: 0.4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let layout = crate::gridfinity::Layout {
+            bins: vec![bin.clone()],
+            ..Default::default()
+        };
+        let item = Bom {
+            path: bin.label_path(),
+            qty: 2,
+            enabled: true,
+            group: "Test".into(),
+        };
+        let generated = [(
+            item.path.clone(),
+            crate::cullenect::label(&bin.label).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+        let mut c = crate::print_plate::Config {
+            center: true,
+            ..Default::default()
+        };
+        c.set_part_slot(&item.path, 3);
+        c.set_text_slot(&item.path, 1);
+        let inputs = vec![(item, PathBuf::new())];
+        let mut original_resources = None;
+        for down in [false, true] {
+            for rotate in [false, true] {
+                c.flat_text_face_down = down;
+                c.rotate = rotate;
+                let path = out.join(format!("Cullenect-flat-down-{down}-rotate-{rotate}.3mf"));
+                write_3mf(
+                    &mut File::create(&path).unwrap(),
+                    &inputs,
+                    &Default::default(),
+                    &generated,
+                    &c,
+                    Some((&layout, &Default::default())),
+                )
+                .unwrap();
+                let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+                let mut model = String::new();
+                zip.by_name("3D/3dmodel.model")
+                    .unwrap()
+                    .read_to_string(&mut model)
+                    .unwrap();
+                let resources = model.split("<build>").next().unwrap();
+                if let Some(original) = &original_resources {
+                    assert_eq!(original, resources);
+                } else {
+                    original_resources = Some(resources.to_owned());
+                }
+                let ink = model
+                    .split("<object id=\"2\"")
+                    .nth(1)
+                    .unwrap()
+                    .split("</object>")
+                    .next()
+                    .unwrap();
+                let ink = resource_points(ink);
+                let all = resource_points(resources);
+                let items: Vec<_> = model.split("<item ").skip(1).collect();
+                assert_eq!(items.len(), 2);
+                for item in items {
+                    let t: Vec<f32> = item
+                        .split("transform=\"")
+                        .nth(1)
+                        .unwrap()
+                        .split('"')
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .map(|v| v.parse().unwrap())
+                        .collect();
+                    let rotation = glam::Mat3::from_cols_array(&t[..9].try_into().unwrap());
+                    let position = glam::Vec3::new(t[9], t[10], t[11]);
+                    let height_range = |points: &[glam::Vec3]| {
+                        points
+                            .iter()
+                            .map(|v| (rotation * *v + position).z)
+                            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), z| {
+                                (lo.min(z), hi.max(z))
+                            })
+                    };
+                    let (lo, hi) = height_range(&all);
+                    assert!(lo.abs() < 0.001 && (hi - 1.2).abs() < 0.001);
+                    let (lo, hi) = height_range(&ink);
+                    let expected = if down { (0., 0.4) } else { (0.8, 1.2) };
+                    assert!((lo - expected.0).abs() < 0.001 && (hi - expected.1).abs() < 0.001);
+                    assert!((rotation.determinant() - 1.).abs() < 0.001);
+                }
+            }
+        }
+    }
+    #[test]
     fn flat_cullenect_color_sample() {
         let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/flat-text");
         std::fs::create_dir_all(&out).unwrap();
@@ -559,6 +817,7 @@ endsolid t";
         .collect();
         let mut c = crate::print_plate::Config {
             center: true,
+            flat_text_face_down: false,
             ..Default::default()
         };
         c.set_part_slot(&item.path, 3);
@@ -1098,6 +1357,36 @@ endsolid t";
                 .unwrap();
             assert_eq!(model.matches("<component ").count(), 4);
             assert_eq!(model.matches("<item ").count(), 2);
+            for item in model.split("<item ").skip(1) {
+                let t: Vec<f32> = item
+                    .split("transform=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect();
+                assert_eq!(
+                    t[8],
+                    if style == crate::label::Style::Flat {
+                        -1.
+                    } else {
+                        1.
+                    }
+                );
+                assert!(
+                    (t[11]
+                        - if style == crate::label::Style::Flat {
+                            2.00004
+                        } else {
+                            0.
+                        })
+                    .abs()
+                        < 0.001
+                );
+            }
         }
     }
     #[test]
