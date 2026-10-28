@@ -265,7 +265,6 @@ fn write_3mf(
         } else {
             mesh
         };
-        sizes.push(mesh.size);
         let base_slot = plate.slot(&item.path);
         let text_slot = plate.text_slot(&item.path);
         let text_spec = if item.path == crate::label::PATH && label.active() {
@@ -303,6 +302,21 @@ fn write_3mf(
         } else {
             vec![mesh.clone()]
         };
+        // Pack the final manufacturing vertices, including text/material
+        // regions, rather than trusting cached sizes or a centered local origin.
+        let mut min = glam::Vec3::splat(f32::INFINITY);
+        let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+        for vertex in meshes.iter().flat_map(|m| &m.vertices) {
+            let p = glam::Vec3::from(vertex.position);
+            if !p.is_finite() {
+                return Err(format!("{}：导出网格包含无效坐标", item.name()));
+            }
+            min = min.min(p);
+            max = max.max(p);
+        }
+        let extent = max - min;
+        sizes.push(glam::Vec3::new(extent.x, extent.z, extent.y));
+        let origin = glam::Vec3::new((min.x + max.x) / 2., min.y, (min.z + max.z) / 2.);
         let mut ids = Vec::new();
         let mut painted = false;
         for (i, region) in meshes.into_iter().enumerate() {
@@ -318,7 +332,7 @@ fn write_3mf(
             ids.push((resources.len() + 1, slot));
             resources.push((
                 region,
-                mesh.min.y,
+                origin,
                 format!("{}{}", item.name(), if i == 0 { "" } else { " · 文字" }),
                 support_mask,
             ));
@@ -326,14 +340,14 @@ fn write_3mf(
         material_ids.push(ids);
         local_supports.push(painted);
     }
-    for (index, (mesh, floor, name, support_mask)) in resources.iter().enumerate() {
+    for (index, (mesh, origin, name, support_mask)) in resources.iter().enumerate() {
         // Weld by exact source coordinates, preserving triangle order and disconnected bodies.
         let mut map = HashMap::<[u32; 3], usize>::new();
         let mut vertices = Vec::<[f32; 3]>::new();
         let mut triangles = Vec::with_capacity(mesh.vertices.len());
         for v in &mesh.vertices {
             let [x, y, z] = v.position;
-            let point = [x, -z, y - floor]; // undo viewer axis mapping, put source bottom at Z=0
+            let point = [x - origin.x, origin.z - z, y - origin.y]; // centered XY, bottom at Z=0
             let key = point.map(|v| if v == 0. { 0 } else { v.to_bits() });
             let id = *map.entry(key).or_insert_with(|| {
                 let id = vertices.len();
@@ -511,6 +525,61 @@ vertex 0 1 0
 endloop
 endfacet
 endsolid t";
+    #[test]
+    fn final_vertices_override_stale_size_and_local_origin() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/export-smoke");
+        std::fs::create_dir_all(&out).unwrap();
+        let temp = tempfile::tempdir_in(out).unwrap();
+        let inputs = vec![(
+            Bom {
+                path: "shifted.stl".into(),
+                qty: 1,
+                enabled: true,
+                group: "Test".into(),
+            },
+            PathBuf::new(),
+        )];
+        for width in [20., 300.] {
+            let mut mesh = Mesh::parse(TRI.as_bytes()).unwrap();
+            for (v, point) in mesh.vertices.iter_mut().zip([
+                [100., 40., 200.],
+                [100. + width, 40., 200.],
+                [100., 45., 210.],
+            ]) {
+                v.position = point;
+            }
+            // Intentionally leave all cached bounds stale.
+            let generated = [("shifted.stl".into(), std::sync::Arc::new(mesh))]
+                .into_iter()
+                .collect();
+            let destination = temp.path().join(format!("{width}.3mf"));
+            let result = write_3mf(
+                &mut File::create(&destination).unwrap(),
+                &inputs,
+                &Default::default(),
+                &generated,
+                &Default::default(),
+                None,
+            );
+            if width == 300. {
+                assert!(
+                    result.is_err(),
+                    "Oversized actual geometry must not be exported"
+                );
+            } else {
+                result.unwrap();
+                let mut zip = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+                let mut xml = String::new();
+                zip.by_name("3D/3dmodel.model")
+                    .unwrap()
+                    .read_to_string(&mut xml)
+                    .unwrap();
+                assert!(xml.contains(r#"<vertex x="-10" y="5" z="0"/>"#));
+                assert!(xml.contains(r#"<vertex x="10" y="5" z="0"/>"#));
+                assert!(xml.contains(r#"<vertex x="-10" y="-5" z="5"/>"#));
+            }
+        }
+    }
     #[test]
     fn local_support_painting_survives_copies_and_respects_toggle() {
         let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/custom-supports");

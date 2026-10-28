@@ -19,3 +19,13 @@ Preset: `Bambu PETG Basic @BBL X1C`, setting ID `GFSG00_01`, filament ID `GFG00`
 Filament parameter arrays are expanded to all six project slots using the first (Direct Drive Standard) entry for P1S. All inherited filament parameters, including temperature, fan, flow, retraction and filament G-code fields, are resolved into the embedded project template. No Bambu Studio installation is required at runtime. The profile reference and `GFG00` identity are written for each color slot; the machine remains P1S 0.4 mm.
 
 Reference values: initial-layer nozzle 245 °C, subsequent nozzle 255 °C, textured/high-temperature bed 70 °C, flow ratio 0.95, density 1.25 g/cm³, maximum volumetric speed 15 mm³/s. Palette colors, object/text material assignments and label-only plate separation remain project settings.
+
+## Start purge-line clearance
+
+Packing reserves the L-shaped nozzle-load extrusion in the embedded `machine_start_gcode`: X=18..240 at Y=1..1.5, and X=239.5..240 up to Y=11 (machine mm). The two rectangles receive 2 mm fixed clearance plus configured margin and part gap, and are protected in both model and nozzle-offset machine coordinates. The model footprint already includes the selected Brim. Initial packing, overflow plates and optional centering use the same exclusions. This does not modify the start G-code or reserve an entire front strip. If the embedded start routine changes, its coordinate regression test and exclusion rectangles must be updated together.
+
+## Whole-plate convex hull
+
+Bambu Studio 02.05.00.66 checks the convex hull of all non-custom extrusion paths against the front-left exclusion in both preview renderers (`src/slic3r/GUI/GCodeRenderer/{LegacyRenderer,AdvancedRenderer}.cpp`). Individually disjoint object footprints are insufficient: the convex hull connecting a left-side baseplate and a front cap can intersect the excluded corner. Packing now rejects candidate additions whose whole-plate footprint hull crosses the forbidden corner in either model or nozzle coordinates, with the configured margin. Centering and the final layout validation apply the same rule. The rectangular footprints conservatively include Brim plus the embedded `brim_object_gap`; actual slicer-generated supports still require a sliced-path check.
+
+3MF packing dimensions and shared part origins come from the final manufacturing vertices, including all material regions, rather than cached mesh sizes. STL input remains unchanged.

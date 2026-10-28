@@ -96,6 +96,25 @@ impl Default for Config {
     }
 }
 impl Config {
+    fn brim_extent(&self) -> Result<f32, String> {
+        if self.brim == 0. {
+            return Ok(0.);
+        }
+        #[derive(Deserialize)]
+        struct Brim {
+            brim_object_gap: String,
+        }
+        let preset: Brim = serde_json::from_str(include_str!("../config/export/p1s-0.4.json"))
+            .map_err(|e| e.to_string())?;
+        let gap: f32 = preset
+            .brim_object_gap
+            .parse()
+            .map_err(|_| "无效 Brim 间隙")?;
+        if !gap.is_finite() || gap < 0. {
+            return Err("无效 Brim 间隙".into());
+        }
+        Ok(self.brim + gap)
+    }
     pub fn validate(&self) -> Result<(), String> {
         if !self.margin.is_finite()
             || !(0.0..=30.).contains(&self.margin)
@@ -204,6 +223,22 @@ struct Rect {
     h: f32,
 }
 impl Rect {
+    fn corners(self) -> [Vec2; 4] {
+        [
+            Vec2::new(self.x, self.y),
+            Vec2::new(self.right(), self.y),
+            Vec2::new(self.right(), self.top()),
+            Vec2::new(self.x, self.top()),
+        ]
+    }
+    fn expanded(self, padding: f32) -> Self {
+        Self {
+            x: self.x - padding,
+            y: self.y - padding,
+            w: self.w + 2. * padding,
+            h: self.h + 2. * padding,
+        }
+    }
     fn right(self) -> f32 {
         self.x + self.w
     }
@@ -219,6 +254,67 @@ impl Rect {
     fn contains(self, b: Self) -> bool {
         self.x <= b.x && self.y <= b.y && self.right() >= b.right() && self.top() >= b.top()
     }
+}
+// Bambu's preview checks the convex hull of ALL extrusion paths against the
+// front-left exclusion, even when every individual object avoids that corner.
+fn extend_hull(hull: &[Vec2], rect: Rect) -> Vec<Vec2> {
+    let mut points = hull.to_vec();
+    points.extend(rect.corners());
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup();
+    let mut result = Vec::<Vec2>::new();
+    for p in &points {
+        while result.len() >= 2 {
+            let n = result.len();
+            if (result[n - 1] - result[n - 2]).perp_dot(*p - result[n - 1]) > 0. {
+                break;
+            }
+            result.pop();
+        }
+        result.push(*p);
+    }
+    let lower = result.len();
+    for p in points.iter().rev().skip(1) {
+        while result.len() > lower {
+            let n = result.len();
+            if (result[n - 1] - result[n - 2]).perp_dot(*p - result[n - 1]) > 0. {
+                break;
+            }
+            result.pop();
+        }
+        result.push(*p);
+    }
+    result.pop();
+    result
+}
+fn hull_intersects(hull: &[Vec2], rect: Rect) -> bool {
+    if hull.is_empty() {
+        return false;
+    }
+    let corners = rect.corners();
+    let edges = hull.iter().zip(hull.iter().cycle().skip(1)).map(|(a, b)| {
+        let d = *b - *a;
+        Vec2::new(-d.y, d.x).normalize_or_zero()
+    });
+    for axis in [Vec2::X, Vec2::Y].into_iter().chain(edges) {
+        if axis == Vec2::ZERO {
+            continue;
+        }
+        let range = |points: &[Vec2]| {
+            points
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                    let v = p.dot(axis);
+                    (lo.min(v), hi.max(v))
+                })
+        };
+        let (a, b) = range(hull);
+        let (c, d) = range(&corners);
+        if b <= c + 0.0001 || d <= a + 0.0001 {
+            return false;
+        }
+    }
+    true
 }
 fn subtract(free: &mut Vec<Rect>, used: Rect) {
     let mut next = Vec::new();
@@ -300,6 +396,54 @@ fn usable_bed(c: &Config, offset: Vec2) -> Rect {
         h: max.y - min.y,
     }
 }
+fn hull_keepout(c: &Config, offset: Vec2) -> Rect {
+    // Union of the forbidden corner in model and nozzle coordinates, with
+    // margin. Part gap applies to individual parts, not to this virtual hull.
+    Rect {
+        x: offset.x.min(0.),
+        y: offset.y.min(0.),
+        w: 18. + offset.x.abs() + c.margin,
+        h: 28. + offset.y.abs() + c.margin,
+    }
+}
+// Actual extrusion segments in the embedded P1S machine_start_gcode:
+// X18..240 at Y1 and Y1.5, plus the return at X239.5..240 up to Y11.
+// Keep the L shape so the rest of the front strip remains available.
+const PRIME_LINE: [Rect; 2] = [
+    Rect {
+        x: 18.,
+        y: 1.,
+        w: 222.,
+        h: 0.5,
+    },
+    Rect {
+        x: 239.5,
+        y: 1.,
+        w: 0.5,
+        h: 10.,
+    },
+];
+const PRIME_LINE_CLEARANCE: f32 = 2.;
+fn exclusion_zones(c: &Config, offset: Vec2) -> Vec<Rect> {
+    // Protect each footprint in both model and G-code coordinates. The start
+    // code contains literal machine positions, not per-object transforms.
+    let both_frames = |r: Rect| Rect {
+        x: r.x + offset.x.min(0.),
+        y: r.y + offset.y.min(0.),
+        w: r.w + offset.x.abs(),
+        h: r.h + offset.y.abs(),
+    };
+    let mut zones = vec![Rect {
+        x: offset.x.min(0.),
+        y: offset.y.min(0.),
+        w: 18. + offset.x.abs() + c.margin + c.gap,
+        h: 28. + offset.y.abs() + c.margin + c.gap,
+    }];
+    zones.extend(
+        PRIME_LINE.map(|r| both_frames(r).expanded(PRIME_LINE_CLEARANCE + c.margin + c.gap)),
+    );
+    zones
+}
 fn empty_plate(c: &Config, offset: Vec2) -> Vec<Rect> {
     let bed = usable_bed(c, offset);
     let mut free = vec![Rect {
@@ -308,16 +452,12 @@ fn empty_plate(c: &Config, offset: Vec2) -> Vec<Rect> {
         w: bed.w + c.gap,
         h: bed.h + c.gap,
     }];
-    // P1S front-left keep-out; add the requested clearance around it.
-    subtract(
-        &mut free,
-        Rect {
-            x: offset.x.min(0.) - c.gap,
-            y: offset.y.min(0.) - c.gap,
-            w: 18. + offset.x.abs() + c.margin + c.gap * 1.5,
-            h: 28. + offset.y.abs() + c.margin + c.gap * 1.5,
-        },
-    );
+    for zone in exclusion_zones(c, offset) {
+        // Packed rectangles already include half the part gap on every side.
+        // Contract obstacles by that amount to match the physical-footprint
+        // checks used after centering, without counting the gap twice.
+        subtract(&mut free, zone.expanded(-c.gap / 2.));
+    }
     free
 }
 #[derive(Clone, Debug)]
@@ -363,14 +503,12 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
         return Err("喷嘴偏移与边距超出可用打印区域".into());
     }
     let mut plates = vec![empty_plate(c, offset)];
+    let mut hulls = vec![Vec::<Vec2>::new()];
+    let brim = c.brim_extent()?;
     let mut placed = Vec::new();
     for (input, copy) in jobs {
         let raw_size = parts[input].1;
-        let size = Vec3::new(
-            raw_size.x + 2. * c.brim,
-            raw_size.y + 2. * c.brim,
-            raw_size.z,
-        );
+        let size = Vec3::new(raw_size.x + 2. * brim, raw_size.y + 2. * brim, raw_size.z);
         let mut candidate = None;
         loop {
             for (plate, free) in plates.iter().enumerate() {
@@ -389,6 +527,17 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                         }
                         let score = (r.w - w).min(r.h - h);
                         if candidate.as_ref().is_none_or(|(old, _, _, _)| score < *old) {
+                            let candidate_rect = Rect {
+                                x: r.x,
+                                y: r.y,
+                                w,
+                                h,
+                            };
+                            let hull =
+                                extend_hull(&hulls[plate], candidate_rect.expanded(-c.gap / 2.));
+                            if hull_intersects(&hull, hull_keepout(c, offset)) {
+                                continue;
+                            }
                             candidate = Some((
                                 score,
                                 plate,
@@ -416,7 +565,7 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                     .all(|p: &Placement| p.plate != plates.len() - 1)
             {
                 return Err(format!(
-                    "{}：{:.1} × {:.1} mm，无法放入计入喷嘴偏移后的 P1S 可用区域；请使用分体版本或调整边距",
+                    "{}：{:.1} × {:.1} mm，无法放入避开擦料线并计入喷嘴偏移的 P1S 可用区域；请使用分体版本或调整边距",
                     parts[input].0, size.x, size.y
                 ));
             }
@@ -427,9 +576,11 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                 return Err("导出超过 36 个打印盘，请减少零件份数".into());
             }
             plates.push(empty_plate(c, offset));
+            hulls.push(Vec::new());
         }
         let (_, plate, r, rotated) = candidate.unwrap();
         subtract(&mut plates[plate], r);
+        hulls[plate] = extend_hull(&hulls[plate], r.expanded(-c.gap / 2.));
         placed.push(Placement {
             input,
             copy,
@@ -442,7 +593,7 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
         });
     }
     if c.center {
-        for plate in 0..plates.len() {
+        for (plate, hull) in hulls.iter().enumerate() {
             let group: Vec<_> = placed.iter().filter(|p| p.plate == plate).collect();
             if group.is_empty() {
                 continue;
@@ -465,12 +616,7 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                 .fold(f32::NEG_INFINITY, f32::max);
             let dx = 128. - (min_x + max_x) / 2.;
             let dy = 128. - (min_y + max_y) / 2.;
-            let keepout = Rect {
-                x: offset.x.min(0.),
-                y: offset.y.min(0.),
-                w: 18. + offset.x.abs() + c.margin + c.gap,
-                h: 28. + offset.y.abs() + c.margin + c.gap,
-            };
+            let exclusions = exclusion_zones(c, offset);
             let safe = group.iter().all(|p| {
                 let r = Rect {
                     x: p.x + dx - p.width / 2.,
@@ -482,10 +628,11 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
                     && r.y >= bed.y - 0.0001
                     && r.right() <= bed.right() + 0.0001
                     && r.top() <= bed.top() + 0.0001
-                    && !r.intersects(keepout)
+                    && exclusions.iter().all(|zone| !r.intersects(*zone))
             });
             // Rigid translation preserves spacing and brim; keep valid packing if blocked.
-            if safe {
+            let shifted_hull: Vec<_> = hull.iter().map(|v| *v + Vec2::new(dx, dy)).collect();
+            if safe && !hull_intersects(&shifted_hull, hull_keepout(c, offset)) {
                 for p in placed.iter_mut().filter(|p| p.plate == plate) {
                     p.x += dx;
                     p.y += dy;
@@ -495,6 +642,34 @@ pub fn arrange(parts: &[(String, Vec3, u32)], c: &Config) -> Result<Vec<Placemen
     }
     // Stable source/copy order, independent of packing order.
     placed.sort_by_key(|p| (p.input, p.copy));
+    // Recompute from the final placements, including any centering. Fail closed
+    // if later changes to the packer violate the slicer's whole-plate rule.
+    for plate in 0..plates.len() {
+        let mut hull = Vec::new();
+        for p in placed.iter().filter(|p| p.plate == plate) {
+            let r = Rect {
+                x: p.x - p.width / 2.,
+                y: p.y - p.depth / 2.,
+                w: p.width,
+                h: p.depth,
+            };
+            if !bed.expanded(0.001).contains(r)
+                || exclusion_zones(c, offset)
+                    .iter()
+                    .any(|zone| r.intersects(*zone))
+            {
+                return Err(format!(
+                    "第 {} 盘 {}：最终打印占地越过边界或避让区域",
+                    plate + 1,
+                    parts[p.input].0
+                ));
+            }
+            hull = extend_hull(&hull, r);
+        }
+        if hull_intersects(&hull, hull_keepout(c, offset)) {
+            return Err(format!("第 {} 盘：整盘轮廓凸包进入左前禁放区", plate + 1));
+        }
+    }
     Ok(placed)
 }
 /// Each filament/color slot owns its own plates, even when two RGB values match.
@@ -581,6 +756,69 @@ pub fn plate_origin(plate: usize, count: usize) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn individually_clear_parts_can_fail_bambu_whole_plate_hull() {
+        // The user's plate 4: the baseplate is left of the cap. Neither part
+        // touches the corner, but their connecting convex hull does.
+        let base = Rect {
+            x: 0.5,
+            y: 36.5,
+            w: 176.,
+            h: 214.699,
+        };
+        let cap = Rect {
+            x: 24.5,
+            y: 12.,
+            w: 37.799,
+            h: 13.172,
+        };
+        let forbidden = Rect {
+            x: 0.,
+            y: 0.,
+            w: 18.,
+            h: 30.,
+        };
+        assert!(!base.intersects(forbidden) && !cap.intersects(forbidden));
+        assert!(hull_intersects(
+            &extend_hull(&extend_hull(&[], base), cap),
+            forbidden
+        ));
+        let moved_cap = Rect { x: 182.5, ..cap };
+        assert!(!hull_intersects(
+            &extend_hull(&extend_hull(&[], base), moved_cap),
+            forbidden
+        ));
+        let parts = vec![
+            ("baseplate".into(), Vec3::new(214.699, 176., 4.), 2),
+            ("cap".into(), Vec3::new(37.799, 13.172, 11.673), 2),
+            ("bin".into(), Vec3::new(41.5, 83.5, 31.55), 4),
+            ("facade".into(), Vec3::new(9.84, 9.84, 3.8), 6),
+        ];
+        for center in [false, true] {
+            for rotate in [false, true] {
+                for brim in [0., 2.] {
+                    let c = Config {
+                        center,
+                        rotate,
+                        brim,
+                        ..Default::default()
+                    };
+                    let placements = arrange(&parts, &c).unwrap();
+                    assert_machine_safe(&placements, &c);
+                }
+            }
+        }
+    }
+    #[test]
+    fn brim_gap_is_part_of_print_footprint() {
+        let c = Config {
+            brim: 2.,
+            ..Default::default()
+        };
+        let placements = arrange(&[("brimmed".into(), Vec3::new(10., 10., 1.), 1)], &c).unwrap();
+        assert!((placements[0].width - 14.2).abs() < 0.001);
+        assert_eq!(Config::default().brim_extent().unwrap(), 0.);
+    }
     fn assert_machine_safe(layout: &[Placement], c: &Config) {
         let offset = nozzle_offset().unwrap();
         assert_eq!(offset, Vec2::new(0., 2.));
@@ -605,8 +843,139 @@ mod tests {
                     w: 18.,
                     h: 28.
                 }));
+                // Independent machine-coordinate check includes the real purge
+                // segments and fixed clearance, including model Brim in r.
+                for line in PRIME_LINE {
+                    assert!(
+                        !r.intersects(line.expanded(2.)),
+                        "Footprint overlaps start purge line: {p:?}, frame {origin:?}"
+                    );
+                }
             }
         }
+        for plate in 0..layout.iter().map(|p| p.plate + 1).max().unwrap_or(0) {
+            let mut hull = Vec::new();
+            for p in layout.iter().filter(|p| p.plate == plate) {
+                hull = extend_hull(
+                    &hull,
+                    Rect {
+                        x: p.x - p.width / 2.,
+                        y: p.y - p.depth / 2.,
+                        w: p.width,
+                        h: p.depth,
+                    },
+                );
+            }
+            assert!(
+                !hull_intersects(&hull, hull_keepout(c, offset)),
+                "Unsafe plate hull: {plate}"
+            );
+        }
+    }
+    #[test]
+    fn purge_exclusions_follow_embedded_start_extrusions() {
+        let profile: serde_json::Value =
+            serde_json::from_str(include_str!("../config/export/p1s-0.4.json")).unwrap();
+        let start = profile["machine_start_gcode"]
+            .as_str()
+            .unwrap()
+            .split(";===== nozzle load line")
+            .nth(1)
+            .unwrap()
+            .split("M400")
+            .next()
+            .unwrap();
+        let mut position: Option<Vec2> = None;
+        let mut count = 0;
+        for line in start
+            .lines()
+            .filter(|l| l.starts_with("G0 ") || l.starts_with("G1 "))
+        {
+            let mut end = position.unwrap_or(Vec2::splat(f32::NAN));
+            let mut extrusion = 0.;
+            for token in line.split(';').next().unwrap().split_whitespace().skip(1) {
+                if let Ok(value) = token[1..].parse::<f32>() {
+                    match token.as_bytes()[0] {
+                        b'X' => end.x = value,
+                        b'Y' => end.y = value,
+                        b'E' => extrusion = value,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(previous) = position
+                && extrusion > 0.
+                && previous != end
+            {
+                let min = previous.min(end);
+                let size = (end - previous).abs();
+                let path = Rect {
+                    x: min.x,
+                    y: min.y,
+                    w: size.x,
+                    h: size.y,
+                };
+                assert!(
+                    PRIME_LINE.iter().any(|zone| zone.contains(path)),
+                    "Start extrusion changed; update purge exclusions: {line}"
+                );
+                count += 1;
+            }
+            assert!(end.is_finite());
+            position = Some(end);
+        }
+        assert_eq!(count, 4);
+    }
+    #[test]
+    fn every_plate_avoids_purge_with_rotation_brim_and_centering() {
+        let parts = vec![
+            ("large".into(), Vec3::new(180., 180., 20.), 5),
+            ("labels".into(), Vec3::new(36., 11., 1.2), 30),
+            ("wide".into(), Vec3::new(120., 24., 5.), 5),
+        ];
+        for center in [false, true] {
+            for rotate in [false, true] {
+                for gap in [0., 6., 30.] {
+                    for brim in [0., 2.] {
+                        let c = Config {
+                            center,
+                            rotate,
+                            gap,
+                            brim,
+                            margin: 0.,
+                            ..Default::default()
+                        };
+                        let layout = arrange(&parts, &c).unwrap();
+                        assert!(layout.iter().any(|p| p.plate > 0));
+                        assert_machine_safe(&layout, &c);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn centering_cannot_move_a_wide_part_onto_the_purge_return() {
+        let parts = vec![("wide".into(), Vec3::new(207., 218., 10.), 1)];
+        let c = Config {
+            rotate: false,
+            ..Default::default()
+        };
+        let original = arrange(&parts, &c).unwrap();
+        let centered = arrange(
+            &parts,
+            &Config {
+                center: true,
+                ..c.clone()
+            },
+        )
+        .unwrap();
+        // Centering gives X=24.5..231.5 and Y=19..237: clear of the front-left
+        // keep-out, but intersects the buffered right-hand purge return.
+        assert_eq!(
+            (original[0].x, original[0].y),
+            (centered[0].x, centered[0].y)
+        );
+        assert_machine_safe(&centered, &c);
     }
     #[test]
     fn m4_packing_reserves_nozzle_offset_before_rotation_and_centering() {
@@ -926,7 +1295,7 @@ mod tests {
     #[test]
     fn rotation_fits_narrow_free_strip_and_invalid_settings_fail() {
         let parts = vec![
-            ("large".into(), Vec3::new(200., 200., 10.), 1),
+            ("large".into(), Vec3::new(200., 213., 10.), 1),
             ("strip".into(), Vec3::new(100., 30., 10.), 1),
         ];
         let config = Config {

@@ -2664,7 +2664,7 @@ impl App {
                     ui.separator();
                     if self.export_options.format==crate::export::Format::ThreeMf {
                         ui.strong("Bambu Lab P1S · 0.4 mm");
-                        ui.small(t(z,"256 × 256 mm；参考配置限高 250 mm；自动避开左前角禁放区。","256 × 256 mm; profile height 250 mm; front-left keep-out reserved."));
+                        ui.small(t(z,"256 × 256 mm；参考配置限高 250 mm；自动避开左前禁放区与起始擦料线。","256 × 256 mm; profile height 250 mm; front-left keep-out and start purge lines reserved."));
                         let p=&mut self.export_options.plate;
                         ui.horizontal(|ui|{ui.label(t(z,"打印板","Plate"));ui.selectable_value(&mut p.textured,true,"Textured PEI");ui.selectable_value(&mut p.textured,false,"Smooth PEI / High Temp");});
                         ui.add(egui::Slider::new(&mut p.margin,0.0..=30.0).text(t(z,"平台边距 mm","Bed margin mm")));
