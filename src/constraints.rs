@@ -42,6 +42,16 @@ pub enum Joint {
         min: f32,
         max: f32,
     },
+    /// Closed child transform plus a pivot/axis in the parent's local frame.
+    Hinge {
+        position: [f32; 3],
+        rotation: [f32; 4],
+        pivot: [f32; 3],
+        axis: [f32; 3],
+        angle: f32,
+        min: f32,
+        max: f32,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Relation {
@@ -126,11 +136,63 @@ impl Joint {
                 }
                 (Vec3::from(position) + a * offset, quaternion(rotation)?)
             }
+            Self::Hinge {
+                position,
+                rotation,
+                pivot,
+                axis,
+                angle,
+                min,
+                max,
+            } => {
+                let axis = Vec3::from(axis);
+                if !finite(position)
+                    || !finite(pivot)
+                    || !axis.is_finite()
+                    || (axis.length() - 1.).abs() > 0.001
+                    || ![angle, min, max].iter().all(|v| v.is_finite())
+                    || min > max
+                    || angle < min
+                    || angle > max
+                {
+                    return Err("Invalid hinge pivot, axis or angle limits".into());
+                }
+                let turn = Quat::from_axis_angle(axis, angle.to_radians());
+                let pivot = Vec3::from(pivot);
+                (
+                    pivot + turn * (Vec3::from(position) - pivot),
+                    turn * quaternion(rotation)?,
+                )
+            }
         };
         Ok(Mat4::from_rotation_translation(q, p))
     }
 }
 impl Relation {
+    pub fn hinge(
+        scene: &Scene,
+        parent: usize,
+        child: usize,
+        world_pivot: Vec3,
+        world_axis: Vec3,
+    ) -> Result<Self, String> {
+        let mut relation = Self::fixed(scene, parent, child, false)?;
+        let Joint::Fixed { position, rotation } = relation.joint else {
+            unreachable!()
+        };
+        let inverse = scene.parts[parent].pose.matrix(0.).inverse();
+        relation.joint = Joint::Hinge {
+            position,
+            rotation,
+            pivot: inverse.transform_point3(world_pivot).to_array(),
+            axis: inverse.transform_vector3(world_axis).to_array(),
+            angle: 0.,
+            min: 0.,
+            max: 110.,
+        };
+        relation.joint.transform()?;
+        Ok(relation)
+    }
     pub fn fixed(scene: &Scene, parent: usize, child: usize, slider: bool) -> Result<Self, String> {
         if parent == child {
             return Err("Parent and child must be different parts".into());
@@ -273,8 +335,13 @@ pub fn rotate_subassembly(scene: &mut Scene, index: usize, rotation: Quat) -> Re
     let previous = scene.clone();
     let id = PartId::of(&scene.parts[index]);
     let incoming = scene.relations.iter().position(|r| r.child == id);
-    if incoming.is_some_and(|i| matches!(scene.relations[i].joint, Joint::Slider { .. })) {
-        return Err("Rotate the fixed subassembly, not its sliding parent".into());
+    if incoming.is_some_and(|i| {
+        matches!(
+            scene.relations[i].joint,
+            Joint::Slider { .. } | Joint::Hinge { .. }
+        )
+    }) {
+        return Err("Use the joint control to move a sliding or hinged subassembly".into());
     }
     let mut subtree = HashSet::from([id.clone()]);
     loop {
@@ -459,6 +526,33 @@ pub fn basic_relations(scene: &mut Scene) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hinge_pivot_and_limits_are_validated() {
+        let mut joint = Joint::Hinge {
+            position: [0., 0., 10.],
+            rotation: Quat::IDENTITY.to_array(),
+            pivot: [0.; 3],
+            axis: [-1., 0., 0.],
+            angle: 90.,
+            min: 0.,
+            max: 110.,
+        };
+        let m = joint.transform().unwrap();
+        assert!(
+            m.transform_point3(Vec3::ZERO)
+                .abs_diff_eq(Vec3::new(0., 10., 0.), 1e-5)
+        );
+        // The pivot expressed in the closed child frame stays fixed.
+        assert!(m.transform_point3(Vec3::new(0., 0., -10.)).length() < 1e-5);
+        if let Joint::Hinge { angle, .. } = &mut joint {
+            *angle = f32::NAN;
+        }
+        assert!(joint.transform().is_err());
+        if let Joint::Hinge { angle, .. } = &mut joint {
+            *angle = 111.;
+        }
+        assert!(joint.transform().is_err());
+    }
     use crate::mesh::Mesh;
     use std::sync::Arc;
     fn part(x: f32, id: u32) -> Part {

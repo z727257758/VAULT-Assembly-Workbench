@@ -7,6 +7,13 @@ use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
+fn ghost_shell(path: &str) -> bool {
+    path.contains("/Modules/")
+        || path.starts_with(crate::sustainer::PREFIX)
+            && (path.ends_with("Facade.stl")
+                || path.rsplit('/').next().is_some_and(|n| n.contains(" Roof")))
+}
+
 #[derive(Clone)]
 pub struct Camera {
     pub yaw: f32,
@@ -349,7 +356,7 @@ impl Renderer {
             if selected == Some(i) && self.print_colors.is_none() {
                 color = [0.98, 0.72, 0.30, 1.];
             }
-            if ghost && p.pose.path.contains("/Modules/") {
+            if ghost && ghost_shell(&p.pose.path) {
                 color[3] = 0.22;
             }
             let uniform = ObjectUniform {
@@ -410,7 +417,7 @@ impl Renderer {
                     } else {
                         p.visible
                     };
-                    if !visible || (ghost && p.pose.path.contains("/Modules/")) != transparent {
+                    if !visible || (ghost && ghost_shell(&p.pose.path)) != transparent {
                         continue;
                     }
                     let mesh = &self.meshes[&p.mesh_key()];

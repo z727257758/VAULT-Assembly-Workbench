@@ -29,6 +29,51 @@ impl Default for Selection {
         }
     }
 }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SustainerBody {
+    #[default]
+    Flat,
+    Dividers,
+    Sealed,
+}
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SustainerOptions {
+    pub body: SustainerBody,
+    pub split_roof: bool,
+}
+impl SustainerOptions {
+    pub fn normalized(mut self, s: &Selection) -> Self {
+        if matches!(s.width.as_str(), "S" | "M") {
+            self.body = SustainerBody::Flat;
+        }
+        self.split_roof &= s.depth >= 6;
+        self
+    }
+    pub fn key(self, s: &Selection) -> String {
+        let options = self.normalized(s);
+        format!(
+            "sustainer-{}{}-{}-{:?}-{}",
+            s.width,
+            s.depth,
+            s.height,
+            options.body,
+            if options.split_roof { "split" } else { "whole" }
+        )
+        .to_lowercase()
+    }
+}
+
+// The supplied package mixes Roof/Roofs, whitespace and apostrophes. Match the
+// complete directory-qualified name, preserve its original spelling, reject ambiguity.
+fn sustainer_key(path: &str) -> String {
+    path.chars()
+        .filter(|c| !c.is_whitespace() && *c != '\'')
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .replace("/roofs/", "/roof/")
+}
 /// Stable family key for parallel print placement; unknown parts group only with copies.
 pub fn print_alignment_family(name: &str) -> &str {
     // The external regression fixture appends the copy number to display names.
@@ -84,6 +129,155 @@ pub fn module_clip_count(path: &str) -> Option<usize> {
 }
 
 impl Catalog {
+    pub fn reconfigure_sustainer(
+        &self,
+        s: &Selection,
+        options: SustainerOptions,
+        old: &[Bom],
+    ) -> Result<Vec<Bom>, String> {
+        let mut bom = self.sustainer_bom(s, options)?;
+        let small = matches!(s.width.as_str(), "S" | "M");
+        let old_small = old
+            .iter()
+            .find(|b| b.path.contains("/Modules/"))
+            .map(|b| b.path.contains("/01. S Families/") || b.path.contains("/02. M Families/"));
+        for b in &mut bom {
+            if let Some(saved) = old.iter().find(|p| p.path == b.path) {
+                b.enabled = saved.enabled;
+                if b.group != "Locks" || old_small.is_none_or(|old| old == small) {
+                    b.qty = saved.qty;
+                }
+            }
+        }
+        Ok(bom)
+    }
+    fn sustainer_resolve(&self, expected: &str) -> Result<String, String> {
+        let key = sustainer_key(expected);
+        let mut matches = self
+            .entries
+            .iter()
+            .filter(|e| sustainer_key(&e.path) == key);
+        let found = matches
+            .next()
+            .ok_or_else(|| format!("Missing Sustainer component: {expected}"))?;
+        if matches.next().is_some() {
+            return Err(format!("Ambiguous Sustainer component: {expected}"));
+        }
+        Ok(found.path.clone())
+    }
+    pub fn sustainer_bom(
+        &self,
+        s: &Selection,
+        options: SustainerOptions,
+    ) -> Result<Vec<Bom>, String> {
+        if !["S", "M", "L", "XL"].contains(&s.width.as_str())
+            || !(3..=7).contains(&s.depth)
+            || !["1F", "2F", "4F"].contains(&s.height.as_str())
+            || s.width == "XL" && s.height != "1F"
+        {
+            return Err("Invalid Sustainer size".into());
+        }
+        let options = options.normalized(s);
+        let family = match s.width.as_str() {
+            "S" => "01. S Families",
+            "M" => "02. M Families",
+            "L" => "03. L Families",
+            _ => "04. XL Families",
+        };
+        let base = format!("02. SUSTAINERS/{family}");
+        let size = format!("{}{}", s.width, s.depth);
+        let dir = format!("{base}/{size}");
+        let universal = "02. SUSTAINERS/05. Universal";
+        let mut bom = Vec::new();
+        let mut add = |path: String, qty, group: &str| -> Result<(), String> {
+            bom.push(Bom {
+                path: self.sustainer_resolve(&path)?,
+                qty,
+                group: group.into(),
+                enabled: true,
+            });
+            Ok(())
+        };
+        let variant = if matches!(s.width.as_str(), "L" | "XL") {
+            match options.body {
+                SustainerBody::Flat => " Flat",
+                SustainerBody::Dividers => " Dividers",
+                SustainerBody::Sealed => " Sealed",
+            }
+        } else {
+            ""
+        };
+        add(
+            format!("{dir}/Modules/{size} {}{variant} Module.stl", s.height),
+            1,
+            "Structure",
+        )?;
+        if options.split_roof {
+            for part in [1, 2] {
+                add(format!("{dir}/Roof/{size} Roof Part {part}.stl"), 1, "Roof")?;
+            }
+            add(
+                format!("{dir}/Roof/Connector For Split Roof.stl"),
+                1,
+                "Roof connector",
+            )?;
+        } else {
+            let suffix = if s.depth >= 6 { " Whole" } else { "" };
+            add(format!("{dir}/Roof/{size} Roof{suffix}.stl"), 1, "Roof")?;
+        }
+        // Use the family facade shown by the naming diagram; Universal/Facades
+        // contains different meshes and is not an interchangeable duplicate.
+        let facade = if s.width == "XL" {
+            base.clone()
+        } else {
+            format!("{base}/Facades")
+        };
+        add(
+            format!("{facade}/{}{} Facade.stl", s.width, s.height),
+            1,
+            "Facade",
+        )?;
+        let small = matches!(s.width.as_str(), "S" | "M");
+        let bottom = match (small, s.height.as_str()) {
+            (true, "1F") => "S-M 1F Hinge",
+            (true, _) => "S-M 2-4F Hinge",
+            (false, "1F") => "L-XL 1F Hinge",
+            (false, _) => "L 2-4F Hinge",
+        };
+        let top = if small {
+            format!("{} Hinge Top", s.width)
+        } else {
+            "L-XL Hinge Top".into()
+        };
+        add(
+            format!("{universal}/Hinges/{bottom}.stl"),
+            1,
+            "Lower hinges",
+        )?;
+        add(format!("{universal}/Hinges/{top}.stl"), 1, "Upper hinges")?;
+        add(
+            format!(
+                "{universal}/Rods/{} Rods.stl",
+                if small { "S-M" } else { "L-XL" }
+            ),
+            1,
+            "Hinge rods",
+        )?;
+        let locks = if small { 1 } else { 2 };
+        for name in ["LOCK HOLDER", "LOCK INNER PART", "1 SET OF PINS FOR 1 LOCK"] {
+            add(format!("{universal}/Locks/{name}.stl"), locks, "Locks")?;
+        }
+        add(
+            format!(
+                "{universal}/Locks/LOCK OUTER PART {}.stl",
+                if s.height == "1F" { "1F" } else { "2-4F" }
+            ),
+            locks,
+            "Locks",
+        )?;
+        add(format!("{universal}/Label for Sustainers.stl"), 1, "Label")?;
+        Ok(bom)
+    }
     pub fn scan(root: PathBuf) -> Result<Self, String> {
         fn visit(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<(), String> {
             for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
@@ -305,6 +499,129 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sustainer_matching_is_directory_scoped_and_rejects_ambiguous_names() {
+        let mut c = Catalog::default();
+        for path in [
+            "02. SUSTAINERS/02. M Families/M3/Modules/M3 1F Module .stl",
+            "01. DRAWERS/02. M Families/M3/Modules/M3 Module 1F.stl",
+        ] {
+            c.entries.push(Entry {
+                path: path.into(),
+                name: path.rsplit('/').next().unwrap().into(),
+                category: 2,
+            });
+        }
+        let expected = "02. SUSTAINERS/02. M Families/M3/Modules/M3 1F Module.stl";
+        assert!(
+            c.sustainer_resolve(expected)
+                .unwrap()
+                .ends_with("Module .stl")
+        );
+        c.entries.push(Entry {
+            path: expected.into(),
+            name: "M3 1F Module.stl".into(),
+            category: 2,
+        });
+        assert!(
+            c.sustainer_resolve(expected)
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
+        let s = Selection::default();
+        let options = SustainerOptions {
+            body: SustainerBody::Sealed,
+            split_roof: true,
+        };
+        assert_eq!(options.normalized(&s), SustainerOptions::default());
+        assert!(options.key(&s).starts_with("sustainer-s3-1f-"));
+    }
+    #[test]
+    fn sustainer_library_all_sizes_variants_and_print_counts() {
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let c = Catalog::scan(root.into()).unwrap();
+        let mut configurations = 0;
+        for width in ["S", "M", "L", "XL"] {
+            for depth in 3..=7 {
+                for height in if width == "XL" {
+                    vec!["1F"]
+                } else {
+                    vec!["1F", "2F", "4F"]
+                } {
+                    for body in if matches!(width, "S" | "M") {
+                        vec![SustainerBody::Flat]
+                    } else {
+                        vec![
+                            SustainerBody::Flat,
+                            SustainerBody::Dividers,
+                            SustainerBody::Sealed,
+                        ]
+                    } {
+                        for split_roof in if depth < 6 {
+                            vec![false]
+                        } else {
+                            vec![false, true]
+                        } {
+                            let s = Selection {
+                                width: width.into(),
+                                depth,
+                                height: height.into(),
+                                hidden_key: false,
+                            };
+                            let options = SustainerOptions { body, split_roof };
+                            let bom = c.sustainer_bom(&s, options).unwrap();
+                            configurations += 1;
+                            assert!(bom.iter().all(|b| b.path.starts_with("02. SUSTAINERS/")
+                                && c.root.join(&b.path).is_file()));
+                            assert_eq!(bom.iter().filter(|b| b.group == "Structure").count(), 1);
+                            assert_eq!(bom.iter().filter(|b| b.group == "Facade").count(), 1);
+                            assert_eq!(
+                                bom.iter().filter(|b| b.group == "Roof").count(),
+                                if split_roof { 2 } else { 1 }
+                            );
+                            assert_eq!(
+                                bom.iter().filter(|b| b.group == "Roof connector").count(),
+                                usize::from(split_roof)
+                            );
+                            assert_eq!(
+                                bom.iter()
+                                    .find(|b| b.name() == "LOCK HOLDER.stl")
+                                    .unwrap()
+                                    .qty,
+                                if matches!(width, "S" | "M") { 1 } else { 2 }
+                            );
+                            let mut saved = bom.clone();
+                            saved.last_mut().unwrap().qty = 3;
+                            saved.last_mut().unwrap().enabled = false;
+                            let restored = c.reconfigure_sustainer(&s, options, &saved).unwrap();
+                            assert_eq!(restored.last().unwrap().qty, 3);
+                            assert!(!restored.last().unwrap().enabled);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(configurations, 126);
+        let old = c
+            .sustainer_bom(&Selection::default(), Default::default())
+            .unwrap();
+        let large = Selection {
+            width: "L".into(),
+            ..Default::default()
+        };
+        let next = c
+            .reconfigure_sustainer(&large, Default::default(), &old)
+            .unwrap();
+        assert_eq!(
+            next.iter()
+                .find(|b| b.name() == "LOCK HOLDER.stl")
+                .unwrap()
+                .qty,
+            2
+        );
+    }
     #[test]
     fn facade_cap_quantity_tracks_width_height_and_migrates_old_presets() {
         let c = Catalog::default();

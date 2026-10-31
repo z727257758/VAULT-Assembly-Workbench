@@ -7,6 +7,39 @@ split_disconnected = true
 expected_bodies = 2
 
 [[rules]]
+path = '02. SUSTAINERS/05. Universal/Hinges/S-M 1F Hinge.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Hinges/S-M 2-4F Hinge.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Hinges/L-XL 1F Hinge.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Hinges/L 2-4F Hinge.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Hinges/L-XL Hinge Top.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Rods/S-M Rods.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Rods/L-XL Rods.stl'
+split_disconnected = true
+expected_bodies = 2
+[[rules]]
+path = '02. SUSTAINERS/05. Universal/Locks/1 SET OF PINS FOR 1 LOCK.stl'
+split_disconnected = true
+expected_bodies = 4
+
+[[rules]]
 path = '01. DRAWERS/07. Universal/Geared Rails/S Rails.stl'
 split_disconnected = true
 expected_bodies = 2

@@ -267,6 +267,14 @@ impl Scene {
             constraint_warning: None,
         };
         if assembly {
+            if scene
+                .parts
+                .iter()
+                .all(|p| p.pose.path.starts_with(crate::sustainer::PREFIX))
+            {
+                crate::sustainer::apply(&mut scene)?;
+                return Ok(scene);
+            }
             for part in &mut scene.parts {
                 if part.pose.path.contains("/Boxes/")
                     && part.pose.path.contains(" Box ")

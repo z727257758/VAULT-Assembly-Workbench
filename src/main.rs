@@ -26,6 +26,7 @@ mod print_support;
 mod render;
 mod runners;
 mod scene;
+mod sustainer;
 pub const APP_NAME: &str = "VAULT 装配工作台";
 pub const APP_NAME_EN: &str = "VAULT Assembly Workbench";
 pub fn app_name(zh: bool) -> &'static str {

@@ -1,5 +1,5 @@
 use crate::{
-    catalog::{Bom, Catalog, Selection},
+    catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     render::{Camera, Renderer, ViewOptions},
     scene::{Definition, Scene},
 };
@@ -29,9 +29,6 @@ impl AssemblyKind {
             Self::Sustainer => t(zh, "盒子（Sustainer）", "Box (Sustainer)"),
         }
     }
-    fn supported(self) -> bool {
-        self == Self::Drawer
-    }
 }
 #[derive(Serialize, Deserialize)]
 struct Preset {
@@ -43,6 +40,10 @@ struct Preset {
     label: crate::label::Config,
     #[serde(default)]
     assembly_kind: AssemblyKind,
+    #[serde(default)]
+    sustainer_options: SustainerOptions,
+    #[serde(default)]
+    sustainer_angle: f32,
     selection: Selection,
     bom: Vec<Bom>,
     #[serde(default)]
@@ -121,6 +122,11 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    assembly_kind: AssemblyKind,
+    sustainer_options: SustainerOptions,
+    sustainer_angle: f32,
+    drawer_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
+    box_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
     gridfinity: crate::gridfinity::Layout,
     gridfinity_open: bool,
     gridfinity_editor: crate::gridfinity_editor::Editor,
@@ -239,6 +245,15 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
+                AssemblyKind::Sustainer
+            } else {
+                AssemblyKind::Drawer
+            },
+            sustainer_options: Default::default(),
+            sustainer_angle: 0.,
+            drawer_state: None,
+            box_state: None,
             gridfinity: Default::default(),
             gridfinity_open: false,
             gridfinity_editor: Default::default(),
@@ -267,7 +282,11 @@ impl App {
             tab: 0,
             query: String::new(),
             category: 0,
-            explosion: 1.,
+            explosion: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
+                0.
+            } else {
+                1.
+            },
             selected: None,
             ghost: false,
             dimensions: false,
@@ -288,7 +307,11 @@ impl App {
             smoke_start: Instant::now(),
             smoke_frame: 0,
             screenshot_requested: false,
-            smoke_stage: 0,
+            smoke_stage: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
+                40
+            } else {
+                0
+            },
             scene_key: String::new(),
             joints_open: false,
             fixed_parent: None,
@@ -300,6 +323,9 @@ impl App {
             collision_report: None,
             collision_tolerance: 0.01,
         };
+        if smoke && app.assembly_kind == AssemblyKind::Sustainer {
+            app.export_options.plate.preview_colors = false;
+        }
         if let Some(root) = root {
             app.scan(root, &cc.egui_ctx);
         } else if !app.last_model_root.as_os_str().is_empty() {
@@ -345,24 +371,36 @@ impl App {
         ctx: &egui::Context,
     ) {
         let key = if assembly {
-            format!(
-                "{}{}-{}",
-                self.selection.width, self.selection.depth, self.selection.height
-            )
+            if self.assembly_kind == AssemblyKind::Sustainer {
+                self.sustainer_options.key(&self.selection)
+            } else {
+                format!(
+                    "{}{}-{}",
+                    self.selection.width, self.selection.depth, self.selection.height
+                )
+            }
         } else {
             String::new()
         };
         self.preview.schedule(
             SceneRequest {
-                gridfinity: self.gridfinity.clone(),
+                gridfinity: if self.assembly_kind == AssemblyKind::Drawer {
+                    self.gridfinity.clone()
+                } else {
+                    Default::default()
+                },
                 home: self.home.clone(),
-                label: self.label.clone(),
+                label: if self.assembly_kind == AssemblyKind::Drawer {
+                    self.label.clone()
+                } else {
+                    Default::default()
+                },
                 items,
                 root,
                 title,
                 assembly,
                 key,
-                divider_layout: if assembly {
+                divider_layout: if assembly && self.assembly_kind == AssemblyKind::Drawer {
                     self.divider_layout.clone()
                 } else {
                     Default::default()
@@ -468,6 +506,7 @@ impl App {
                         true,
                         Some(&cancel),
                     )?;
+                    load_scene_definition(&mut draft, &request.home, &request.key)?;
                     draft.title += "（简化预览；正在生成精确模型）";
                     let _ = tx.send(Loaded::Scene {
                         revision,
@@ -486,6 +525,7 @@ impl App {
                     false,
                     Some(&cancel),
                 )?;
+                load_scene_definition(&mut scene, &request.home, &request.key)?;
                 Ok(scene)
             });
             let _ = tx.send(Loaded::Scene {
@@ -498,6 +538,29 @@ impl App {
         });
     }
     fn assembly(&mut self, ctx: &egui::Context) {
+        if self.assembly_kind == AssemblyKind::Sustainer {
+            let items = match self
+                .catalog
+                .sustainer_bom(&self.selection, self.sustainer_options)
+            {
+                Ok(items) => items,
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            };
+            self.start_scene(
+                items,
+                self.catalog.root.clone(),
+                format!(
+                    "Sustainer {}{} / {}",
+                    self.selection.width, self.selection.depth, self.selection.height
+                ),
+                true,
+                ctx,
+            );
+            return;
+        }
         let spec = crate::dividers::spec(&self.selection);
         if self.divider_layout.specification != spec {
             if !self.divider_layout.specification.is_empty() {
@@ -612,7 +675,15 @@ impl App {
                     self.divider_editor.reset();
                     self.assembly_view = None;
                     self.scene_key.clear();
-                    self.bom = self.catalog.bom(&self.selection);
+                    self.drawer_state = None;
+                    self.box_state = None;
+                    self.bom = match self.configured_bom(&[]) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            self.status = e;
+                            continue;
+                        }
+                    };
                     self.status = format!(
                         "{} STL · {}",
                         self.catalog.stl_count(),
@@ -676,17 +747,6 @@ impl App {
                         .and_then(|v| v.selected.and_then(|i| v.scene.parts.get(i)))
                         .map(crate::constraints::PartId::of);
                     self.scene_key = key;
-                    if s.assembly
-                        && let Ok(text) = std::fs::read_to_string(
-                            self.home
-                                .join(format!("state/assembly-{}.toml", self.scene_key)),
-                        )
-                    {
-                        match toml::from_str::<Definition>(&text) {
-                            Ok(def) => s.apply(&def),
-                            Err(e) => self.status = format!("Assembly definition: {e}"),
-                        }
-                    }
                     if preserve {
                         let previous = previous.unwrap();
                         s.retain_assembly_state(&previous.scene);
@@ -704,7 +764,12 @@ impl App {
                         self.dimensions = false;
                         self.ghost = false;
                         if !self.scene.assembly {
-                            self.explosion = if s.assembly { 1. } else { 0. };
+                            self.explosion =
+                                if s.assembly && self.assembly_kind == AssemblyKind::Drawer {
+                                    1.
+                                } else {
+                                    0.
+                                };
                         }
                         if !s.assembly {
                             self.explosion = 0.;
@@ -720,6 +785,14 @@ impl App {
                             self.camera.yaw = std::f32::consts::PI;
                             self.camera.pitch = 1.25;
                         }
+                    }
+                    if s.assembly && crate::sustainer::lid_angle(&s).is_some() {
+                        if let Err(e) =
+                            crate::sustainer::set_lid_angle(&mut s, self.sustainer_angle)
+                        {
+                            self.status = e;
+                        }
+                        self.camera.fit(&s, self.explosion);
                     }
                     self.renderer.upload(&s);
                     self.scene = s;
@@ -875,6 +948,7 @@ impl App {
                 egui::CollapsingHeader::new(format!("{} · {}",index+1,child)).id_salt(("joint",index)).show(ui,|ui|{
                     ui.label(&r.label);ui.label(format!("{}: {}",t(z,"父件","Parent"),r.parent.path.rsplit('/').next().unwrap()));
                     match &mut r.joint {
+                        crate::constraints::Joint::Hinge{angle,min,max,..}=>{changed|=ui.add(egui::Slider::new(angle,*min..=*max).text(t(z,"转角 °","Angle °"))).changed();},
                         crate::constraints::Joint::Fixed{..}=>{ui.label(t(z,"固定 6 个自由度","All 6 DOFs fixed"));},
                         crate::constraints::Joint::Face{gap,..}=>{ui.horizontal(|ui|{ui.label(t(z,"面间隙 mm","Face gap mm"));changed|=ui.add(egui::DragValue::new(gap).speed(0.05).range(-10. ..=100.)).changed();});},
                         crate::constraints::Joint::Slider{offset,min,max,axis,..}=>{
@@ -998,25 +1072,27 @@ impl App {
                 });
                 ui.separator();
                 if self.tab == 0 {
+                    let previous_selection=self.selection.clone();
                     let before = (
                         self.selection.width.clone(),
                         self.selection.depth,
                         self.selection.height.clone(),
                         self.selection.hidden_key,
+                        self.assembly_kind,
+                        self.sustainer_options,
                     );
                     ui.add_enabled_ui(!self.catalog.root.as_os_str().is_empty(), |ui| {
                         ui.label(t(z, "方案类型", "Assembly type"));
                         egui::ComboBox::from_id_salt("assembly-kind")
                             .width(ui.available_width()-10.)
-                            .selected_text(AssemblyKind::Drawer.label(z))
+                            .selected_text(self.assembly_kind.label(z))
                             .show_ui(ui,|ui| {
                                 for kind in [AssemblyKind::Drawer,AssemblyKind::Sustainer] {
-                                    let label=if kind.supported() {kind.label(z).to_string()} else {format!("{} · {}",kind.label(z),t(z,"暂未支持","Not yet supported"))};
-                                    ui.add_enabled(kind.supported(),egui::Button::selectable(kind==AssemblyKind::Drawer,label));
+                                    ui.selectable_value(&mut self.assembly_kind,kind,kind.label(z));
                                 }
                             });
                         ui.separator();
-                        ui.strong(t(z, "抽屉规格", "Drawer specifications"));
+                        ui.strong(t(z, "装配规格", "Assembly specifications"));
                         egui::Grid::new("specifications")
                             .num_columns(2)
                             .spacing([12., 12.])
@@ -1069,48 +1145,60 @@ impl App {
                                 ui.end_row();
                             });
                         ui.add_space(8.);
-                        ui.checkbox(
-                            &mut self.selection.hidden_key,
-                            t(z, "隐藏钥匙（两件方案）", "Hidden key (two-file option)"),
-                        );
+                        if self.assembly_kind==AssemblyKind::Drawer {
+                            ui.checkbox(&mut self.selection.hidden_key,t(z,"隐藏钥匙（两件方案）","Hidden key (two-file option)"));
+                        } else {
+                            self.sustainer_options=self.sustainer_options.normalized(&self.selection);
+                            if matches!(self.selection.width.as_str(),"L"|"XL") {
+                                ui.label(t(z,"箱体类型","Body type"));
+                                egui::ComboBox::from_id_salt("sustainer-body").selected_text(match self.sustainer_options.body {
+                                    SustainerBody::Flat=>t(z,"平底","Flat"),SustainerBody::Dividers=>t(z,"隔板槽","Dividers"),SustainerBody::Sealed=>t(z,"密封分区","Sealed"),
+                                }).show_ui(ui,|ui| {
+                                    for (kind,label) in [(SustainerBody::Flat,t(z,"平底","Flat")),(SustainerBody::Dividers,t(z,"隔板槽","Dividers")),(SustainerBody::Sealed,t(z,"密封分区","Sealed"))] {
+                                        ui.selectable_value(&mut self.sustainer_options.body,kind,label);
+                                    }
+                                });
+                            }
+                            ui.add_enabled_ui(self.selection.depth>=6,|ui| {ui.checkbox(&mut self.sustainer_options.split_roof,t(z,"分体顶盖","Split roof"));});
+                        }
                         let after = (
                             self.selection.width.clone(),
                             self.selection.depth,
                             self.selection.height.clone(),
                             self.selection.hidden_key,
+                            self.assembly_kind,
+                            self.sustainer_options,
                         );
                         if before != after {
-                            if let Err(e)=self.gridfinity.validate(&self.selection) {
-                                self.selection.width=before.0;self.selection.depth=before.1;self.selection.height=before.2;self.selection.hidden_key=before.3;
-                                self.status=format!("{e}；请先调整或移除盒子布局");
-                            } else {
-                            let next = self.catalog.reconfigure(&self.selection, &self.bom);
-                            let removed = self.bom.iter().filter(|b| b.enabled
-                                && !next.iter().any(|n|n.path == b.path)).count();
-                            self.bom = next;
-                            if !self.gridfinity.bins.is_empty() && !self.bom.iter().any(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/"))
-                                && let Some(plate)=self.catalog.accessories(&self.selection).into_iter().filter(|e|e.path.contains("/Gridfinity Baseplate/")).min_by_key(|e|e.path.contains("Handle")) {
-                                    self.select_accessory(plate.path,true,1);
+                            let mut old=self.bom.clone();
+                            if before.4!=self.assembly_kind {
+                                let saved=Some((previous_selection.clone(),self.bom.clone(),before.5));
+                                let target=if before.4==AssemblyKind::Drawer {self.drawer_state=saved;self.box_state.clone()}else{self.box_state=saved;self.drawer_state.clone()};
+                                if let Some((selection,bom,options))=target {self.selection=selection;old=bom;if self.assembly_kind==AssemblyKind::Sustainer {self.sustainer_options=options;}} else {old.clear();}
+                                self.explosion=0.;
+                                if self.assembly_kind==AssemblyKind::Sustainer {self.sustainer_options=self.sustainer_options.normalized(&self.selection);}
                             }
-                            self.assembly(ctx);
-                            self.status = format!("{} ({removed})", t(
-                                z,
-                                "已保留兼容配件和数量，正在更新预览。移除不匹配的已选文件",
-                                "Compatible choices kept; updating preview. Removed incompatible selected files",
-                            ));
-                        }
+                            let validation=if self.assembly_kind==AssemblyKind::Drawer {self.gridfinity.validate(&self.selection)}else{Ok(())};
+                            match validation.and_then(|_|self.configured_bom(&old)) {
+                                Ok(next)=>{self.bom=next;self.assembly(ctx);}
+                                Err(e)=>{
+                                    self.selection=previous_selection;
+                                    self.assembly_kind=before.4;self.sustainer_options=before.5;
+                                    self.status=e;
+                                }
+                            }
                         }
                         ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().color(Color32::GRAY));
                     });
-                    ui.label(
-                        RichText::new(t(
-                            z,
-                            "Sustainer 工具箱方案暂未支持；Gridfinity 盒子在下方收纳配置中编辑。",
-                            "Box assemblies are not yet supported. Browse their models in Library.",
-                        ))
-                        .small()
-                        .color(Color32::GRAY),
-                    );
+                    if self.assembly_kind==AssemblyKind::Sustainer {
+                        ui.colored_label(Color32::from_rgb(225,184,112),t(z,"装配定位为估计，尚未校准。","Estimated assembly positions; not calibrated."));
+                        ui.small(t(z,"箱盖与五金开合仅供展示；五金螺钉未建模。底板、隔板和标签文字暂用单件查看。","Lid motion is illustrative; screws are not modeled. Preview inserts and label variants separately."));
+                        if let Some(mut angle)=crate::sustainer::lid_angle(&self.scene)
+                            && ui.add(egui::Slider::new(&mut angle,0. ..=110.).text(t(z,"开盖 °","Lid angle °"))).changed() {
+                                match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
+                        }
+                    }
+                    if self.assembly_kind==AssemblyKind::Drawer {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.strong(t(z,"标签文字","Label text"));
@@ -1191,6 +1279,7 @@ impl App {
                         });
                         ui.label(format!("{} {}",self.gridfinity.bins.len(),t(z,"个盒子","bins")));
                         ui.small(t(z,"盒高默认随层高配置，可在编辑器中调整。","Bin heights follow the drawer by default; adjust them in the editor."));
+                    }
                     }
                 } else {
                     ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t(
@@ -1306,7 +1395,18 @@ impl App {
         self.divider_editor.reset();
         self.assembly(ctx);
     }
+    fn configured_bom(&self, old: &[Bom]) -> Result<Vec<Bom>, String> {
+        if self.assembly_kind == AssemblyKind::Drawer {
+            return Ok(self.catalog.reconfigure(&self.selection, old));
+        }
+        self.catalog
+            .reconfigure_sustainer(&self.selection, self.sustainer_options, old)
+    }
     fn select_accessory(&mut self, path: String, enabled: bool, qty: u32) {
+        if self.assembly_kind == AssemblyKind::Sustainer {
+            Catalog::set_accessory(&mut self.bom, path, enabled, qty);
+            return;
+        }
         if enabled && path.contains("/Gridfinity Baseplate/") {
             let mut next = self.gridfinity.clone();
             next.baseplate = path.clone();
@@ -1329,18 +1429,30 @@ impl App {
             self.status = "请在分隔编辑器中添加隔板，配套端件和销自动统计".into();
             return;
         }
-        if !self
-            .catalog
-            .bom(&self.selection)
-            .iter()
-            .any(|b| b.path == path)
-            && !self
-                .catalog
-                .accessories(&self.selection)
+        let allowed = if self.assembly_kind == AssemblyKind::Sustainer {
+            self.catalog
+                .sustainer_bom(&self.selection, self.sustainer_options)
+                .unwrap_or_default()
                 .iter()
-                .any(|e| e.path == path)
-        {
-            self.status=t(self.zh,"当前组合只支持单个抽屉及收纳底板、内部分隔；此组件可单独预览。","Current assembly supports one drawer, baseplates and dividers; preview this component separately.").into();
+                .any(|b| b.path == path)
+        } else {
+            self.catalog
+                .bom(&self.selection)
+                .iter()
+                .any(|b| b.path == path)
+                || self
+                    .catalog
+                    .accessories(&self.selection)
+                    .iter()
+                    .any(|e| e.path == path)
+        };
+        if !allowed {
+            self.status = t(
+                self.zh,
+                "此组件与当前装配方案不匹配，可单独预览。",
+                "This component is outside the current assembly; preview it separately.",
+            )
+            .into();
             return;
         }
         let qty = self
@@ -1365,7 +1477,9 @@ impl App {
                 ui.strong(t(z, "打印清单", "PRINT LIST"));
                 ui.label(format!("{} {}", self.bom.iter().filter(|i| i.enabled).count(), t(z, "个已选文件", "selected files")));
                 ui.separator();
-                ui.label(RichText::new(t(z, "份数按原 STL 统计；Springs、Rails 每份各含 2 个实体。导出按份数保留打印支撑，并应用标签文字。", "Copies count source files; Springs and Rails each contain 2 bodies. Exports preserve supports and apply label lettering for every copy.")).small().color(Color32::GRAY));
+                ui.label(RichText::new(if self.assembly_kind==AssemblyKind::Sustainer {
+                    t(z,"份数按源 STL 统计，展示拆分不增加打印份数；打印勾选不影响完整箱子预览。","Copies count source files; display splitting does not add print copies. Print selection keeps the complete box preview.")
+                }else{t(z, "份数按原 STL 统计；Springs、Rails 每份各含 2 个实体。导出按份数保留打印支撑，并应用标签文字。", "Copies count source files; Springs and Rails each contain 2 bodies. Exports preserve supports and apply label lettering for every copy.")}).small().color(Color32::GRAY));
             });
             let mut preview = None;
             let mut changed = false;
@@ -1410,7 +1524,9 @@ impl App {
                     self.preview.schedule(request, Instant::now(), Duration::ZERO);
                 }
             });
-            ui.label(RichText::new(if self.selection.width=="XL" {
+            ui.label(RichText::new(if self.assembly_kind==AssemblyKind::Sustainer {
+                t(z,"箱子五金规格与数量请参照 Sustainers Assembly；螺钉未建模。","Refer to Sustainers Assembly for box hardware sizes and quantities; screws are not modeled.")
+            }else if self.selection.width=="XL" {
                 t(z,"XL 五金按专用结构核对；不直接沿用普通抽屉数量。","Check XL hardware separately; standard drawer counts may not apply.")
             } else {
                 t(z,"五金：M4 × 14 mm，1F ×4、2F/4F ×6；顶提手选装 M6 × 50 mm ×2。","Hardware: M4 × 14 mm, 1F ×4 / 2F and 4F ×6; optional top handle M6 × 50 mm ×2.")
@@ -1425,6 +1541,9 @@ impl App {
         scene
     }
     fn divider_view(&mut self, ctx: &egui::Context) {
+        if self.assembly_kind == AssemblyKind::Sustainer {
+            return;
+        }
         if self.divider_editor.open {
             if !self.scene.assembly {
                 if !self.preview.has_pending()
@@ -2185,12 +2304,26 @@ impl App {
                 .and_then(|_| {
                     toml::to_string_pretty(&Preset {
                         print_config: Some(self.export_options.plate.clone()),
-                        gridfinity: self.gridfinity.clone(),
-                        label: self.label.clone(),
-                        assembly_kind: AssemblyKind::Drawer,
+                        gridfinity: if self.assembly_kind == AssemblyKind::Drawer {
+                            self.gridfinity.clone()
+                        } else {
+                            Default::default()
+                        },
+                        label: if self.assembly_kind == AssemblyKind::Drawer {
+                            self.label.clone()
+                        } else {
+                            Default::default()
+                        },
+                        assembly_kind: self.assembly_kind,
+                        sustainer_options: self.sustainer_options.normalized(&self.selection),
+                        sustainer_angle: self.sustainer_angle,
                         selection: self.selection.clone(),
                         bom: self.bom.clone(),
-                        divider_layout: self.divider_layout.clone(),
+                        divider_layout: if self.assembly_kind == AssemblyKind::Drawer {
+                            self.divider_layout.clone()
+                        } else {
+                            Default::default()
+                        },
                     })
                     .map_err(|e| e.to_string())
                 })
@@ -2218,8 +2351,20 @@ impl App {
                 .and_then(|s| toml::from_str::<Preset>(&s).map_err(|e| e.to_string()));
             match result {
                 Ok(p) => {
-                    if !p.assembly_kind.supported() {
-                        self.status=t(self.zh,"当前版本暂不支持盒子方案；当前抽屉配置已保留。","Box assemblies are not supported yet; the current drawer configuration was kept.").into();
+                    if !p.sustainer_angle.is_finite()
+                        || !(0. ..=110.).contains(&p.sustainer_angle)
+                        || p.assembly_kind == AssemblyKind::Sustainer
+                            && (p.label.active()
+                                || !p.gridfinity.bins.is_empty()
+                                || p.divider_layout.enabled
+                                || !p.divider_layout.items.is_empty())
+                    {
+                        self.status = t(
+                            self.zh,
+                            "箱子方案含无效开盖角度或不兼容的抽屉内部配置。",
+                            "Invalid lid angle or incompatible drawer inserts in box preset.",
+                        )
+                        .into();
                         return;
                     }
                     if let Some(config) = &p.print_config
@@ -2258,6 +2403,21 @@ impl App {
                         )
                         .into();
                     } else {
+                        let next = match if p.assembly_kind == AssemblyKind::Sustainer {
+                            self.catalog.reconfigure_sustainer(
+                                &p.selection,
+                                p.sustainer_options,
+                                &p.bom,
+                            )
+                        } else {
+                            Ok(self.catalog.reconfigure(&p.selection, &p.bom))
+                        } {
+                            Ok(bom) => bom,
+                            Err(e) => {
+                                self.status = e;
+                                return;
+                            }
+                        };
                         if let Some(config) = p.print_config {
                             self.export_options.plate = config;
                         } else {
@@ -2265,6 +2425,9 @@ impl App {
                             self.export_options.plate.text_filaments.clear();
                         }
                         self.selection = p.selection;
+                        self.assembly_kind = p.assembly_kind;
+                        self.sustainer_options = p.sustainer_options.normalized(&self.selection);
+                        self.sustainer_angle = p.sustainer_angle;
                         self.label = p.label;
                         self.gridfinity = p.gridfinity;
                         self.divider_layout = p.divider_layout;
@@ -2274,29 +2437,16 @@ impl App {
                         let excluded = p
                             .bom
                             .iter()
-                            .filter(|b| {
-                                b.enabled
-                                    && !b.path.starts_with(crate::gridfinity::PREFIX)
-                                    && !self
-                                        .catalog
-                                        .bom(&self.selection)
-                                        .iter()
-                                        .any(|n| n.path == b.path)
-                                    && !self
-                                        .catalog
-                                        .accessories(&self.selection)
-                                        .iter()
-                                        .any(|n| n.path == b.path)
-                            })
+                            .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
                             .count();
-                        self.bom = self.catalog.reconfigure(&self.selection, &p.bom);
+                        self.bom = next;
                         self.assembly(ctx);
                         self.status = format!(
                             "{} {excluded}",
                             t(
                                 self.zh,
-                                "方案已载入，默认齿条已补齐；已移除超出本版本组合范围的文件：",
-                                "Preset loaded; required racks restored. Out-of-scope files removed:"
+                                "方案已载入；已移除不匹配的文件：",
+                                "Preset loaded. Incompatible files removed:"
                             )
                         );
                     }
@@ -2325,6 +2475,9 @@ impl App {
         Ok(())
     }
     fn gridfinity_window(&mut self, ctx: &egui::Context) {
+        if self.assembly_kind == AssemblyKind::Sustainer {
+            return;
+        }
         if !self.gridfinity_open {
             self.gridfinity_editor.cancel();
             return;
@@ -2480,6 +2633,9 @@ impl App {
         }
     }
     fn label_window(&mut self, ctx: &egui::Context) {
+        if self.assembly_kind == AssemblyKind::Sustainer {
+            return;
+        }
         if !self.label_open {
             return;
         }
@@ -2748,8 +2904,16 @@ impl App {
         let items = self.bom.clone();
         let root = self.catalog.root.clone();
         let options = self.export_options.clone();
-        let label = self.label.clone();
-        let gf = self.gridfinity.clone();
+        let label = if self.assembly_kind == AssemblyKind::Drawer {
+            self.label.clone()
+        } else {
+            Default::default()
+        };
+        let gf = if self.assembly_kind == AssemblyKind::Drawer {
+            self.gridfinity.clone()
+        } else {
+            Default::default()
+        };
         let gf_selection = self.selection.clone();
         let gf_home = self.home.clone();
         let (tx, rx) = mpsc::channel();
@@ -2991,6 +3155,12 @@ impl eframe::App for App {
                                 "native-text-colors-engraved.png",
                                 "native-english-name.png",
                                 "native-text-colors-flat.png",
+                                "native-sustainer-closed.png",
+                                "native-sustainer-open.png",
+                                "native-sustainer-exploded.png",
+                                "native-sustainer-l-sealed.png",
+                                "native-sustainer-s-split.png",
+                                "native-sustainer-xl-split.png",
                             ][self.smoke_stage as usize],
                         ),
                         &bytes,
@@ -3009,13 +3179,80 @@ impl eframe::App for App {
                             self.status
                         ),
                     );
-                    if self.smoke_stage == 39 {
+                    if self.smoke_stage == 45 {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     } else {
                         self.smoke_stage += 1;
                         self.smoke_frame = 0;
                         self.screenshot_requested = false;
                         match self.smoke_stage {
+                            40 => {
+                                self.assembly_kind = AssemblyKind::Sustainer;
+                                self.export_options.plate.preview_colors = false;
+                                self.sustainer_options = Default::default();
+                                self.sustainer_angle = 0.;
+                                self.selection = Selection::default();
+                                self.zh = true;
+                                self.gridfinity_open = false;
+                                self.label_open = false;
+                                self.divider_editor.open = false;
+                                self.joints_open = false;
+                                self.dimensions = false;
+                                self.export_open = false;
+                                self.colors_open = false;
+                                self.selected = None;
+                                self.ghost = false;
+                                self.explosion = 0.;
+                                self.bom = self
+                                    .catalog
+                                    .sustainer_bom(&self.selection, self.sustainer_options)
+                                    .unwrap();
+                                self.assembly(ctx);
+                            }
+                            41 | 42 => {
+                                self.sustainer_angle =
+                                    if self.smoke_stage == 41 { 80. } else { 0. };
+                                if let Err(e) = crate::sustainer::set_lid_angle(
+                                    &mut self.scene,
+                                    self.sustainer_angle,
+                                ) {
+                                    self.status = e;
+                                }
+                                self.explosion = if self.smoke_stage == 42 { 1. } else { 0. };
+                                self.camera.fit(&self.scene, self.explosion);
+                            }
+                            43..=45 => {
+                                self.selection = Selection {
+                                    width: match self.smoke_stage {
+                                        43 => "L",
+                                        44 => "S",
+                                        _ => "XL",
+                                    }
+                                    .into(),
+                                    depth: match self.smoke_stage {
+                                        43 => 4,
+                                        44 => 6,
+                                        _ => 7,
+                                    },
+                                    height: if self.smoke_stage == 43 { "2F" } else { "1F" }.into(),
+                                    hidden_key: false,
+                                };
+                                self.sustainer_options = SustainerOptions {
+                                    body: if self.smoke_stage == 43 {
+                                        SustainerBody::Sealed
+                                    } else {
+                                        SustainerBody::Flat
+                                    },
+                                    split_roof: self.smoke_stage >= 44,
+                                };
+                                self.sustainer_angle = 65.;
+                                self.explosion = 0.;
+                                self.bom = self
+                                    .catalog
+                                    .sustainer_bom(&self.selection, self.sustainer_options)
+                                    .unwrap();
+                                self.assembly(ctx);
+                            }
                             1 => {
                                 self.dimensions = true;
                                 self.selected =
@@ -3346,6 +3583,21 @@ impl eframe::App for App {
         }
     }
 }
+// Runs only inside the preview worker, including when the base mesh cache hits.
+fn load_scene_definition(scene: &mut Scene, home: &Path, key: &str) -> Result<(), String> {
+    if !scene.assembly {
+        return Ok(());
+    }
+    let text = match std::fs::read_to_string(home.join(format!("state/assembly-{key}.toml"))) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let definition: Definition =
+        toml::from_str(&text).map_err(|e| format!("Assembly definition: {e}"))?;
+    scene.apply(&definition);
+    Ok(())
+}
 fn ui_height(ctx: &egui::Context) -> f32 {
     ctx.content_rect().height()
 }
@@ -3370,6 +3622,12 @@ fn group_label(zh: bool, group: &str) -> &str {
         "Mechanism" => "机构",
         "Key" => "钥匙",
         "Roof" => "顶盖",
+        "Roof connector" => "分体顶盖连接件",
+        "Lower hinges" => "下铰链",
+        "Upper hinges" => "上铰链",
+        "Hinge rods" => "铰链轴杆",
+        "Locks" => "前锁组件",
+        "Label" => "标签",
         "Base" => "底座",
         "Optional baseplate" => "底板（可选）",
         "Optional accessory" => "选装配件",
@@ -3430,6 +3688,8 @@ mod accessory_export_tests {
             gridfinity: Default::default(),
             label: Default::default(),
             assembly_kind: AssemblyKind::Drawer,
+            sustainer_options: Default::default(),
+            sustainer_angle: 0.,
             selection: Selection::default(),
             bom: vec![item.clone()],
             divider_layout: Default::default(),
@@ -3444,6 +3704,8 @@ mod accessory_export_tests {
         legacy.as_table_mut().unwrap().remove("print_config");
         legacy.as_table_mut().unwrap().remove("divider_layout");
         legacy.as_table_mut().unwrap().remove("assembly_kind");
+        legacy.as_table_mut().unwrap().remove("sustainer_options");
+        legacy.as_table_mut().unwrap().remove("sustainer_angle");
         legacy.as_table_mut().unwrap().remove("label");
         let legacy: Preset = legacy.try_into().unwrap();
         assert!(legacy.print_config.is_none());
@@ -3453,8 +3715,19 @@ mod accessory_export_tests {
         assert_eq!(restored.assembly_kind, AssemblyKind::Drawer);
         let mut box_preset = toml::Value::try_from(&preset).unwrap();
         box_preset["assembly_kind"] = toml::Value::String("sustainer".into());
-        let box_preset: Preset = box_preset.try_into().unwrap();
-        assert!(!box_preset.assembly_kind.supported());
+        let mut box_preset: Preset = box_preset.try_into().unwrap();
+        box_preset.sustainer_options = SustainerOptions {
+            body: SustainerBody::Sealed,
+            split_roof: true,
+        };
+        box_preset.sustainer_angle = 72.;
+        let box_preset: Preset = toml::from_str(&toml::to_string(&box_preset).unwrap()).unwrap();
+        assert_eq!(box_preset.assembly_kind, AssemblyKind::Sustainer);
+        assert_eq!(box_preset.sustainer_options.body, SustainerBody::Sealed);
+        assert!(box_preset.sustainer_options.split_roof);
+        assert_eq!(box_preset.sustainer_angle, 72.);
+        assert_eq!(legacy.sustainer_angle, 0.);
+        assert_eq!(legacy.sustainer_options, SustainerOptions::default());
         let mut with_layout = preset;
         with_layout.label = crate::label::Config {
             enabled: true,

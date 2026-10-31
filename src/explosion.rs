@@ -3,6 +3,14 @@ use crate::{constraints::PartId, scene::Scene};
 use glam::Vec3;
 
 pub fn reset(scene: &mut Scene) -> Result<(), String> {
+    if scene.assembly
+        && scene
+            .parts
+            .iter()
+            .all(|p| p.pose.path.starts_with(crate::sustainer::PREFIX))
+    {
+        return crate::sustainer::reset_explosion(scene);
+    }
     if !scene.assembly || scene.relations.is_empty() {
         return Err("Explosion layout requires an assembled drawer with relations".into());
     }
