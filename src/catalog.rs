@@ -65,6 +65,49 @@ impl SustainerOptions {
     }
 }
 
+/// Supported combinations in this package, including both cover choices.
+pub fn sustainer_configurations() -> Vec<(Selection, SustainerOptions)> {
+    let mut result = Vec::new();
+    for width in ["S", "M", "L", "XL"] {
+        for depth in 3..=7 {
+            let heights: &[&str] = if width == "XL" {
+                &["1F"]
+            } else {
+                &["1F", "2F", "4F"]
+            };
+            let bodies: &[SustainerBody] = if matches!(width, "L" | "XL") {
+                &[
+                    SustainerBody::Flat,
+                    SustainerBody::Dividers,
+                    SustainerBody::Sealed,
+                ]
+            } else {
+                &[SustainerBody::Flat]
+            };
+            for height in heights {
+                for &body in bodies {
+                    for split_roof in if depth >= 6 {
+                        vec![false, true]
+                    } else {
+                        vec![false]
+                    } {
+                        result.push((
+                            Selection {
+                                width: width.into(),
+                                depth,
+                                height: (*height).into(),
+                                hidden_key: false,
+                            },
+                            SustainerOptions { body, split_roof },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 // The supplied package mixes Roof/Roofs, whitespace and apostrophes. Match the
 // complete directory-qualified name, preserve its original spelling, reject ambiguity.
 fn sustainer_key(path: &str) -> String {
@@ -144,7 +187,9 @@ impl Catalog {
         for b in &mut bom {
             if let Some(saved) = old.iter().find(|p| p.path == b.path) {
                 b.enabled = saved.enabled;
-                if b.group != "Locks" || old_small.is_none_or(|old| old == small) {
+                if b.group != "Roof connector"
+                    && (b.group != "Locks" || old_small.is_none_or(|old| old == small))
+                {
                     b.qty = saved.qty;
                 }
             }
@@ -218,7 +263,12 @@ impl Catalog {
             }
             add(
                 format!("{dir}/Roof/Connector For Split Roof.stl"),
-                1,
+                match s.width.as_str() {
+                    "S" => 2,
+                    "M" => 3,
+                    "L" => 4,
+                    _ => 5,
+                },
                 "Roof connector",
             )?;
         } else {
@@ -585,6 +635,36 @@ mod tests {
                                 bom.iter().filter(|b| b.group == "Roof connector").count(),
                                 usize::from(split_roof)
                             );
+                            if split_roof {
+                                let expected = match width {
+                                    "S" => 2,
+                                    "M" => 3,
+                                    "L" => 4,
+                                    _ => 5,
+                                };
+                                assert_eq!(
+                                    bom.iter()
+                                        .find(|b| b.group == "Roof connector")
+                                        .unwrap()
+                                        .qty,
+                                    expected
+                                );
+                                let mut legacy = bom.clone();
+                                legacy
+                                    .iter_mut()
+                                    .find(|b| b.group == "Roof connector")
+                                    .unwrap()
+                                    .qty = 1;
+                                assert_eq!(
+                                    c.reconfigure_sustainer(&s, options, &legacy)
+                                        .unwrap()
+                                        .iter()
+                                        .find(|b| b.group == "Roof connector")
+                                        .unwrap()
+                                        .qty,
+                                    expected
+                                );
+                            }
                             assert_eq!(
                                 bom.iter()
                                     .find(|b| b.name() == "LOCK HOLDER.stl")

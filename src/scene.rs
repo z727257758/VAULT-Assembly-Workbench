@@ -33,6 +33,8 @@ pub struct Definition {
     pub poses: Vec<Pose>,
     #[serde(default)]
     pub relations: Vec<crate::constraints::Relation>,
+    #[serde(default)]
+    pub mating_checks: Vec<crate::constraints::MateCheck>,
 }
 #[derive(Clone)]
 pub struct Part {
@@ -51,6 +53,7 @@ pub struct Scene {
     pub assembly: bool,
     pub relations: Vec<crate::constraints::Relation>,
     pub constraint_warning: Option<String>,
+    pub mating_checks: Vec<crate::constraints::MateCheck>,
 }
 impl Part {
     pub fn mesh_key(&self) -> (String, Option<u32>) {
@@ -265,6 +268,7 @@ impl Scene {
             assembly,
             relations: Vec::new(),
             constraint_warning: None,
+            mating_checks: Vec::new(),
         };
         if assembly {
             if scene
@@ -309,6 +313,25 @@ impl Scene {
     /// Keep edits for surviving parts while retaining default mates for new parts.
     pub fn retain_assembly_state(&mut self, old: &Scene) {
         use crate::constraints::PartId;
+        let old_sustainer_estimates = !old.calibrated
+            && old
+                .relations
+                .iter()
+                .any(|r| r.label.starts_with("Sustainer:") && r.label.contains("(estimated)"))
+            && self
+                .relations
+                .iter()
+                .any(|r| r.label.starts_with("Sustainer datum:"));
+        let old_latch_defaults = !old.calibrated
+            && old.relations.iter().any(|r| {
+                r.label
+                    .starts_with("Sustainer datum: inner lock / small pins")
+                    && r.label != crate::sustainer::LOCK_INNER
+            })
+            && self
+                .relations
+                .iter()
+                .any(|r| r.label == crate::sustainer::LOCK_INNER);
         let layout_changed = self
             .relations
             .iter()
@@ -354,14 +377,20 @@ impl Scene {
                         && (r.label.starts_with("Divider layout:")
                             || r.label.starts_with("Gridfinity bin /"))
                 });
-                if old_parent == new_parent && !legacy_hidden && !layout_owned {
+                let source_owned = legacy_hidden
+                    || layout_owned
+                    || old_sustainer_estimates
+                    || old_latch_defaults && part.pose.path.contains("/Locks/");
+                if old_parent == new_parent && !source_owned {
                     part.pose = previous.pose.clone();
                 }
                 part.visible = previous.visible;
             }
         }
         for relation in &old.relations {
-            if ids.contains(&relation.parent)
+            if !(old_sustainer_estimates
+                || old_latch_defaults && relation.child.path.contains("/Locks/"))
+                && ids.contains(&relation.parent)
                 && ids.contains(&relation.child)
                 && self
                     .relations
@@ -392,6 +421,7 @@ impl Scene {
             calibrated: self.calibrated,
             relations: self.relations.clone(),
             poses: self.parts.iter().map(|p| p.pose.clone()).collect(),
+            mating_checks: self.mating_checks.clone(),
         }
     }
     pub fn bounds(&self, explosion: f32) -> (Vec3, f32) {

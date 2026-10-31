@@ -60,6 +60,154 @@ pub struct Relation {
     pub joint: Joint,
     pub label: String,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MateMeasure {
+    Coaxial,
+    Plane { gap: f32 },
+    Clearance { min: f32 },
+    Point,
+}
+/// Independent geometric checks, not additional solving edges or a CAD proof.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MateCheck {
+    pub label: String,
+    pub parent: PartId,
+    pub child: PartId,
+    pub parent_point: [f32; 3],
+    pub child_point: [f32; 3],
+    pub parent_axis: [f32; 3],
+    pub child_axis: [f32; 3],
+    pub measure: MateMeasure,
+    pub tolerance: f32,
+    #[serde(default = "required_check")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_hinge_closed: Option<String>,
+}
+fn required_check() -> bool {
+    true
+}
+#[derive(Clone, Serialize)]
+pub struct MateResult {
+    pub label: String,
+    pub error_mm: f32,
+    pub angle_degrees: f32,
+    pub tolerance_mm: f32,
+    pub within_tolerance: bool,
+    pub required: bool,
+    pub active: bool,
+}
+impl MateCheck {
+    pub fn world(
+        scene: &Scene,
+        pair: [usize; 2],
+        label: &str,
+        points: [Vec3; 2],
+        axis: Vec3,
+        measure: MateMeasure,
+        tolerance: f32,
+    ) -> Self {
+        let [parent, child] = pair;
+        let [a, b] = points;
+        let ap = scene.parts[parent].pose.matrix(0.).inverse();
+        let bp = scene.parts[child].pose.matrix(0.).inverse();
+        Self {
+            label: label.into(),
+            parent: PartId::of(&scene.parts[parent]),
+            child: PartId::of(&scene.parts[child]),
+            parent_point: ap.transform_point3(a).to_array(),
+            child_point: bp.transform_point3(b).to_array(),
+            parent_axis: ap.transform_vector3(axis).to_array(),
+            child_axis: bp.transform_vector3(axis).to_array(),
+            measure,
+            tolerance,
+            required: true,
+            when_hinge_closed: None,
+        }
+    }
+    pub fn evaluate(&self, scene: &Scene) -> MateResult {
+        let mut result = MateResult {
+            label: self.label.clone(),
+            error_mm: f32::MAX,
+            angle_degrees: 180.,
+            tolerance_mm: self.tolerance,
+            within_tolerance: false,
+            required: self.required,
+            active: true,
+        };
+        if let Some(label) = &self.when_hinge_closed {
+            result.active = scene
+                .relations
+                .iter()
+                .find(|r| &r.label == label)
+                .is_some_and(|r| matches!(r.joint, Joint::Hinge{angle,..} if angle.abs()<0.01));
+            if !result.active {
+                return result;
+            }
+        }
+        let Some(a) = scene.parts.iter().find(|p| PartId::of(p) == self.parent) else {
+            return result;
+        };
+        let Some(b) = scene.parts.iter().find(|p| PartId::of(p) == self.child) else {
+            return result;
+        };
+        let am = a.pose.matrix(0.);
+        let bm = b.pose.matrix(0.);
+        let ap = am.transform_point3(self.parent_point.into());
+        let bp = bm.transform_point3(self.child_point.into());
+        let aa = am
+            .transform_vector3(self.parent_axis.into())
+            .normalize_or_zero();
+        let ba = bm
+            .transform_vector3(self.child_axis.into())
+            .normalize_or_zero();
+        result.angle_degrees = aa.dot(ba).abs().clamp(0., 1.).acos().to_degrees();
+        let d = bp - ap;
+        result.error_mm = match self.measure {
+            MateMeasure::Coaxial => (d - aa * d.dot(aa)).length(),
+            MateMeasure::Plane { gap } => (d.dot(aa) - gap).abs(),
+            MateMeasure::Clearance { min } => (min - d.dot(aa)).max(0.),
+            MateMeasure::Point => d.length(),
+        };
+        result.within_tolerance = result.error_mm.is_finite()
+            && result.error_mm <= self.tolerance
+            && result.angle_degrees <= 0.1;
+        result
+    }
+}
+#[derive(Clone, Copy, Deserialize)]
+pub struct LatchDisplayPose {
+    pub inner_degrees: f32,
+    pub outer_degrees: f32,
+}
+#[derive(Deserialize)]
+struct LatchRecipes {
+    one_floor: LatchDisplayPose,
+    tall: LatchDisplayPose,
+    xl4: LatchDisplayPose,
+    release_inner_degrees: f32,
+}
+fn latch_recipes() -> &'static LatchRecipes {
+    static RECIPES: std::sync::LazyLock<LatchRecipes> = std::sync::LazyLock::new(|| {
+        toml::from_str(include_str!("../config/sustainer-locks.toml"))
+            .expect("Valid latch display calibration")
+    });
+    &RECIPES
+}
+pub fn latch_display_pose(tall: bool, xl4: bool) -> LatchDisplayPose {
+    let recipes = latch_recipes();
+    if xl4 {
+        recipes.xl4
+    } else if tall {
+        recipes.tall
+    } else {
+        recipes.one_floor
+    }
+}
+pub fn latch_release_inner_degrees() -> f32 {
+    latch_recipes().release_inner_degrees
+}
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceHit {
     pub part: usize,
@@ -581,6 +729,69 @@ mod tests {
             parts: vec![part(0., 0), part(5., 1), part(8., 2)],
             ..Default::default()
         }
+    }
+    #[test]
+    fn geometric_checks_detect_displacement_rotation_and_missing_parts() {
+        let mut s = scene();
+        let axis = MateCheck::world(
+            &s,
+            [0, 1],
+            "axis",
+            [Vec3::ZERO, Vec3::X * 5.],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.02,
+        );
+        assert!(axis.evaluate(&s).within_tolerance);
+        s.parts[1].pose.position[0] += 20.;
+        assert!(axis.evaluate(&s).within_tolerance); // Sliding along an axis is allowed.
+        s.parts[1].pose.position[1] += 0.1;
+        assert!((axis.evaluate(&s).error_mm - 0.1).abs() < 1e-5);
+        s.parts[1].pose.position[1] = 0.;
+        s.parts[1].pose.rotation[2] = 5.;
+        assert!(!axis.evaluate(&s).within_tolerance);
+        s.parts.remove(1);
+        assert!(!axis.evaluate(&s).within_tolerance);
+    }
+    #[test]
+    fn signed_clearance_check_keeps_negative_gap_visible() {
+        let mut s = scene();
+        let check = MateCheck::world(
+            &s,
+            [0, 1],
+            "end planes",
+            [Vec3::ZERO, Vec3::X * 0.5],
+            Vec3::X,
+            MateMeasure::Clearance { min: 0. },
+            0.03,
+        );
+        assert!(check.evaluate(&s).within_tolerance);
+        s.parts[1].pose.position[0] -= 0.625;
+        let result = check.evaluate(&s);
+        assert!(!result.within_tolerance);
+        assert!((result.error_mm - 0.125).abs() < 1e-5);
+    }
+    #[test]
+    fn closed_only_checks_are_inactive_while_the_named_hinge_is_open() {
+        let mut s = scene();
+        let mut r = Relation::hinge(&s, 0, 2, Vec3::ZERO, Vec3::X).unwrap();
+        r.label = "lid".into();
+        add(&mut s, r).unwrap();
+        let mut check = MateCheck::world(
+            &s,
+            [0, 1],
+            "catch",
+            [Vec3::ZERO; 2],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.03,
+        );
+        check.when_hinge_closed = Some("lid".into());
+        assert!(check.evaluate(&s).active && check.evaluate(&s).within_tolerance);
+        if let Joint::Hinge { angle, .. } = &mut s.relations[0].joint {
+            *angle = 75.;
+        }
+        assert!(!check.evaluate(&s).active);
     }
     #[test]
     fn fixed_chain_follows_parent_and_explosion_is_not_solved() {

@@ -41,6 +41,25 @@ fn main() -> eframe::Result {
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| executable.parent().unwrap().to_path_buf());
     let smoke = std::env::args().any(|a| a == "--smoke-test");
+    if std::env::args().any(|a| a == "--calibrate-sustainers") {
+        let result = (|| -> Result<(), String> {
+            let model_root = std::env::var("VAULT_MODEL_ROOT")
+                .ok()
+                .or_else(|| {
+                    let settings =
+                        std::fs::read_to_string(home.join("state/settings.toml")).ok()?;
+                    let value: toml::Value = toml::from_str(&settings).ok()?;
+                    value.get("model_root")?.as_str().map(String::from)
+                })
+                .ok_or("Set VAULT_MODEL_ROOT or choose a model library in the app first")?;
+            sustainer::audit(std::path::Path::new(&model_root), &home)
+        })();
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let debug_ui = std::env::args().any(|a| a == "--debug-ui");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -187,6 +206,7 @@ mod display_integration_tests {
         let old_position = scene.parts[0].pose.position;
         let legacy = scene::Definition {
             calibrated: true,
+            mating_checks: vec![],
             relations: vec![],
             poses: vec![scene::Pose {
                 path: path.into(),

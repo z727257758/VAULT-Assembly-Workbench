@@ -167,6 +167,18 @@ fn cross_edges(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
     None
 }
 fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
+    // A flange edge landing on a seating plane is contact. A proper surface
+    // crossing must straddle both triangle planes, not just one of them.
+    let straddles = |points: [Vec3; 3], plane: [Vec3; 3]| {
+        let n = (plane[1] - plane[0])
+            .cross(plane[2] - plane[0])
+            .normalize_or_zero();
+        let distances = points.map(|p| (p - plane[0]).dot(n));
+        distances.iter().any(|&d| d > eps) && distances.iter().any(|&d| d < -eps)
+    };
+    if !straddles(a, b) || !straddles(b, a) {
+        return None;
+    }
     cross_edges(a, b, eps).or_else(|| cross_edges(b, a, eps))
 }
 #[derive(Clone)]
@@ -276,6 +288,22 @@ pub fn audit_pair(scene: &Scene, a: usize, b: usize) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn seating_edge_contact_is_not_a_surface_crossing() {
+        let face = [
+            Vec3::new(-3., -3., 0.),
+            Vec3::new(3., -3., 0.),
+            Vec3::new(0., 3., 0.),
+        ];
+        let edge = [
+            Vec3::new(-1., 0., 0.),
+            Vec3::new(1., 0., 0.),
+            Vec3::new(0., 0., 2.),
+        ];
+        assert!(cross_triangles(face, edge, 0.01).is_none());
+        let penetrating = edge.map(|p| p - Vec3::Z * 0.5);
+        assert!(cross_triangles(face, penetrating, 0.01).is_some());
+    }
     #[test]
     fn crossing_triangles_are_found() {
         let a = [

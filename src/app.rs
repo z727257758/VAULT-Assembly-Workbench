@@ -1191,8 +1191,22 @@ impl App {
                         ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().color(Color32::GRAY));
                     });
                     if self.assembly_kind==AssemblyKind::Sustainer {
-                        ui.colored_label(Color32::from_rgb(225,184,112),t(z,"装配定位为估计，尚未校准。","Estimated assembly positions; not calibrated."));
-                        ui.small(t(z,"箱盖与五金开合仅供展示；五金螺钉未建模。底板、隔板和标签文字暂用单件查看。","Lid motion is illustrative; screws are not modeled. Preview inserts and label variants separately."));
+                        if !self.scene.mating_checks.is_empty() {
+                            let results:Vec<_>=self.scene.mating_checks.iter().map(|c|c.evaluate(&self.scene)).filter(|r|r.active).collect();
+                            let passed=results.iter().filter(|r|r.within_tolerance).count();
+                            ui.colored_label(if passed==results.len(){Color32::LIGHT_GREEN}else{Color32::from_rgb(225,184,112)},
+                                format!("{} {passed}/{}",t(z,"孔轴 / 安装面核对","Axis / seating checks"),results.len()));
+                            ui.small(t(z,"按源件几何定位，尚未实物确认。","Positioned from source geometry; physical confirmation pending."));
+                            if passed<results.len() {
+                                egui::CollapsingHeader::new(t(z,"查看配合偏差","Mating discrepancies")).show(ui,|ui| {
+                                    for r in results.iter().filter(|r|!r.within_tolerance) {
+                                        ui.small(format!("{}: {:.3} mm / {:.2}°",r.label,r.error_mm,r.angle_degrees));
+                                    }
+                                });
+                            }
+                            for note in crate::sustainer::review_notes(&self.scene,z) {ui.small(note);}
+                        }
+                        ui.small(t(z,"开盖预览先松开卡扣；仅展示状态，未验证机械行程。螺钉未建模，内部配件暂用单件查看。","Lid preview releases the clasps first. States are illustrative; mechanical travel is unverified. Screws are not modeled."));
                         if let Some(mut angle)=crate::sustainer::lid_angle(&self.scene)
                             && ui.add(egui::Slider::new(&mut angle,0. ..=110.).text(t(z,"开盖 °","Lid angle °"))).changed() {
                                 match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
@@ -1867,6 +1881,8 @@ impl App {
                         },
                         if self.scene.calibrated {
                             t(z, "装配坐标已人工确认", "Assembly manually verified")
+                        } else if !self.scene.mating_checks.is_empty() {
+                            t(z,"已按孔轴及安装面定位 · 待实物核对","Located from axes and seating faces · physical review pending")
                         } else {
                             t(
                                 z,

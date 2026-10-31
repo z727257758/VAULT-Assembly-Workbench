@@ -1,14 +1,18 @@
 //! Display assembly for Sustainers. Meshes remain immutable. Surface datums
-//! recover print rotations; hardware positions are estimates, never calibration.
+//! recover print rotations and mating features. This is mesh datum positioning,
+//! not a manually verified CAD or manufacturing assembly.
 use crate::{
-    constraints::{self, Joint, Relation},
+    constraints::{self, Joint, MateCheck, MateMeasure, Relation},
+    display::{self, CircleDatum, PlaneDatum},
     scene::{Part, Scene},
 };
-use glam::{DVec3, Mat3, Quat, Vec3};
+use glam::{DVec3, Mat3, Mat4, Quat, Vec3};
 use std::collections::BTreeMap;
 
 pub const PREFIX: &str = "02. SUSTAINERS/";
-pub const LID: &str = "Sustainer: lid hinge (estimated)";
+pub const LID: &str = "Sustainer datum: lid / paired hinge axes";
+pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / local-clearance-v4";
+pub const LOCK_OUTER: &str = "Sustainer datum: outer lock / large pins / local-clearance-v4";
 
 fn raw(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, z, -y)
@@ -105,11 +109,7 @@ fn broad_rotation(part: &Part, expected_width: f32) -> Result<Quat, String> {
         .unwrap()
         .2)
 }
-fn attach(scene: &mut Scene, parent: usize, child: usize, label: &str) -> Result<(), String> {
-    let mut r = Relation::fixed(scene, parent, child, false)?;
-    r.label = format!("Sustainer: {label} (estimated)");
-    constraints::add(scene, r)
-}
+
 fn indices(scene: &Scene, needle: &str) -> Vec<usize> {
     scene
         .parts
@@ -119,271 +119,1225 @@ fn indices(scene: &Scene, needle: &str) -> Vec<usize> {
         .map(|(i, _)| i)
         .collect()
 }
-fn slots(scene: &Scene, facade: usize, top: f32) -> Vec<f32> {
-    let p = &scene.parts[facade];
-    let m = p.pose.matrix(0.);
-    let mut bins = BTreeMap::<i32, f32>::new();
-    for tri in p.mesh.vertices.chunks_exact(3) {
-        let a = m.transform_point3(tri[0].position.into());
-        let b = m.transform_point3(tri[1].position.into());
-        let c = m.transform_point3(tri[2].position.into());
-        let n = (b - a).cross(c - a);
-        let center = (a + b + c) / 3.;
-        if n.y > n.length() * 0.999 && (center.y - (top - 13.5)).abs() < 0.2 {
-            *bins.entry(center.x.round() as i32).or_default() += n.length();
-        }
-    }
-    let mut groups = Vec::<(i32, f32, f32)>::new();
-    for (x, area) in bins {
-        if let Some(last) = groups.last_mut()
-            && x - last.0 < 15
-        {
-            last.0 = x;
-            last.1 += x as f32 * area;
-            last.2 += area;
-        } else {
-            groups.push((x, x as f32 * area, area));
-        }
-    }
-    groups
-        .into_iter()
-        .filter(|g| g.2 > 1.)
-        .map(|g| g.1 / g.2)
-        .collect()
+fn raw_frame() -> Mat4 {
+    Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
 }
-// Cylinder-wall normals identify the lower hinge's two mirrored print poses.
-fn lower_axis(part: &Part) -> Vec3 {
-    let mut bins = BTreeMap::<(i32, i32), usize>::new();
-    for tri in part.mesh.vertices.chunks_exact(3) {
-        let a = Vec3::from(tri[0].position);
-        let b = Vec3::from(tri[1].position);
-        let c = Vec3::from(tri[2].position);
-        let n = (b - a).cross(c - a).normalize_or_zero();
-        if n.y.abs() < 0.001 && n.x.abs() < 0.98 && n.z.abs() < 0.98 && n.length() > 0.99 {
-            for sign in [-1., 1.] {
-                let center = (a + b + c) / 3. + n * 7. * sign;
-                if center.x > part.mesh.max.x * 0.4 {
-                    *bins
-                        .entry((
-                            (center.x * 5.).round() as i32,
-                            (center.z * 5.).round() as i32,
-                        ))
-                        .or_default() += 1;
-                }
+fn wide_window() -> [Vec3; 2] {
+    [Vec3::splat(f32::NEG_INFINITY), Vec3::splat(f32::INFINITY)]
+}
+fn unit(axis: usize) -> Vec3 {
+    let mut p = Vec3::ZERO;
+    p[axis] = 1.;
+    p
+}
+fn holes(
+    part: &Part,
+    matrix: Mat4,
+    axis: usize,
+    levels: [f32; 2],
+    radii: [f32; 2],
+) -> Result<Vec<CircleDatum>, String> {
+    let first = display::section_holes(&part.mesh, matrix, axis, levels[0], radii);
+    let second = display::section_holes(&part.mesh, matrix, axis, levels[1], radii);
+    let mut result = Vec::new();
+    for a in first {
+        if let Some(b) = second.iter().min_by(|b, c| {
+            let mut db = b.point - a.point;
+            db[axis] = 0.;
+            let mut dc = c.point - a.point;
+            dc[axis] = 0.;
+            db.length_squared().total_cmp(&dc.length_squared())
+        }) {
+            let mut drift = b.point - a.point;
+            drift[axis] = 0.;
+            if drift.length() < 0.06 {
+                result.push(CircleDatum {
+                    point: (a.point + b.point) / 2.,
+                    radius: (a.radius + b.radius) / 2.,
+                    residual: a.residual.max(b.residual),
+                });
             }
         }
     }
-    bins.into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|((x, z), _)| Vec3::new(x as f32 / 5., 0., z as f32 / 5.))
-        .unwrap_or_else(|| raw(part.mesh.max.x - 7., 5.75, 0.))
+    if result.is_empty() {
+        return Err(format!(
+            "{}: no matching bores at two sections on axis {axis}",
+            part.pose.path
+        ));
+    }
+    result.sort_by(|a, b| {
+        a.point
+            .x
+            .total_cmp(&b.point.x)
+            .then(a.point.y.total_cmp(&b.point.y))
+            .then(a.point.z.total_cmp(&b.point.z))
+    });
+    Ok(result)
+}
+fn plate_holes(part: &Part, axis: usize, level: f32) -> Result<(f32, Vec<CircleDatum>), String> {
+    for sign in [1., -1.] {
+        if let Ok(found) = holes(
+            part,
+            raw_frame(),
+            axis,
+            [sign * level, sign * (level + 0.6)],
+            [1.9, 2.3],
+        ) && found.len() == 4
+        {
+            return Ok((sign, found));
+        }
+    }
+    Err(format!("{}: four mounting holes not found", part.pose.path))
+}
+fn orient_holes(points: &[CircleDatum], matrix: Mat4) -> Vec<CircleDatum> {
+    points
+        .iter()
+        .map(|p| CircleDatum {
+            point: matrix.transform_point3(p.point),
+            ..p.clone()
+        })
+        .collect()
+}
+fn window(points: &[CircleDatum], axis: usize) -> [Vec3; 2] {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in points {
+        lo = lo.min(p.point);
+        hi = hi.max(p.point);
+    }
+    lo -= Vec3::splat(5.);
+    hi += Vec3::splat(5.);
+    lo[axis] = f32::NEG_INFINITY;
+    hi[axis] = f32::INFINITY;
+    [lo, hi]
+}
+fn groups(
+    points: &[CircleDatum],
+    count: usize,
+    label: &str,
+) -> Result<Vec<Vec<CircleDatum>>, String> {
+    if points.len() != count * 4 {
+        return Err(format!(
+            "{label}: expected {} mounting holes, found {}",
+            count * 4,
+            points.len()
+        ));
+    }
+    let mut points = points.to_vec();
+    points.sort_by(|a, b| a.point.x.total_cmp(&b.point.x));
+    Ok(points.chunks_exact(4).map(|g| g.to_vec()).collect())
+}
+struct Mount {
+    holes: Vec<CircleDatum>,
+    plane: PlaneDatum,
+    axis: usize,
+}
+fn record(
+    scene: &mut Scene,
+    pair: [usize; 2],
+    label: &str,
+    points: [Vec3; 2],
+    axis: Vec3,
+    measure: MateMeasure,
+    tolerance: f32,
+) {
+    let check = MateCheck::world(scene, pair, label, points, axis, measure, tolerance);
+    scene.mating_checks.push(check);
+}
+fn mount(
+    scene: &mut Scene,
+    pair: [usize; 2],
+    q: Quat,
+    parent: &Mount,
+    child: &Mount,
+    label: &str,
+) -> Result<(), String> {
+    if parent.plane.area < 1. || child.plane.area < 1. {
+        return Err(format!("{label}: mounting plane patch too small"));
+    }
+    if parent.holes.len() != child.holes.len() {
+        return Err(format!("{label}: mounting pattern count differs"));
+    }
+    let mut t = parent.holes.iter().map(|p| p.point).sum::<Vec3>() / parent.holes.len() as f32
+        - child.holes.iter().map(|p| p.point).sum::<Vec3>() / child.holes.len() as f32;
+    t[parent.axis] = parent.plane.level - child.plane.level;
+    pose(&mut scene.parts[pair[1]], q, t);
+    for (i, p) in child.holes.iter().enumerate() {
+        let b = p.point + t;
+        let a = parent
+            .holes
+            .iter()
+            .min_by(|a, c| {
+                let mut da = a.point - b;
+                da[parent.axis] = 0.;
+                let mut dc = c.point - b;
+                dc[parent.axis] = 0.;
+                da.length_squared().total_cmp(&dc.length_squared())
+            })
+            .unwrap()
+            .point;
+        let mut error = b - a;
+        error[parent.axis] = 0.;
+        if error.length() > 2. {
+            return Err(format!(
+                "{label}: hole {} differs by {:.4} mm",
+                i + 1,
+                error.length()
+            ));
+        }
+        record(
+            scene,
+            pair,
+            &format!("{label}: fastener {}", i + 1),
+            [a, b],
+            unit(parent.axis),
+            MateMeasure::Coaxial,
+            0.2,
+        );
+    }
+    record(
+        scene,
+        pair,
+        &format!("{label}: seating face"),
+        [parent.plane.center, child.plane.center + t],
+        unit(parent.axis),
+        MateMeasure::Plane { gap: 0. },
+        0.03,
+    );
+    Ok(())
+}
+struct Edge {
+    parent: usize,
+    child: usize,
+    label: String,
+    hinge: Option<(Vec3, Vec3)>,
+}
+fn edge(edges: &mut Vec<Edge>, parent: usize, child: usize, label: &str) {
+    edges.push(Edge {
+        parent,
+        child,
+        label: format!("Sustainer datum: {label}"),
+        hinge: None,
+    });
+}
+fn hinge(edges: &mut Vec<Edge>, parent: usize, child: usize, label: &str, point: Vec3, axis: Vec3) {
+    edges.push(Edge {
+        parent,
+        child,
+        label: label.into(),
+        hinge: Some((point, axis)),
+    });
+}
+fn axis_point(scene: &Scene, i: usize, datum: &CircleDatum) -> Vec3 {
+    scene.parts[i].pose.matrix(0.).transform_point3(raw(
+        datum.point.x,
+        datum.point.y,
+        datum.point.z,
+    ))
+}
+fn section_crossings(part: &Part, y: f32, z: f32) -> Vec<f32> {
+    let mut crossings = Vec::new();
+    for [a, b] in display::section_segments(&part.mesh, part.pose.matrix(0.), 1, y) {
+        if (a.z - z) * (b.z - z) < 0. {
+            crossings.push(a.x + (b.x - a.x) * (z - a.z) / (b.z - a.z));
+        }
+    }
+    crossings.sort_by(f32::total_cmp);
+    crossings.dedup_by(|a, b| (*a - *b).abs() < 0.02);
+    crossings
+}
+fn socket_intervals(part: &Part, y: f32, z: f32) -> Result<Vec<[f32; 2]>, String> {
+    let crossings = section_crossings(part, y, z);
+    if crossings.len() < 4 || !crossings.len().is_multiple_of(2) {
+        return Err("Split roof socket section is incomplete".into());
+    }
+    let slots: Vec<_> = (1..crossings.len() - 1)
+        .step_by(2)
+        .map(|i| [crossings[i], crossings[i + 1]])
+        .filter(|p| p[1] - p[0] > 1.)
+        .collect();
+    Ok(slots)
 }
 
 pub fn apply(scene: &mut Scene) -> Result<(), String> {
-    let module = indices(scene, "/Modules/")
+    scene.mating_checks.clear();
+    let mut edges = Vec::new();
+    let module = *indices(scene, "/Modules/")
         .first()
-        .copied()
-        .ok_or("Sustainer requires a module")?;
-    let facade = indices(scene, "Facade.stl")
+        .ok_or("Sustainer module missing")?;
+    let facade = *indices(scene, "Facade.stl")
         .first()
-        .copied()
-        .ok_or("Sustainer requires a facade")?;
-    let housing_q = broad_rotation(&scene.parts[module], scene.parts[facade].source_size.x)?;
-    let facade_q = orientation(-Vec3::X, -Vec3::Y, Vec3::Z);
-    pose(&mut scene.parts[module], housing_q, Vec3::ZERO);
-    let floor = plane_levels(&scene.parts[module], housing_q)
+        .ok_or("Sustainer facade missing")?;
+    let mq = broad_rotation(&scene.parts[module], scene.parts[facade].source_size.x)?;
+    pose(&mut scene.parts[module], mq, Vec3::ZERO);
+    let (ml, mh) = constraints::world_bounds(&scene.parts[module]);
+    let width = mh.x - ml.x;
+    let floor = plane_levels(&scene.parts[module], mq)
         .iter()
         .take(2)
         .map(|p| p.0)
         .reduce(f32::min)
-        .ok_or("Sustainer floor plane not found")?;
-    let (module_lo, module_hi) = constraints::world_bounds(&scene.parts[module]);
-    let width = module_hi.x - module_lo.x;
-    let facade_height = scene.parts[facade].source_size.y;
-    let top = floor + facade_height;
-    let (_, face_hi) = bounds(&scene.parts[facade], facade_q);
-    pose(
-        &mut scene.parts[facade],
-        facade_q,
-        Vec3::new(0., floor + facade_height / 2., module_hi.z + face_hi.z),
+        .ok_or("Module floor missing")?;
+    let fq = orientation(-Vec3::X, -Vec3::Y, Vec3::Z);
+    let fm = Mat4::from_quat(fq);
+    let parent_front = holes(
+        &scene.parts[module],
+        scene.parts[module].pose.matrix(0.),
+        2,
+        [mh.z - 2.1, mh.z - 3.2],
+        [1.5, 2.2],
+    )?;
+    let face_holes = holes(&scene.parts[facade], fm, 2, [-0.2, 0.3], [1.5, 2.3])?;
+    let rough = Vec3::new(
+        (ml.x + mh.x) / 2.,
+        floor + scene.parts[facade].source_size.y / 2.,
+        0.,
     );
-    attach(scene, module, facade, "facade / housing")?;
-    let mut lock_x = slots(scene, facade, top);
-    let lock_count = indices(scene, "/LOCK HOLDER.stl").len();
-    if lock_x.len() != lock_count {
-        lock_x = if lock_count == 1 {
-            vec![0.]
-        } else {
-            vec![-width / 4., width / 4.]
-        };
+    let mut targets = Vec::new();
+    let mut moving = Vec::new();
+    for p in &parent_front {
+        if let Some(c) = face_holes.iter().min_by(|a, b| {
+            let mut da = a.point + rough - p.point;
+            da.z = 0.;
+            let mut db = b.point + rough - p.point;
+            db.z = 0.;
+            da.length_squared().total_cmp(&db.length_squared())
+        }) {
+            let mut d = c.point + rough - p.point;
+            d.z = 0.;
+            if d.length() < 1. {
+                targets.push(p.clone());
+                moving.push(c.clone());
+            }
+        }
     }
-    let pivot = Vec3::new(0., top, module_lo.z + 23.5);
+    if targets.len() < 4 {
+        return Err("Facade / module fastener pattern missing".into());
+    }
+    let parent_plane = display::plane_patch(
+        &scene.parts[module].mesh,
+        scene.parts[module].pose.matrix(0.),
+        2,
+        1.,
+        mh.z,
+        window(&targets, 2),
+        0.05,
+    )?;
+    let child_plane = display::plane_patch(
+        &scene.parts[facade].mesh,
+        fm,
+        2,
+        -1.,
+        -5.,
+        wide_window(),
+        0.05,
+    )?;
+    mount(
+        scene,
+        [module, facade],
+        fq,
+        &Mount {
+            holes: targets,
+            plane: parent_plane,
+            axis: 2,
+        },
+        &Mount {
+            holes: moving,
+            plane: child_plane,
+            axis: 2,
+        },
+        "facade / module",
+    )?;
+    edge(
+        &mut edges,
+        module,
+        facade,
+        "facade / module mounting pattern",
+    );
+
+    let back = holes(
+        &scene.parts[module],
+        scene.parts[module].pose.matrix(0.),
+        2,
+        [ml.z + 3.3, ml.z + 4.6],
+        [1.5, 2.1],
+    )?;
+    let lower_indices: Vec<_> = indices(scene, "/Hinges/")
+        .into_iter()
+        .filter(|&i| !scene.parts[i].pose.path.contains("Top"))
+        .collect();
+    let back_groups = groups(&back, lower_indices.len(), "lower hinges")?;
+    let mut lower = Vec::new();
+    for (slot, i) in lower_indices.into_iter().enumerate() {
+        let (sign, raw_holes) = plate_holes(&scene.parts[i], 1, 10.)?;
+        let q = orientation(Vec3::Y, Vec3::Z * sign, Vec3::X * sign);
+        let m = Mat4::from_quat(q);
+        let child_holes = orient_holes(&raw_holes, m * raw_frame().inverse());
+        let parent_plane = display::plane_patch(
+            &scene.parts[module].mesh,
+            scene.parts[module].pose.matrix(0.),
+            2,
+            1.,
+            ml.z + 6.9,
+            window(&back_groups[slot], 2),
+            0.3,
+        )?;
+        let child_plane = display::plane_patch(
+            &scene.parts[i].mesh,
+            m,
+            2,
+            -1.,
+            8.75,
+            window(&child_holes, 2),
+            0.08,
+        )?;
+        mount(
+            scene,
+            [module, i],
+            q,
+            &Mount {
+                holes: back_groups[slot].clone(),
+                plane: parent_plane,
+                axis: 2,
+            },
+            &Mount {
+                holes: child_holes,
+                plane: child_plane,
+                axis: 2,
+            },
+            "lower hinge / housing",
+        )?;
+        let datum = display::cylinder_axis(
+            &scene.parts[i].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(scene.parts[i].mesh.max.x - 7., -sign * 5.75, 0.),
+            4.15,
+        )?;
+        let range = display::cylinder_limits(&scene.parts[i].mesh, raw_frame(), 2, &datum)?;
+        lower.push((i, datum, range));
+        edge(&mut edges, module, i, "lower hinge / back-wall seat");
+    }
+    let lower_mean = lower
+        .iter()
+        .map(|(i, d, _)| axis_point(scene, *i, d))
+        .sum::<Vec3>()
+        / lower.len() as f32;
+
     let roof: Vec<_> = scene
         .parts
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             let n = p.pose.path.rsplit('/').next().unwrap_or("");
-            n.contains("Roof") && !n.contains("Connector")
+            n.contains(" Roof") && !n.contains("Connector")
         })
         .map(|(i, _)| i)
         .collect();
-    let mut rear = module_lo.z;
+    let mut rear = ml.z;
+    let mut primary = roof[0];
+    let mut primary_holes = Vec::new();
+    let mut outer_world = 0.;
     for (slot, &i) in roof.iter().enumerate() {
         let q = broad_rotation(&scene.parts[i], width)?;
+        let m = Mat4::from_quat(q);
         let (lo, hi) = bounds(&scene.parts[i], q);
-        let planes = plane_levels(&scene.parts[i], q);
-        let underside = planes
+        let levels = plane_levels(&scene.parts[i], q);
+        let inside = levels
             .iter()
             .take(2)
-            .map(|p| p.0)
+            .map(|v| v.0)
             .reduce(f32::min)
-            .ok_or("Roof underside not found")?;
+            .ok_or("Roof inner plane missing")?;
+        let outside = levels.iter().take(2).map(|v| v.0).reduce(f32::max).unwrap();
+        let outer =
+            display::plane_patch(&scene.parts[i].mesh, m, 1, 1., outside, wide_window(), 0.05)?;
+        let y = if slot == 0 {
+            floor + scene.parts[facade].source_size.y - inside
+        } else {
+            outer_world - outer.level
+        };
         pose(
             &mut scene.parts[i],
             q,
-            Vec3::new(-(lo.x + hi.x) / 2., top - underside, rear - lo.z),
+            Vec3::new((ml.x + mh.x - lo.x - hi.x) / 2., y, rear - lo.z),
         );
         rear += hi.z - lo.z;
         if slot == 0 {
-            let mut r = Relation::hinge(scene, module, i, pivot, -Vec3::X)?;
-            r.label = LID.into();
-            constraints::add(scene, r)?;
-        } else {
-            attach(scene, roof[0], i, "split roof / rear half")?;
+            outer_world = outer.level + y;
+        }
+        let level = (inside + outside) / 2. + y;
+        if let Ok(found) = holes(
+            &scene.parts[i],
+            scene.parts[i].pose.matrix(0.),
+            1,
+            [level - 0.4, level + 0.4],
+            [1.5, 2.1],
+        ) && found.len() > primary_holes.len()
+        {
+            primary = i;
+            primary_holes = found;
         }
         scene.parts[i].color = [0.78, 0.82, 0.87, 1.];
     }
-    let top_q = orientation(Vec3::Y, Vec3::Z, Vec3::X);
-    let top_indices = indices(scene, "Hinge Top.stl");
-    let upper_width = top_indices
-        .first()
-        .map(|&i| scene.parts[i].source_size.z)
-        .unwrap_or(62.8);
-    for (slot, i) in top_indices.into_iter().enumerate() {
-        let x = if upper_width > 50. {
-            0.
-        } else {
-            lock_x.get(slot).copied().unwrap_or(0.)
-        };
-        anchor(
-            &mut scene.parts[i],
-            top_q,
-            raw(0., -21.5, 0.),
-            pivot + Vec3::X * x,
-        );
-        attach(
-            scene,
-            roof.first().copied().unwrap_or(module),
-            i,
-            "upper hinge / lid",
+    let upper_indices = indices(scene, "Hinge Top.stl");
+    let upper_groups = groups(&primary_holes, upper_indices.len(), "upper hinges")?;
+    let mut upper = Vec::new();
+    let (_, primary_q, _) = scene.parts[primary]
+        .pose
+        .matrix(0.)
+        .to_scale_rotation_translation();
+    let rp = plane_levels(&scene.parts[primary], primary_q)
+        .iter()
+        .take(2)
+        .map(|p| p.0)
+        .reduce(f32::min)
+        .unwrap()
+        + scene.parts[primary].pose.position[1];
+    for (slot, i) in upper_indices.into_iter().enumerate() {
+        let (sign, raw_holes) = plate_holes(&scene.parts[i], 0, 2.)?;
+        let q = orientation(-Vec3::Y * sign, Vec3::Z, -Vec3::X * sign);
+        let m = Mat4::from_quat(q);
+        let child_holes = orient_holes(&raw_holes, m * raw_frame().inverse());
+        let parent_plane = display::plane_patch(
+            &scene.parts[primary].mesh,
+            scene.parts[primary].pose.matrix(0.),
+            1,
+            -1.,
+            rp,
+            window(&upper_groups[slot], 1),
+            0.08,
         )?;
+        let child_plane = display::plane_patch(
+            &scene.parts[i].mesh,
+            m,
+            1,
+            1.,
+            0.,
+            window(&child_holes, 1),
+            0.05,
+        )?;
+        mount(
+            scene,
+            [primary, i],
+            q,
+            &Mount {
+                holes: upper_groups[slot].clone(),
+                plane: parent_plane,
+                axis: 1,
+            },
+            &Mount {
+                holes: child_holes,
+                plane: child_plane,
+                axis: 1,
+            },
+            "upper hinge / roof",
+        )?;
+        let datum = display::cylinder_axis(
+            &scene.parts[i].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(0., -21.5, 0.),
+            4.15,
+        )?;
+        upper.push((i, datum));
+        edge(&mut edges, primary, i, "upper hinge / roof seat");
     }
-    let bottom_indices: Vec<_> = indices(scene, "/Hinges/")
-        .into_iter()
-        .filter(|&i| !scene.parts[i].pose.path.contains("Top"))
-        .collect();
-    for (slot, i) in bottom_indices.into_iter().enumerate() {
-        let axis = lower_axis(&scene.parts[i]);
-        let sign = (-axis.z).signum();
-        let q = orientation(Vec3::Y, Vec3::Z * sign, Vec3::X * sign);
-        let x = if upper_width > 50. {
-            (if slot == 0 { -1. } else { 1. })
-                * (upper_width / 2. + scene.parts[i].mesh.size.z / 2. + 0.2)
-        } else {
-            lock_x.get(slot).copied().unwrap_or(0.)
-        };
-        anchor(&mut scene.parts[i], q, axis, pivot + Vec3::X * x);
-        attach(scene, module, i, "lower hinge / housing")?;
+    let upper_mean = upper
+        .iter()
+        .map(|(i, d)| axis_point(scene, *i, d))
+        .sum::<Vec3>()
+        / upper.len() as f32;
+    let delta = lower_mean - upper_mean;
+    for i in roof.iter().copied().chain(upper.iter().map(|(i, _)| *i)) {
+        scene.parts[i].pose.position =
+            (Vec3::from(scene.parts[i].pose.position) + delta).to_array();
+    }
+    let pivot = Vec3::new(0., lower_mean.y, lower_mean.z);
+    hinge(&mut edges, module, primary, LID, pivot, -Vec3::X);
+    for &i in &roof {
+        if i != primary {
+            edge(&mut edges, primary, i, "split roof / rear panel");
+        }
+    }
+    for (slot, (i, d, _)) in lower.iter().enumerate() {
+        let (j, e) = &upper[if upper.len() == 1 { 0 } else { slot }];
+        record(
+            scene,
+            [*i, *j],
+            "upper / lower hinge shaft line",
+            [axis_point(scene, *i, d), axis_point(scene, *j, e)],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.02,
+        );
+        let a = axis_point(scene, *i, d);
+        let b = axis_point(scene, *j, e);
+        let side = if a.x < b.x { 1. } else { -1. };
+        let mut ends = Vec::new();
+        for (index, sign, line) in [(*i, side, a), (*j, -side, b)] {
+            let (lo, hi) = constraints::world_bounds(&scene.parts[index]);
+            let seed = if sign > 0. { hi.x } else { lo.x };
+            let mut region = [line - Vec3::splat(7.), line + Vec3::splat(7.)];
+            region[0].x = f32::NEG_INFINITY;
+            region[1].x = f32::INFINITY;
+            ends.push(display::plane_patch(
+                &scene.parts[index].mesh,
+                scene.parts[index].pose.matrix(0.),
+                0,
+                sign,
+                seed,
+                region,
+                0.08,
+            )?);
+        }
+        let gap = (ends[1].level - ends[0].level) * side;
+        let mut check = MateCheck::world(
+            scene,
+            [*i, *j],
+            &format!("hinge barrel end planes; signed axial gap {gap:.3} mm"),
+            [ends[0].center, ends[1].center],
+            Vec3::X * side,
+            MateMeasure::Clearance { min: 0. },
+            0.03,
+        );
+        // Source M patterns disagree by 0.25 mm in pitch. Keep the measured
+        // screw pattern; expose the end-plane discrepancy for physical review.
+        check.required = false;
+        scene.mating_checks.push(check);
     }
     for (slot, i) in indices(scene, "/Rods/").into_iter().enumerate() {
-        let side = if slot == 0 { -1. } else { 1. };
-        let center = if upper_width > 50. {
-            side * (upper_width / 2. + 20.)
+        let (parent, bore, range) = &lower[slot];
+        let line = axis_point(scene, *parent, bore);
+        let d = display::cylinder_axis(
+            &scene.parts[i].mesh,
+            raw_frame(),
+            0,
+            Vec3::new(0., 0., -2.675),
+            3.95,
+        )?;
+        let stations = display::cylinder_crossings(
+            &scene.parts[i].mesh,
+            raw_frame(),
+            0,
+            d.point,
+            bore.radius,
+        )?;
+        let end_points = range.map(|z| {
+            scene.parts[*parent].pose.matrix(0.).transform_point3(raw(
+                bore.point.x,
+                bore.point.y,
+                z,
+            ))
+        });
+        let station = if slot == 0 {
+            end_points[0].x.min(end_points[1].x)
         } else {
-            lock_x.get(slot).copied().unwrap_or(0.)
+            end_points[0].x.max(end_points[1].x)
         };
-        let q = orientation(Vec3::X * side, Vec3::Y, Vec3::Z * side);
-        pose(&mut scene.parts[i], q, pivot + Vec3::X * center);
-        attach(scene, module, i, "rod / hinge axis")?;
+        let rod_station = if slot == 0 { stations[1] } else { stations[0] };
+        let q = orientation(Vec3::X, -Vec3::Z, Vec3::Y);
+        let local = raw(rod_station, d.point.y, d.point.z);
+        let target = Vec3::new(station, line.y, line.z);
+        anchor(&mut scene.parts[i], q, local, target);
+        record(
+            scene,
+            [*parent, i],
+            &format!(
+                "hinge rod / bore axis; radial gap {:.3} mm",
+                bore.radius - d.radius
+            ),
+            [line, axis_point(scene, i, &d)],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.02,
+        );
+        record(
+            scene,
+            [*parent, i],
+            "rod rounded head / cylinder land",
+            [
+                target,
+                scene.parts[i].pose.matrix(0.).transform_point3(local),
+            ],
+            Vec3::X,
+            MateMeasure::Point,
+            0.03,
+        );
+        edge(&mut edges, *parent, i, "rod / lower hinge cylinder land");
     }
-    let (_, front) = constraints::world_bounds(&scene.parts[facade]);
+
     let holders = indices(scene, "/LOCK HOLDER.stl");
+    let lock_holes = holes(
+        &scene.parts[facade],
+        scene.parts[facade].pose.matrix(0.),
+        2,
+        [
+            scene.parts[facade].pose.position[2] - 0.2,
+            scene.parts[facade].pose.position[2] + 0.3,
+        ],
+        [1.7, 1.95],
+    )?;
+    let lock_groups = groups(&lock_holes, holders.len(), "lock holders")?;
     for (slot, holder) in holders.into_iter().enumerate() {
-        let x = lock_x.get(slot).copied().unwrap_or(0.);
-        let center = Vec3::new(x, top - 11.06, front.z + 9.45);
-        pose(&mut scene.parts[holder], top_q, center);
-        attach(scene, facade, holder, "lock holder / facade")?;
-        let small_axis = center + Vec3::new(0., -2.7, 5.8);
-        let big_axis = small_axis - Vec3::Y * 15.;
-        for i in indices(scene, "/LOCK INNER PART.stl")
-            .into_iter()
-            .filter(|&i| scene.parts[i].pose.instance as usize == slot)
-            .collect::<Vec<_>>()
-        {
-            let q = orientation(-Vec3::Y, -Vec3::Z, Vec3::X);
-            anchor(&mut scene.parts[i], q, raw(-7.5, 0., 0.), small_axis);
-            attach(scene, holder, i, "lock inner / small pin axis")?;
-        }
-        for i in indices(scene, "/LOCK OUTER PART")
-            .into_iter()
-            .filter(|&i| scene.parts[i].pose.instance as usize == slot)
-            .collect::<Vec<_>>()
-        {
-            let axis = raw(-scene.parts[i].mesh.size.x / 2. + 6., 0., 0.);
-            anchor(&mut scene.parts[i], top_q, axis, big_axis);
-            attach(scene, holder, i, "closed outer lock / large pin axis")?;
-        }
+        // The plate's engraved UP arrow points along raw -X. Its symmetric
+        // four-hole pattern also fits upside down, so holes alone cannot orient it.
+        let q = orientation(-Vec3::Y, Vec3::Z, -Vec3::X);
+        let m = Mat4::from_quat(q);
+        let child_holes = holes(&scene.parts[holder], m, 2, [-8.2, -6.8], [1.6, 2.1])?;
+        let pp = display::plane_patch(
+            &scene.parts[facade].mesh,
+            scene.parts[facade].pose.matrix(0.),
+            2,
+            1.,
+            // The flange bears on the facade's outside pads. The deeper
+            // central pocket clears the holder body/UP lettering; it is not
+            // the flange seat. Using its floor embeds the flange by 4.1 mm.
+            scene.parts[facade].pose.position[2] + 5.,
+            window(&lock_groups[slot], 2),
+            0.05,
+        )?;
+        let cp = display::plane_patch(
+            &scene.parts[holder].mesh,
+            m,
+            2,
+            -1.,
+            -9.45,
+            window(&child_holes, 2),
+            0.05,
+        )?;
+        mount(
+            scene,
+            [facade, holder],
+            q,
+            &Mount {
+                holes: lock_groups[slot].clone(),
+                plane: pp,
+                axis: 2,
+            },
+            &Mount {
+                holes: child_holes,
+                plane: cp,
+                axis: 2,
+            },
+            "lock holder / facade bearing pads",
+        )?;
+        edge(
+            &mut edges,
+            facade,
+            holder,
+            "lock holder / facade bearing pads",
+        );
+        let holder_axis = display::cylinder_axis(
+            &scene.parts[holder].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(-2.7, 5.75, 0.),
+            2.95,
+        )?;
+        let small_axis = axis_point(scene, holder, &holder_axis);
+        let inner = *indices(scene, "/LOCK INNER PART.stl")
+            .iter()
+            .find(|&&i| scene.parts[i].pose.instance as usize == slot)
+            .ok_or("Lock inner missing")?;
+        let small = display::cylinder_axis(
+            &scene.parts[inner].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(7.5, 0., 0.),
+            2.85,
+        )?;
+        let big = display::cylinder_axis(
+            &scene.parts[inner].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(-7.5, 0., 0.),
+            2.95,
+        )?;
+        let outer = *indices(scene, "/LOCK OUTER PART")
+            .iter()
+            .find(|&&i| scene.parts[i].pose.instance as usize == slot)
+            .ok_or("Lock outer missing")?;
+        let od = display::cylinder_axis(
+            &scene.parts[outer].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(scene.parts[outer].mesh.min.x + 10.3, 3.8, 0.),
+            2.95,
+        )?;
+        // Match the two end lugs to the holder's central barrel. The other
+        // inner bore is a continuous tube and mates to the outer lock's lugs.
+        let recipe = constraints::latch_display_pose(
+            scene.parts[outer].pose.path.contains("2-4F"),
+            scene.parts[module].pose.path.contains("/XL4/"),
+        );
+        let base_q = orientation(Vec3::Y, Vec3::Z, Vec3::X);
+        let iq = Quat::from_rotation_x(recipe.inner_degrees.to_radians()) * base_q;
+        anchor(
+            &mut scene.parts[inner],
+            iq,
+            raw(small.point.x, small.point.y, 0.),
+            small_axis,
+        );
+        hinge(&mut edges, holder, inner, LOCK_INNER, small_axis, Vec3::X);
+        record(
+            scene,
+            [holder, inner],
+            "holder / inner lock pin axis",
+            [small_axis, axis_point(scene, inner, &small)],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.02,
+        );
+        let big_axis = axis_point(scene, inner, &big);
+        let oq = Quat::from_rotation_x(recipe.outer_degrees.to_radians()) * base_q;
+        anchor(
+            &mut scene.parts[outer],
+            oq,
+            raw(od.point.x, od.point.y, 0.),
+            big_axis,
+        );
+        hinge(&mut edges, inner, outer, LOCK_OUTER, big_axis, Vec3::X);
+        record(
+            scene,
+            [inner, outer],
+            "inner / outer lock pin axis",
+            [big_axis, axis_point(scene, outer, &od)],
+            Vec3::X,
+            MateMeasure::Coaxial,
+            0.02,
+        );
         for i in indices(scene, "/1 SET OF PINS")
             .into_iter()
             .filter(|&i| scene.parts[i].pose.instance as usize == slot)
             .collect::<Vec<_>>()
         {
-            let small = scene.parts[i].mesh.size.x < 19.5;
+            let small_pin = scene.parts[i].mesh.size.x < 19.5;
             let side = if scene.parts[i].pose.body.unwrap_or(0).is_multiple_of(2) {
                 -1.
             } else {
                 1.
             };
-            let q = orientation(Vec3::X * side, Vec3::Y, Vec3::Z * side);
-            pose(
-                &mut scene.parts[i],
-                q,
-                if small {
-                    small_axis + Vec3::X * side * 26.
+            let (bearing, line) = if small_pin {
+                (inner, small_axis)
+            } else {
+                (outer, big_axis)
+            };
+            let (blo, bhi) = constraints::world_bounds(&scene.parts[bearing]);
+            let seed = if side < 0. { blo.x } else { bhi.x };
+            let mut win = [line - Vec3::splat(5.), line + Vec3::splat(5.)];
+            win[0].x = f32::NEG_INFINITY;
+            win[1].x = f32::INFINITY;
+            let mouth = display::plane_patch(
+                &scene.parts[bearing].mesh,
+                scene.parts[bearing].pose.matrix(0.),
+                0,
+                side,
+                seed,
+                win,
+                0.1,
+            )?;
+            let (cap_frame, cap) = display::elastic_pin_entry(&scene.parts[i].mesh)?;
+            let inward = -side;
+            let raw_to_world = Quat::from_mat3(&Mat3::from_cols(
+                Vec3::X * inward,
+                -Vec3::Z * inward,
+                Vec3::Y,
+            ));
+            let pin_q = raw_to_world * cap_frame.to_scale_rotation_translation().1;
+            let local = cap_frame.inverse().transform_point3(cap.point);
+            let target = Vec3::new(mouth.level, line.y, line.z);
+            anchor(&mut scene.parts[i], pin_q, local, target);
+            record(
+                scene,
+                [bearing, i],
+                "pin insertion face / bearing mouth (relaxed display approximation)",
+                [
+                    target,
+                    scene.parts[i].pose.matrix(0.).transform_point3(local),
+                ],
+                Vec3::X,
+                MateMeasure::Point,
+                0.03,
+            );
+            edge(
+                &mut edges,
+                if small_pin { holder } else { inner },
+                i,
+                if small_pin {
+                    "small elastic pin / holder"
                 } else {
-                    big_axis + Vec3::X * side * 22.
+                    "large elastic pin / inner lock"
                 },
             );
-            attach(scene, holder, i, "lock pins")?;
+            scene.parts[i].mesh =
+                display::installed_pin_display(&scene.parts[i].mesh, cap_frame, &cap)?;
         }
     }
     for i in indices(scene, "/Label for Sustainers.stl") {
-        pose(
-            &mut scene.parts[i],
-            facade_q,
-            Vec3::new(-width / 4., floor + 12., front.z + 1.),
-        );
-        attach(scene, facade, i, "blank label / facade")?;
-    }
-    for i in indices(scene, "/Connector For Split Roof.stl") {
-        let q = orientation(Vec3::X, Vec3::Z, -Vec3::Y);
-        let seam = roof
-            .first()
-            .map(|&r| constraints::world_bounds(&scene.parts[r]).1.z)
-            .unwrap_or(0.);
-        pose(&mut scene.parts[i], q, Vec3::new(0., top + 4., seam));
-        attach(
-            scene,
-            roof.first().copied().unwrap_or(module),
-            i,
-            "split roof connector",
+        let pp = display::plane_patch(
+            &scene.parts[facade].mesh,
+            scene.parts[facade].pose.matrix(0.),
+            2,
+            1.,
+            scene.parts[facade].pose.position[2] + 2.87,
+            wide_window(),
+            0.03,
         )?;
+        let cp = display::plane_patch(
+            &scene.parts[i].mesh,
+            fm,
+            2,
+            -1.,
+            -1.015,
+            wide_window(),
+            0.03,
+        )?;
+        let mut seat = pp.center;
+        let mut back = cp.center;
+        let profile_difference = (pp.max - pp.min).x - (cp.max - cp.min).x;
+        if profile_difference > 0.2 {
+            // 2F/4F facades use a longer D-ended, side-entry recess. Place
+            // the plate within its rectangular land, before the round end.
+            // This does not assert a unique lateral stop or a slide fit.
+            let height = pp.max.y - pp.min.y;
+            let right = pp.max.x - height / 2.;
+            if right - pp.min.x < cp.max.x - cp.min.x - 0.1 {
+                return Err("Label rectangular seating land is too short".into());
+            }
+            seat.x = (pp.min.x + right) / 2.;
+            seat.y = (pp.min.y + pp.max.y) / 2.;
+            back.x = (cp.min.x + cp.max.x) / 2.;
+            back.y = (cp.min.y + cp.max.y) / 2.;
+        } else if profile_difference.abs() > 0.2 {
+            return Err("Label back profile is wider than facade slot".into());
+        }
+        pose(&mut scene.parts[i], fq, seat - back);
+        record(
+            scene,
+            [facade, i],
+            "label back / measured facade slot seating plane",
+            [seat, back + Vec3::from(scene.parts[i].pose.position)],
+            Vec3::Z,
+            MateMeasure::Point,
+            0.03,
+        );
+        edge(&mut edges, facade, i, "blank label / measured facade slot");
+    }
+
+    let connectors = indices(scene, "/Connector For Split Roof.stl");
+    if !connectors.is_empty() {
+        let secondary = *roof
+            .iter()
+            .find(|&&i| i != primary)
+            .ok_or("Split roof front panel missing")?;
+        let seam = constraints::world_bounds(&scene.parts[primary]).1.z;
+        let primary_matrix = scene.parts[primary].pose.matrix(0.);
+        let outer_seed = outer_world + delta.y;
+        let ceil = display::plane_patch(
+            &scene.parts[primary].mesh,
+            primary_matrix,
+            1,
+            -1.,
+            outer_seed - 2.,
+            wide_window(),
+            0.06,
+        )?;
+        let bottom = display::plane_patch(
+            &scene.parts[primary].mesh,
+            primary_matrix,
+            1,
+            1.,
+            outer_seed - 6.,
+            wide_window(),
+            0.06,
+        )?;
+        let mid = (ceil.level + bottom.level) / 2.;
+        let sockets = socket_intervals(&scene.parts[primary], mid, seam - 0.5)?;
+        let other = socket_intervals(&scene.parts[secondary], mid, seam + 0.5)?;
+        if sockets.len() != connectors.len() || other.len() != sockets.len() {
+            return Err(format!(
+                "Split roof has {} sockets, BOM has {} connectors",
+                sockets.len(),
+                connectors.len()
+            ));
+        }
+        let dx = sockets.iter().map(|p| (p[0] + p[1]) / 2.).sum::<f32>() / sockets.len() as f32
+            - other.iter().map(|p| (p[0] + p[1]) / 2.).sum::<f32>() / other.len() as f32;
+        scene.parts[secondary].pose.position[0] += dx;
+        let other = socket_intervals(&scene.parts[secondary], mid, seam + 0.5)?;
+        for (slot, i) in connectors.into_iter().enumerate() {
+            let center = (sockets[slot][0] + sockets[slot][1]) / 2.;
+            let other_center = (other[slot][0] + other[slot][1]) / 2.;
+            if (center - other_center).abs() > 0.03 {
+                return Err("Split roof socket halves do not align".into());
+            }
+            let q = orientation(Vec3::X, Vec3::Z, -Vec3::Y);
+            let (lo, hi) = bounds(&scene.parts[i], q);
+            pose(
+                &mut scene.parts[i],
+                q,
+                Vec3::new(
+                    center - (lo.x + hi.x) / 2.,
+                    mid - (lo.y + hi.y) / 2.,
+                    seam - (lo.z + hi.z) / 2.,
+                ),
+            );
+            let clearance = (ceil.level - bottom.level - (hi.y - lo.y)) / 2.;
+            if !(0.02..=0.1).contains(&clearance) {
+                return Err(format!(
+                    "Split roof connector vertical gap {clearance:.4} mm"
+                ));
+            }
+            let top_point = Vec3::new(center, hi.y + scene.parts[i].pose.position[1], seam);
+            record(
+                scene,
+                [primary, i],
+                "split connector / upper slot face; measured clearance",
+                [Vec3::new(center, ceil.level, seam), top_point],
+                Vec3::Y,
+                MateMeasure::Plane { gap: -clearance },
+                0.02,
+            );
+            record(
+                scene,
+                [secondary, i],
+                "split socket centerlines across seam",
+                [
+                    Vec3::new(other_center, mid, seam),
+                    Vec3::new(center, mid, seam),
+                ],
+                Vec3::X,
+                MateMeasure::Point,
+                0.03,
+            );
+            // Independent cross sections check the spline's tapered outline
+            // against both actual sockets, away from the centering section.
+            for offset in [-43.5, -30., -10., 10., 30., 43.5] {
+                let z = seam + offset;
+                let panel = if offset < 0. { primary } else { secondary };
+                let slots = socket_intervals(&scene.parts[panel], mid, z)?;
+                let slot = slots
+                    .iter()
+                    .find(|s| s[0] < center && s[1] > center)
+                    .ok_or("Connector tapered socket section missing")?;
+                let male = section_crossings(&scene.parts[i], mid, z);
+                if male.len() < 2 {
+                    return Err("Connector tapered profile section missing".into());
+                }
+                for (side, wall, end) in [
+                    (1., slot[0], male[0]),
+                    (-1., slot[1], *male.last().unwrap()),
+                ] {
+                    let gap = (end - wall) * side;
+                    record(
+                        scene,
+                        [panel, i],
+                        &format!("split spline outline at {offset:.1} mm; side gap {gap:.3} mm"),
+                        [Vec3::new(wall, mid, z), Vec3::new(end, mid, z)],
+                        Vec3::X * side,
+                        MateMeasure::Clearance { min: 0. },
+                        0.03,
+                    );
+                }
+            }
+            edge(
+                &mut edges,
+                primary,
+                i,
+                "split roof connector / paired socket",
+            );
+        }
+        let a = display::plane_patch(
+            &scene.parts[primary].mesh,
+            scene.parts[primary].pose.matrix(0.),
+            2,
+            1.,
+            seam,
+            wide_window(),
+            0.03,
+        )?;
+        let b = display::plane_patch(
+            &scene.parts[secondary].mesh,
+            scene.parts[secondary].pose.matrix(0.),
+            2,
+            -1.,
+            seam,
+            wide_window(),
+            0.03,
+        )?;
+        record(
+            scene,
+            [primary, secondary],
+            "split roof mating end planes",
+            [a.center, b.center],
+            Vec3::Z,
+            MateMeasure::Plane { gap: 0. },
+            0.03,
+        );
     }
     scene.parts[module].color = [0.53, 0.62, 0.72, 1.];
     scene.parts[facade].color = [0.78, 0.82, 0.87, 1.];
+    for e in edges {
+        let mut r = if let Some((p, a)) = e.hinge {
+            Relation::hinge(scene, e.parent, e.child, p, a)?
+        } else {
+            Relation::fixed(scene, e.parent, e.child, false)?
+        };
+        r.label = e.label;
+        if (r.label == LOCK_INNER || r.label == LOCK_OUTER)
+            && let Joint::Hinge { min, max, .. } = &mut r.joint
+        {
+            *min = -180.;
+            *max = 180.;
+        }
+        constraints::add(scene, r)?;
+    }
     scene.calibrated = false;
+    // Source patterns can be incompatible. Retain their measured positions and
+    // expose failed checks; never distort a source mesh to make a check pass.
     reset_explosion(scene)
+}
+
+pub fn review_notes(scene: &Scene, zh: bool) -> Vec<&'static str> {
+    let mut notes = vec![if zh {
+        "销钉采用伸直展示近似；打印保留源件自由形态，未做弹性受力验证。"
+    } else {
+        "Pins use a relaxed display approximation. Print files retain their free shape; elastic stresses are not simulated."
+    }];
+    if scene
+        .parts
+        .iter()
+        .any(|p| p.pose.path.ends_with("Facade.stl") && p.source_size.y > 50.)
+    {
+        notes.push(if zh { "高面板标签位于侧入槽的矩形区域；横向止挡与滑入间隙待实物核对。" }
+            else { "Tall-facade label sits on the rectangular slot land; its lateral stop and insertion clearance need physical review." });
+    }
+    if scene.mating_checks.iter().any(|c| {
+        !c.required && {
+            let r = c.evaluate(scene);
+            r.active && !r.within_tolerance
+        }
+    }) {
+        notes.push(if zh { "铰链相邻端面存在负轴向间隙；保留实测螺孔位置，需核对源件兼容性。" }
+            else { "Adjacent hinge end planes have negative axial clearance. Measured fastener positions are retained; check source-part compatibility." });
+    }
+    if scene.mating_checks.iter().any(|c| {
+        c.required && {
+            let r = c.evaluate(scene);
+            r.active && !r.within_tolerance
+        }
+    }) {
+        notes.push(if zh { "安装配合存在超出检查阈值的偏差，请展开查看；本套装配仍待校准确认。" }
+            else { "Some mating checks exceed their thresholds. Expand the discrepancies; this assembly still needs calibration review." });
+    }
+    notes
+}
+
+fn latch_crossings(scene: &Scene, report: &crate::collision::Report) -> Vec<serde_json::Value> {
+    report.pairs.iter().filter(|pair|[pair.a,pair.b].iter().any(|&i|scene.parts[i].pose.path.contains("/Locks/")))
+        .map(|pair|serde_json::json!({"a":constraints::PartId::of(&scene.parts[pair.a]),"b":constraints::PartId::of(&scene.parts[pair.b]),"point":pair.point.to_array()})).collect()
+}
+
+/// Explicit offline audit. All parsing/fitting runs before the GUI starts.
+pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), String> {
+    use crate::catalog::{self, Catalog};
+    use std::{fmt::Write as _, fs};
+    let catalog = Catalog::scan(root.into())?;
+    let folder = home.join("output/sustainer-calibration");
+    let state = home.join("state");
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&state).map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    let mut report = String::from(
+        "# Sustainer 装配几何核对\n\n依据源 STL 的双截面孔轴、圆柱弧及有向安装面定位；单位假定为 mm。软件检查阈值不是制造公差。所有自动生成定义保持 calibrated=false，待人工和实物确认。\n\n装配销钉采用伸直展示近似，打印保留源件自由形态，未做弹性受力验证；高面板标签横向止挡待核对。螺钉、支撑移除和 0–110° 机械行程未验证。端面负间隙提示不等同于已证明实体穿透。\n\n| 型号 | 检查通过/总数 | 最大必要误差 mm | 提示数 | 坐标文件 |\n| --- | ---: | ---: | ---: | --- |\n",
+    );
+    let mut failures = 0;
+    let mut latch_failures = 0;
+    for (selection, options) in catalog::sustainer_configurations() {
+        let key = options.key(&selection);
+        let result = catalog.sustainer_bom(&selection, options).and_then(|bom| {
+            Scene::load_with_rules(root, &bom, key.clone(), true, &display::Rules::default())
+        });
+        match result {
+            Ok(scene) => {
+                let surface = crate::collision::check(&scene, 0.05)?;
+                let latch_surface_crossings = latch_crossings(&scene, &surface);
+                let other_surface_crossings = surface.pairs.len() - latch_surface_crossings.len();
+                if !latch_surface_crossings.is_empty() {
+                    latch_failures += 1;
+                }
+                let checks: Vec<_> = scene
+                    .mating_checks
+                    .iter()
+                    .map(|c| c.evaluate(&scene))
+                    .collect();
+                let passed = checks.iter().filter(|c| c.within_tolerance).count();
+                let warnings = checks.iter().filter(|c| !c.within_tolerance).count();
+                let max_error = checks
+                    .iter()
+                    .filter(|c| c.required)
+                    .map(|c| c.error_mm)
+                    .fold(0., f32::max);
+                let file = state.join(format!("assembly-{key}.toml"));
+                // Preserve any existing manually confirmed assembly definition.
+                let disposition = if file.is_file() {
+                    let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+                    let previous: crate::scene::Definition =
+                        toml::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+                    if previous.calibrated {
+                        "preserved_manual"
+                    } else {
+                        "updated"
+                    }
+                } else {
+                    "created"
+                };
+                let candidate =
+                    toml::to_string_pretty(&scene.definition()).map_err(|e| e.to_string())?;
+                if disposition == "preserved_manual" {
+                    fs::write(folder.join(format!("assembly-{key}.toml")), candidate)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    fs::write(&file, candidate).map_err(|e| e.to_string())?;
+                }
+                writeln!(
+                    report,
+                    "| {key} | {passed}/{} | {max_error:.4} | {warnings} | {disposition} |",
+                    checks.len()
+                )
+                .unwrap();
+                rows.push(serde_json::json!({"key":key,"checks":checks,"notes":review_notes(&scene,true),"definition":file,"disposition":disposition,"latch_surface_crossings":latch_surface_crossings,"surface_tolerance_mm":0.05,"other_surface_crossings":other_surface_crossings}));
+            }
+            Err(error) => {
+                failures += 1;
+                writeln!(report, "| {key} | FAILED | — | — | {error} |").unwrap();
+                rows.push(serde_json::json!({"key":key,"error":error}));
+            }
+        }
+    }
+    writeln!(
+        report,
+        "\n共 {} 组，加载失败 {failures} 组。详细检查见同目录 report.json。",
+        rows.len()
+    )
+    .unwrap();
+    writeln!(report,"\n卡扣局部表面检查：{latch_failures} 组检出相交（阈值 0.05 mm），涵盖支座、内外扣和装配展示销钉。销钉采用伸直近似；其他箱体相交、弹性及制造配合未验证。详见 report.json 的 latch_surface_crossings。\n").unwrap();
+    report.push_str("\n主要待核对项：M 全部 21 组的相邻铰链端面有约 −0.125 mm 轴向间隙；XL4 三种箱体的后安装孔竖距为 14 mm、下铰链为 15.4 mm，居中配对后每孔偏约 0.7 mm。软件保留两件的原始孔阵列；原始 STL 不变，只有装配展示销钉采用伸直近似。\n\n分盖连接件按 S/M/L/XL 分别配置 2/3/4/5 个；在接缝两侧共六个截面检查其渐变轮廓及槽壁间隙。\n\n代表规格的 0° / 75° 三角面相交诊断另见 surface-report.json。箱体、顶盖等保留打印支撑的展示网格仍报告其他相交；不能据此视作完整无干涉装配。孔轴/安装面通过也不代表 CAD 或实物配合通过。\n");
+    fs::write(folder.join("report.md"), report).map_err(|e| e.to_string())?;
+    fs::write(
+        folder.join("report.json"),
+        serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if failures > 0 || latch_failures > 0 {
+        Err(format!(
+            "{failures} loads failed; {latch_failures} latch surface checks failed; see {}",
+            folder.display()
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn lid_angle(scene: &Scene) -> Option<f32> {
@@ -400,19 +1354,48 @@ pub fn lid_angle(scene: &Scene) -> Option<f32> {
     })
 }
 pub fn set_lid_angle(scene: &mut Scene, value: f32) -> Result<(), String> {
+    if !value.is_finite() || !(0. ..=110.).contains(&value) {
+        return Err("Invalid lid angle".into());
+    }
     let i = scene
         .relations
         .iter()
         .position(|r| r.label == LID)
         .ok_or("Sustainer lid is unavailable")?;
-    let Joint::Hinge { angle, .. } = &mut scene.relations[i].joint else {
-        return Err("Lid hinge missing".into());
-    };
-    let previous = *angle;
-    *angle = value;
+    let closed = constraints::latch_display_pose(
+        scene
+            .parts
+            .iter()
+            .any(|p| p.pose.path.contains("/LOCK OUTER PART 2-4F")),
+        scene
+            .parts
+            .iter()
+            .any(|p| p.pose.path.contains("/Modules/") && p.pose.path.contains("/XL4/")),
+    );
+    let released_inner = constraints::latch_release_inner_degrees();
+    let previous: Vec<_> = scene.relations.iter().map(|r| r.joint.clone()).collect();
+    // Select the released display state before any cover lift. Interpolating
+    // the cover through a still-closed clasp produces a real mesh crossing.
+    for (index, r) in scene.relations.iter_mut().enumerate() {
+        if let Joint::Hinge { angle, .. } = &mut r.joint {
+            if index == i {
+                *angle = value;
+            } else if r.label == LOCK_INNER {
+                *angle = if value > 0. {
+                    released_inner - closed.inner_degrees
+                } else {
+                    0.
+                };
+            } else if r.label == LOCK_OUTER {
+                // Release the clasp as a rigid subassembly: retaining this
+                // relative angle keeps its adjacent bearing profiles separated.
+                *angle = 0.;
+            }
+        }
+    }
     if let Err(e) = constraints::solve(scene) {
-        if let Joint::Hinge { angle, .. } = &mut scene.relations[i].joint {
-            *angle = previous;
+        for (r, joint) in scene.relations.iter_mut().zip(previous) {
+            r.joint = joint;
         }
         return Err(e);
     }
@@ -489,12 +1472,53 @@ mod tests {
     use super::*;
     use crate::catalog::{Catalog, Selection, SustainerBody, SustainerOptions};
     #[test]
+    fn sustainer_library_latch_bearing_pairing() {
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let c = Catalog::scan(root.into()).unwrap();
+        let bom = c
+            .sustainer_bom(&Selection::default(), SustainerOptions::default())
+            .unwrap();
+        let s = Scene::load(&c.root, &bom, "bearing regression".into(), true).unwrap();
+        let inner = indices(&s, "/LOCK INNER PART.stl")[0];
+        let holder = indices(&s, "/LOCK HOLDER.stl")[0];
+        let middle =
+            display::section_holes(&s.parts[inner].mesh, raw_frame(), 2, 0.013, [2.7, 3.1]);
+        assert_eq!(middle.len(), 1);
+        assert!((middle[0].point.x + 7.5).abs() < 0.01);
+        let ends = display::section_holes(&s.parts[inner].mesh, raw_frame(), 2, 16., [2.7, 3.1]);
+        assert_eq!(ends.len(), 2);
+        let small = ends.iter().find(|h| h.point.x > 0.).unwrap();
+        let holder_hole = display::cylinder_axis(
+            &s.parts[holder].mesh,
+            raw_frame(),
+            2,
+            Vec3::new(-2.7, 5.75, 0.),
+            2.95,
+        )
+        .unwrap();
+        let delta = axis_point(&s, inner, small) - axis_point(&s, holder, &holder_hole);
+        assert!(delta.y.abs() < 0.001 && delta.z.abs() < 0.001);
+        assert!(
+            s.parts[holder]
+                .pose
+                .matrix(0.)
+                .transform_vector3(raw(-1., 0., 0.))
+                .normalize()
+                .dot(Vec3::Y)
+                > 0.999
+        );
+    }
+    #[test]
     fn sustainer_library_all_scene_datums() {
         let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
             return;
         };
         let c = Catalog::scan(root.into()).unwrap();
         let mut configurations = 0;
+        let mut source_hole_discrepancies = 0;
+        let mut end_gap_discrepancies = 0;
         for entry in c.entries.iter().filter(|e| {
             e.path.starts_with(PREFIX) && e.path.contains("/Modules/") && e.name.ends_with(".stl")
         }) {
@@ -532,6 +1556,24 @@ mod tests {
                     .unwrap();
                 let scene = Scene::load(&c.root, &bom, "datum sweep".into(), true)
                     .unwrap_or_else(|e| panic!("{size}/{height} {body:?} split={split_roof}: {e}"));
+                for result in scene
+                    .mating_checks
+                    .iter()
+                    .map(|c| c.evaluate(&scene))
+                    .filter(|r| !r.within_tolerance)
+                {
+                    if result.required {
+                        assert_eq!(size, "XL4");
+                        assert!(result.label.starts_with("lower hinge / housing: fastener"));
+                        assert!((result.error_mm - 0.7).abs() < 0.005);
+                        source_hole_discrepancies += 1;
+                    } else {
+                        assert_eq!(width, "M");
+                        assert!(result.label.starts_with("hinge barrel end planes"));
+                        assert!((result.error_mm - 0.125).abs() < 0.005);
+                        end_gap_discrepancies += 1;
+                    }
+                }
                 let module = indices(&scene, "/Modules/")[0];
                 let facade = indices(&scene, "Facade.stl")[0];
                 let (lo, hi) = constraints::world_bounds(&scene.parts[module]);
@@ -579,6 +1621,8 @@ mod tests {
             }
         }
         assert_eq!(configurations, 126);
+        assert_eq!(source_hole_discrepancies, 24);
+        assert_eq!(end_gap_discrepancies, 42);
         println!(
             "all {configurations} Sustainer scenes loaded; housing up axes and cover extents checked"
         );
@@ -589,6 +1633,7 @@ mod tests {
             return;
         };
         let c = Catalog::scan(root.into()).unwrap();
+        let mut surface_reports = Vec::new();
         for (width, depth, height, body, split_roof) in [
             ("S", 3, "1F", SustainerBody::Flat, false),
             ("M", 4, "2F", SustainerBody::Flat, false),
@@ -610,6 +1655,13 @@ mod tests {
             let mut scene =
                 Scene::load(&c.root, &bom, "Sustainer regression".into(), true).unwrap();
             assert!(!scene.calibrated);
+            assert!(
+                scene
+                    .mating_checks
+                    .iter()
+                    .filter(|c| c.required)
+                    .all(|c| c.evaluate(&scene).within_tolerance)
+            );
             assert_eq!(
                 scene.relations.len() + 1,
                 scene.parts.len(),
@@ -621,7 +1673,7 @@ mod tests {
                     .iter()
                     .filter(|r| matches!(r.joint, Joint::Hinge { .. }))
                     .count(),
-                1
+                if matches!(width, "S" | "M") { 3 } else { 5 }
             );
             assert_eq!(indices(&scene, "/Rods/").len(), 2);
             assert_eq!(
@@ -629,6 +1681,105 @@ mod tests {
                 if matches!(width, "S" | "M") { 4 } else { 8 }
             );
             let closed: Vec<_> = scene.parts.iter().map(|p| p.pose.matrix(0.)).collect();
+            for holder in indices(&scene, "/LOCK HOLDER.stl") {
+                let up = scene.parts[holder]
+                    .pose
+                    .matrix(0.)
+                    .transform_vector3(raw(-1., 0., 0.));
+                assert!(up.normalize().dot(Vec3::Y) > 0.999);
+            }
+            if width == "S" && depth == 3 {
+                std::fs::create_dir_all("output/sustainer-calibration").unwrap();
+                std::fs::write(
+                    "output/sustainer-calibration/latch-s3.toml",
+                    toml::to_string_pretty(&scene.definition()).unwrap(),
+                )
+                .unwrap();
+            }
+            let mut old_latch = scene.clone();
+            for relation in &mut old_latch.relations {
+                if relation.label == LOCK_INNER {
+                    relation.label = "Sustainer datum: inner lock / small pins".into();
+                    if let Joint::Hinge { angle, .. } = &mut relation.joint {
+                        *angle = 25.;
+                    }
+                }
+            }
+            constraints::solve(&mut old_latch).unwrap();
+            let mut upgraded = scene.clone();
+            upgraded.retain_assembly_state(&old_latch);
+            assert!(
+                upgraded
+                    .parts
+                    .iter()
+                    .zip(&closed)
+                    .all(|(p, m)| p.pose.matrix(0.).abs_diff_eq(*m, 0.001))
+            );
+            let mut legacy = scene.clone();
+            for relation in &mut legacy.relations {
+                relation.label = "Sustainer: legacy (estimated)".into();
+            }
+            for part in &mut legacy.parts {
+                part.pose.position[1] += 100.;
+            }
+            let mut migrated = scene.clone();
+            migrated.retain_assembly_state(&legacy);
+            assert!(
+                migrated
+                    .parts
+                    .iter()
+                    .zip(&closed)
+                    .all(|(p, m)| p.pose.matrix(0.).abs_diff_eq(*m, 0.001))
+            );
+            let small_joint = scene
+                .relations
+                .iter()
+                .position(|r| r.label == LOCK_INNER)
+                .unwrap();
+            if let Joint::Hinge { angle, .. } = &mut scene.relations[small_joint].joint {
+                *angle = 15.;
+            }
+            constraints::solve(&mut scene).unwrap();
+            let outer = indices(&scene, "/LOCK OUTER PART")[0];
+            assert!(
+                !scene.parts[outer]
+                    .pose
+                    .matrix(0.)
+                    .abs_diff_eq(closed[outer], 0.001)
+            );
+            let holder = indices(&scene, "/LOCK HOLDER.stl")[0];
+            assert!(
+                scene.parts[holder]
+                    .pose
+                    .matrix(0.)
+                    .abs_diff_eq(closed[holder], 0.001)
+            );
+            if let Joint::Hinge { angle, .. } = &mut scene.relations[small_joint].joint {
+                *angle = 0.;
+            }
+            constraints::solve(&mut scene).unwrap();
+            for angle in [0., 1., 5., 15., 30., 45., 75., 110.] {
+                set_lid_angle(&mut scene, angle).unwrap();
+                let diagnostic = crate::collision::check(&scene, 0.05).unwrap();
+                for pair in &diagnostic.pairs {
+                    let a = &scene.parts[pair.a];
+                    let b = &scene.parts[pair.b];
+                    if [a, b].iter().any(|p| p.pose.path.contains("/Locks/")) {
+                        panic!(
+                            "Latch surface crossing {width}{depth}/{height} angle={angle}: {} / {} @ {:?}",
+                            a.label(false),
+                            b.label(false),
+                            pair.point
+                        );
+                    }
+                }
+
+                let pairs:Vec<_>=diagnostic.pairs.iter().map(|p|serde_json::json!({
+                    "a":constraints::PartId::of(&scene.parts[p.a]),"b":constraints::PartId::of(&scene.parts[p.b]),"point":p.point.to_array()
+                })).collect();
+                surface_reports.push(serde_json::json!({"size":format!("{width}{depth}/{height}"),"body":format!("{body:?}"),"split":split_roof,"angle":angle,"pairs":pairs}));
+            }
+            set_lid_angle(&mut scene, 0.).unwrap();
             let roof = scene
                 .parts
                 .iter()
@@ -652,12 +1803,10 @@ mod tests {
                     .abs_diff_eq(closed[module], 0.0001)
             );
             for i in indices(&scene, "/Locks/") {
-                assert!(
-                    scene.parts[i]
-                        .pose
-                        .matrix(0.)
-                        .abs_diff_eq(closed[i], 0.0001)
-                );
+                let p = &scene.parts[i];
+                let stays_fixed = p.pose.path.ends_with("/LOCK HOLDER.stl")
+                    || (p.pose.path.contains("PINS") && p.pose.body.is_some_and(|b| b >= 2));
+                assert_eq!(p.pose.matrix(0.).abs_diff_eq(closed[i], 0.001), stays_fixed);
             }
             let saved: crate::scene::Definition =
                 toml::from_str(&toml::to_string(&scene.definition()).unwrap()).unwrap();
@@ -678,5 +1827,12 @@ mod tests {
                 scene.parts.len()
             );
         }
+        let folder = std::path::Path::new("output/sustainer-calibration");
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(
+            folder.join("surface-report.json"),
+            serde_json::to_vec_pretty(&surface_reports).unwrap(),
+        )
+        .unwrap();
     }
 }
