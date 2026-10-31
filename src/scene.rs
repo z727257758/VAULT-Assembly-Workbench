@@ -322,6 +322,16 @@ impl Scene {
                 .relations
                 .iter()
                 .any(|r| r.label.starts_with("Sustainer datum:"));
+        let old_sustainer_seats = !old.calibrated
+            && old.relations.iter().any(|r| {
+                r.label
+                    .starts_with("Sustainer datum: upper hinge / roof seat")
+                    && r.label != crate::sustainer::UPPER_SEAT
+            })
+            && self
+                .relations
+                .iter()
+                .any(|r| r.label == crate::sustainer::UPPER_SEAT);
         let old_latch_defaults = !old.calibrated
             && old.relations.iter().any(|r| {
                 r.label
@@ -380,6 +390,7 @@ impl Scene {
                 let source_owned = legacy_hidden
                     || layout_owned
                     || old_sustainer_estimates
+                    || old_sustainer_seats
                     || old_latch_defaults && part.pose.path.contains("/Locks/");
                 if old_parent == new_parent && !source_owned {
                     part.pose = previous.pose.clone();
@@ -389,6 +400,7 @@ impl Scene {
         }
         for relation in &old.relations {
             if !(old_sustainer_estimates
+                || old_sustainer_seats
                 || old_latch_defaults && relation.child.path.contains("/Locks/"))
                 && ids.contains(&relation.parent)
                 && ids.contains(&relation.child)

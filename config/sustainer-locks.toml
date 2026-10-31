@@ -1,18 +1,20 @@
-# Whole clasp is swung away before cover lift; no elastic/transition solver.
-release_inner_degrees = 10.0
+# Two pin joints move to the released display pose before cover lift.
+# No elastic or continuous transition solver.
+release_inner_degrees = -90.0
+release_outer_degrees = 0.0
 
 # Read-only display calibration for the supplied VAULT package. Angles were
 # selected from complete hardware/catch sections, with a small display gap.
 # These are display poses, not verified mechanical stops or elastic simulation.
 [one_floor]
-inner_degrees = -49.0
-outer_degrees = -36.4
+inner_degrees = -8.0
+outer_degrees = 9.5
 
 [tall]
-inner_degrees = -37.5
-outer_degrees = -26.9
+inner_degrees = -8.0
+outer_degrees = 9.5
 
 # XL4's supplied mounting pattern raises the cover relative to the facade.
 [xl4]
-inner_degrees = -49.0
-outer_degrees = -35.4
+inner_degrees = -8.0
+outer_degrees = 10.5

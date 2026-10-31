@@ -2,7 +2,7 @@
 //! Coplanar contact and complete containment are intentionally not classified as
 //! penetration. A clean report is NOT a manufacturing clearance certificate.
 use crate::{constraints::PartId, scene::Scene};
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 #[derive(Clone, Copy)]
 struct Bounds {
     lo: Vec3,
@@ -130,56 +130,53 @@ impl Tree {
         hits
     }
 }
-fn inside_triangle(p: Vec3, t: [Vec3; 3]) -> bool {
-    let a = t[1] - t[0];
-    let b = t[2] - t[0];
-    let v = p - t[0];
-    let aa = a.dot(a);
-    let ab = a.dot(b);
-    let bb = b.dot(b);
-    let av = a.dot(v);
-    let bv = b.dot(v);
-    let denominator = aa * bb - ab * ab;
-    if denominator.abs() < 1e-12 {
-        return false;
-    }
-    let u = (bb * av - ab * bv) / denominator;
-    let v = (aa * bv - ab * av) / denominator;
-    u >= -1e-5 && v >= -1e-5 && u + v <= 1. + 1e-5
-}
-fn cross_edges(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
-    let n = (b[1] - b[0]).cross(b[2] - b[0]).normalize_or_zero();
-    if n.length() < 0.9 {
+fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
+    let a = a.map(|p| p.as_dvec3());
+    let b = b.map(|p| p.as_dvec3());
+    let na = (a[1] - a[0]).cross(a[2] - a[0]).normalize_or_zero();
+    let nb = (b[1] - b[0]).cross(b[2] - b[0]).normalize_or_zero();
+    let da = a.map(|p| (p - b[0]).dot(nb));
+    let db = b.map(|p| (p - a[0]).dot(na));
+    let eps = f64::from(eps);
+    let straddles = |d: [f64; 3]| d.iter().any(|&v| v > eps) && d.iter().any(|&v| v < -eps);
+    if !straddles(da) || !straddles(db) {
         return None;
     }
-    for i in 0..3 {
-        let p = a[i];
-        let q = a[(i + 1) % 3];
-        let d0 = (p - b[0]).dot(n);
-        let d1 = (q - b[0]).dot(n);
-        if (d0 > eps && d1 < -eps) || (d1 > eps && d0 < -eps) {
-            let hit = p + (q - p) * (d0 / (d0 - d1));
-            if inside_triangle(hit, b) {
-                return Some(hit);
+    let direction = na.cross(nb).normalize_or_zero();
+    if direction.length_squared() < 0.9 {
+        return None;
+    }
+    let cut = |t: [DVec3; 3], d: [f64; 3]| {
+        let mut points = Vec::with_capacity(3);
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            if d[i].abs() < 1e-10 {
+                points.push(t[i]);
+            }
+            if d[i] * d[j] < 0. {
+                points.push(t[i] + (t[j] - t[i]) * (d[i] / (d[i] - d[j])));
             }
         }
-    }
-    None
-}
-fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
-    // A flange edge landing on a seating plane is contact. A proper surface
-    // crossing must straddle both triangle planes, not just one of them.
-    let straddles = |points: [Vec3; 3], plane: [Vec3; 3]| {
-        let n = (plane[1] - plane[0])
-            .cross(plane[2] - plane[0])
-            .normalize_or_zero();
-        let distances = points.map(|p| (p - plane[0]).dot(n));
-        distances.iter().any(|&d| d > eps) && distances.iter().any(|&d| d < -eps)
+        points
     };
-    if !straddles(a, b) || !straddles(b, a) {
-        return None;
-    }
-    cross_edges(a, b, eps).or_else(|| cross_edges(b, a, eps))
+    let ca = cut(a, da);
+    let cb = cut(b, db);
+    let origin = *ca.first()?;
+    let interval = |points: &[DVec3]| {
+        points
+            .iter()
+            .map(|p| (*p - origin).dot(direction))
+            .fold([f64::INFINITY, f64::NEG_INFINITY], |r, v| {
+                [r[0].min(v), r[1].max(v)]
+            })
+    };
+    let ia = interval(&ca);
+    let ib = interval(&cb);
+    let lo = ia[0].max(ib[0]);
+    let hi = ia[1].min(ib[1]);
+    // Both finite plane-cut segments must overlap. An inclusive barycentric
+    // edge test can mistake adjacent notch/flange boundaries for a crossing.
+    (hi - lo > eps).then(|| (origin + direction * ((lo + hi) / 2.)).as_vec3())
 }
 #[derive(Clone)]
 pub struct Crossing {
@@ -303,6 +300,30 @@ mod tests {
         assert!(cross_triangles(face, edge, 0.01).is_none());
         let penetrating = edge.map(|p| p - Vec3::Z * 0.5);
         assert!(cross_triangles(face, penetrating, 0.01).is_some());
+    }
+    #[test]
+    fn plane_cut_segments_must_overlap_beyond_edge_tolerance() {
+        let a = [
+            Vec3::new(-1., -1., 0.),
+            Vec3::new(1., -1., 0.),
+            Vec3::new(0., 1., 0.),
+        ];
+        let b = [
+            Vec3::new(0., 1.00001, -1.),
+            Vec3::new(0., 1.00001, 1.),
+            Vec3::new(0., 2., 0.),
+        ];
+        // Both triangles straddle the other's infinite plane, but their
+        // intersection segments only approach an endpoint of the finite face.
+        for offset in [Vec3::ZERO, Vec3::new(97., 84., 157.)] {
+            let a = a.map(|p| p + offset);
+            let b = b.map(|p| p + offset);
+            assert!(cross_triangles(a, b, 0.001).is_none());
+            assert!(cross_triangles(b, a, 0.001).is_none());
+            let crossing = b.map(|p| p - Vec3::Y);
+            assert!(cross_triangles(a, crossing, 0.001).is_some());
+            assert!(cross_triangles(crossing, a, 0.001).is_some());
+        }
     }
     #[test]
     fn crossing_triangles_are_found() {

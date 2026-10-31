@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 
 pub const PREFIX: &str = "02. SUSTAINERS/";
 pub const LID: &str = "Sustainer datum: lid / paired hinge axes";
-pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / local-clearance-v4";
-pub const LOCK_OUTER: &str = "Sustainer datum: outer lock / large pins / local-clearance-v4";
+pub const UPPER_SEAT: &str = "Sustainer datum: upper hinge / roof seat / inside-seat-v5";
+pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / inside-seat-v5";
+pub const LOCK_OUTER: &str = "Sustainer datum: outer lock / large pins / inside-seat-v5";
 
 fn raw(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, z, -y)
@@ -596,7 +597,9 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
         + scene.parts[primary].pose.position[1];
     for (slot, i) in upper_indices.into_iter().enumerate() {
         let (sign, raw_holes) = plate_holes(&scene.parts[i], 0, 2.)?;
-        let q = orientation(-Vec3::Y * sign, Vec3::Z, -Vec3::X * sign);
+        // Plate lies above the shaft. The raw |X|=7 rim seats against the roof;
+        // its recessed |X|=4.95 face clears the roof pad, unlike the inverted pose.
+        let q = orientation(Vec3::Y * sign, Vec3::Z, Vec3::X * sign);
         let m = Mat4::from_quat(q);
         let child_holes = orient_holes(&raw_holes, m * raw_frame().inverse());
         let parent_plane = display::plane_patch(
@@ -613,7 +616,7 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             m,
             1,
             1.,
-            0.,
+            7.,
             window(&child_holes, 1),
             0.05,
         )?;
@@ -641,7 +644,12 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             4.15,
         )?;
         upper.push((i, datum));
-        edge(&mut edges, primary, i, "upper hinge / roof seat");
+        edge(
+            &mut edges,
+            primary,
+            i,
+            "upper hinge / roof seat / inside-seat-v5",
+        );
     }
     let upper_mean = upper
         .iter()
@@ -789,11 +797,9 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             &scene.parts[facade].mesh,
             scene.parts[facade].pose.matrix(0.),
             2,
-            1.,
-            // The flange bears on the facade's outside pads. The deeper
-            // central pocket clears the holder body/UP lettering; it is not
-            // the flange seat. Using its floor embeds the flange by 4.1 mm.
-            scene.parts[facade].pose.position[2] + 5.,
+            -1.,
+            // Manual page 2: the screw-head flange sits inside the facade.
+            scene.parts[facade].pose.position[2] - 5.,
             window(&lock_groups[slot], 2),
             0.05,
         )?;
@@ -801,8 +807,8 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             &scene.parts[holder].mesh,
             m,
             2,
-            -1.,
-            -9.45,
+            1.,
+            -4.45,
             window(&child_holes, 2),
             0.05,
         )?;
@@ -820,13 +826,13 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
                 plane: cp,
                 axis: 2,
             },
-            "lock holder / facade bearing pads",
+            "lock holder / facade inside wall",
         )?;
         edge(
             &mut edges,
             facade,
             holder,
-            "lock holder / facade bearing pads",
+            "lock holder / facade inside wall",
         );
         let holder_axis = display::cylinder_axis(
             &scene.parts[holder].mesh,
@@ -1208,6 +1214,14 @@ pub fn review_notes(scene: &Scene, zh: bool) -> Vec<&'static str> {
     if scene
         .parts
         .iter()
+        .any(|p| p.pose.path.ends_with("LOCK OUTER PART 1F.stl"))
+    {
+        notes.push(if zh { "部分 1F 源件的支座背面 UP 凸字与盖内沿有局部相交提示；保留原几何，待实物核对。" }
+            else { "Some 1F source parts have a local crossing at the holder's raised UP mark and lid lip. Source geometry is retained for physical review." });
+    }
+    if scene
+        .parts
+        .iter()
         .any(|p| p.pose.path.ends_with("Facade.stl") && p.source_size.y > 50.)
     {
         notes.push(if zh { "高面板标签位于侧入槽的矩形区域；横向止挡与滑入间隙待实物核对。" }
@@ -1234,9 +1248,43 @@ pub fn review_notes(scene: &Scene, zh: bool) -> Vec<&'static str> {
     notes
 }
 
-fn latch_crossings(scene: &Scene, report: &crate::collision::Report) -> Vec<serde_json::Value> {
+// Keep the source embossing visible and reported. This narrow classification
+// never suppresses collision results; the caller also checks at 0.2 mm.
+fn holder_marking_crossing(scene: &Scene, pair: &crate::collision::Crossing) -> bool {
+    if lid_angle(scene).is_none_or(|a| a.abs() > 0.0001)
+        || !scene
+            .parts
+            .iter()
+            .any(|p| p.pose.path.ends_with("LOCK OUTER PART 1F.stl"))
+    {
+        return false;
+    }
+    for (holder, roof) in [(pair.a, pair.b), (pair.b, pair.a)] {
+        let h = &scene.parts[holder];
+        let r = &scene.parts[roof];
+        if !h.pose.path.ends_with("/LOCK HOLDER.stl")
+            || !r.pose.path.contains(" Roof")
+            || r.pose.path.contains("Connector")
+        {
+            continue;
+        }
+        let p =
+            raw_frame().transform_point3(h.pose.matrix(0.).inverse().transform_point3(pair.point));
+        return (-4.3..=2.8).contains(&p.x) && (-10.1..=-9.4).contains(&p.y) && p.z.abs() <= 9.2;
+    }
+    false
+}
+fn latch_crossings(
+    scene: &Scene,
+    report: &crate::collision::Report,
+    coarse: Option<&crate::collision::Report>,
+) -> Vec<serde_json::Value> {
     report.pairs.iter().filter(|pair|[pair.a,pair.b].iter().any(|&i|scene.parts[i].pose.path.contains("/Locks/")))
-        .map(|pair|serde_json::json!({"a":constraints::PartId::of(&scene.parts[pair.a]),"b":constraints::PartId::of(&scene.parts[pair.b]),"point":pair.point.to_array()})).collect()
+        .map(|pair| {
+            let marking_review = holder_marking_crossing(scene, pair)
+                && coarse.is_some_and(|r| !r.pairs.iter().any(|p| p.a == pair.a && p.b == pair.b));
+            serde_json::json!({"a":constraints::PartId::of(&scene.parts[pair.a]),"b":constraints::PartId::of(&scene.parts[pair.b]),"point":pair.point.to_array(),"holder_marking_review":marking_review})
+        }).collect()
 }
 
 /// Explicit offline audit. All parsing/fitting runs before the GUI starts.
@@ -1254,6 +1302,7 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
     );
     let mut failures = 0;
     let mut latch_failures = 0;
+    let mut marking_reviews = 0;
     for (selection, options) in catalog::sustainer_configurations() {
         let key = options.key(&selection);
         let result = catalog.sustainer_bom(&selection, options).and_then(|bom| {
@@ -1262,10 +1311,28 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
         match result {
             Ok(scene) => {
                 let surface = crate::collision::check(&scene, 0.05)?;
-                let latch_surface_crossings = latch_crossings(&scene, &surface);
+                let coarse = if surface
+                    .pairs
+                    .iter()
+                    .any(|p| holder_marking_crossing(&scene, p))
+                {
+                    Some(crate::collision::check(&scene, 0.2)?)
+                } else {
+                    None
+                };
+                let latch_surface_crossings = latch_crossings(&scene, &surface, coarse.as_ref());
                 let other_surface_crossings = surface.pairs.len() - latch_surface_crossings.len();
-                if !latch_surface_crossings.is_empty() {
+                if latch_surface_crossings
+                    .iter()
+                    .any(|p| p["holder_marking_review"] != true)
+                {
                     latch_failures += 1;
+                }
+                if latch_surface_crossings
+                    .iter()
+                    .any(|p| p["holder_marking_review"] == true)
+                {
+                    marking_reviews += 1;
                 }
                 let checks: Vec<_> = scene
                     .mating_checks
@@ -1322,8 +1389,8 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
         rows.len()
     )
     .unwrap();
-    writeln!(report,"\n卡扣局部表面检查：{latch_failures} 组检出相交（阈值 0.05 mm），涵盖支座、内外扣和装配展示销钉。销钉采用伸直近似；其他箱体相交、弹性及制造配合未验证。详见 report.json 的 latch_surface_crossings。\n").unwrap();
-    report.push_str("\n主要待核对项：M 全部 21 组的相邻铰链端面有约 −0.125 mm 轴向间隙；XL4 三种箱体的后安装孔竖距为 14 mm、下铰链为 15.4 mm，居中配对后每孔偏约 0.7 mm。软件保留两件的原始孔阵列；原始 STL 不变，只有装配展示销钉采用伸直近似。\n\n分盖连接件按 S/M/L/XL 分别配置 2/3/4/5 个；在接缝两侧共六个截面检查其渐变轮廓及槽壁间隙。\n\n代表规格的 0° / 75° 三角面相交诊断另见 surface-report.json。箱体、顶盖等保留打印支撑的展示网格仍报告其他相交；不能据此视作完整无干涉装配。孔轴/安装面通过也不代表 CAD 或实物配合通过。\n");
+    writeln!(report,"\n卡扣局部表面检查：{latch_failures} 组检出未归类相交；另有 {marking_reviews} 组支座 UP 凸字与盖内沿的微小相交待核对（阈值 0.05 mm），涵盖支座、内外扣和装配展示销钉。销钉采用伸直近似；其他箱体相交、弹性及制造配合未验证。详见 report.json 的 latch_surface_crossings。凸字提示仍保留在报告中，不表示无干涉；同一对在 0.2 mm 复核仍检出时视为失败。\n").unwrap();
+    report.push_str("\n主要待核对项：M 全部 21 组的相邻铰链端面有约 −0.125 mm 轴向间隙；XL4 三种箱体的后安装孔竖距为 14 mm、下铰链为 15.4 mm，居中配对后每孔偏约 0.7 mm。软件保留两件的原始孔阵列；原始 STL 不变，只有装配展示销钉采用伸直近似。\n\n分盖连接件按 S/M/L/XL 分别配置 2/3/4/5 个；在接缝两侧共六个截面检查其渐变轮廓及槽壁间隙。\n\n代表规格的 0°、1°、5°、15°、30°、45°、75°、110° 三角面相交诊断另见 surface-report.json。箱体、顶盖等保留打印支撑的展示网格仍报告其他相交；不能据此视作完整无干涉装配。孔轴/安装面通过也不代表 CAD 或实物配合通过。\n");
     fs::write(folder.join("report.md"), report).map_err(|e| e.to_string())?;
     fs::write(
         folder.join("report.json"),
@@ -1372,7 +1439,7 @@ pub fn set_lid_angle(scene: &mut Scene, value: f32) -> Result<(), String> {
             .iter()
             .any(|p| p.pose.path.contains("/Modules/") && p.pose.path.contains("/XL4/")),
     );
-    let released_inner = constraints::latch_release_inner_degrees();
+    let released = constraints::latch_release_pose();
     let previous: Vec<_> = scene.relations.iter().map(|r| r.joint.clone()).collect();
     // Select the released display state before any cover lift. Interpolating
     // the cover through a still-closed clasp produces a real mesh crossing.
@@ -1382,14 +1449,19 @@ pub fn set_lid_angle(scene: &mut Scene, value: f32) -> Result<(), String> {
                 *angle = value;
             } else if r.label == LOCK_INNER {
                 *angle = if value > 0. {
-                    released_inner - closed.inner_degrees
+                    released.inner_degrees - closed.inner_degrees
                 } else {
                     0.
                 };
             } else if r.label == LOCK_OUTER {
-                // Release the clasp as a rigid subassembly: retaining this
-                // relative angle keeps its adjacent bearing profiles separated.
-                *angle = 0.;
+                // The outer joint is relative to the moving inner link.
+                *angle = if value > 0. {
+                    released.outer_degrees
+                        - closed.outer_degrees
+                        - (released.inner_degrees - closed.inner_degrees)
+                } else {
+                    0.
+                };
             }
         }
     }
@@ -1576,6 +1648,70 @@ mod tests {
                 }
                 let module = indices(&scene, "/Modules/")[0];
                 let facade = indices(&scene, "Facade.stl")[0];
+                let (facade_lo, facade_hi) = constraints::world_bounds(&scene.parts[facade]);
+                for holder in indices(&scene, "/LOCK HOLDER.stl") {
+                    let part = &scene.parts[holder];
+                    // The two outer screw lands belong entirely on the inside
+                    // of the panel. Their forward-most vertices must touch it.
+                    let flange_front = part
+                        .mesh
+                        .vertices
+                        .iter()
+                        .filter_map(|v| {
+                            let local = Vec3::from(v.position);
+                            (raw_frame().transform_point3(local).z.abs() > 26.)
+                                .then(|| part.pose.matrix(0.).transform_point3(local).z)
+                        })
+                        .reduce(f32::max)
+                        .unwrap();
+                    assert!(
+                        (flange_front - facade_lo.z).abs() < 0.005,
+                        "Holder flange is not on inside wall: {size}/{height}"
+                    );
+                }
+                for upper in indices(&scene, "Hinge Top.stl") {
+                    let part = &scene.parts[upper];
+                    let matrix = part.pose.matrix(0.);
+                    let shaft_y = matrix.transform_point3(raw(0., -21.5, 0.)).y;
+                    // L/XL's two source bodies are mirrored. Sample the actual
+                    // screw plate away from the barrel, independent of raw sign.
+                    let plate_lo = part
+                        .mesh
+                        .vertices
+                        .iter()
+                        .filter_map(|v| {
+                            let local = Vec3::from(v.position);
+                            (raw_frame().transform_point3(local).y > 0.)
+                                .then(|| matrix.transform_point3(local).y)
+                        })
+                        .reduce(f32::min)
+                        .unwrap();
+                    assert!(
+                        plate_lo >= shaft_y - 0.005,
+                        "Upper plate is below shaft: {size}/{height}"
+                    );
+                }
+                let roof_points = scene
+                    .parts
+                    .iter()
+                    .filter(|p| p.pose.path.contains(" Roof") && !p.pose.path.contains("Connector"))
+                    .flat_map(|p| {
+                        let matrix = p.pose.matrix(0.);
+                        p.mesh
+                            .vertices
+                            .iter()
+                            .map(move |v| matrix.transform_point3(v.position.into()))
+                    });
+                let roof_front = roof_points.clone().map(|p| p.z).reduce(f32::max).unwrap();
+                let front_rim = roof_points
+                    .filter(|p| p.z > roof_front - 0.2)
+                    .map(|p| p.y)
+                    .reduce(f32::min)
+                    .unwrap();
+                assert!(
+                    front_rim >= facade_hi.y - 0.03,
+                    "Roof rim below facade: {size}/{height}"
+                );
                 let (lo, hi) = constraints::world_bounds(&scene.parts[module]);
                 let actual = hi - lo;
                 assert!(
@@ -1715,6 +1851,45 @@ mod tests {
                     .zip(&closed)
                     .all(|(p, m)| p.pose.matrix(0.).abs_diff_eq(*m, 0.001))
             );
+            let mut old_seats = scene.clone();
+            for relation in &mut old_seats.relations {
+                if relation.label == UPPER_SEAT {
+                    relation.label = "Sustainer datum: upper hinge / roof seat".into();
+                }
+                if relation.label == LID
+                    && let Joint::Hinge { angle, .. } = &mut relation.joint
+                {
+                    *angle = 12.;
+                }
+                if relation.child.path.ends_with("/LOCK HOLDER.stl")
+                    && let Joint::Fixed { position, .. } = &mut relation.joint
+                {
+                    position[0] += 15.;
+                }
+            }
+            constraints::solve(&mut old_seats).unwrap();
+            let mut upgraded_seats = scene.clone();
+            upgraded_seats.apply(&old_seats.definition());
+            assert!(
+                upgraded_seats
+                    .parts
+                    .iter()
+                    .zip(&closed)
+                    .all(|(p, m)| p.pose.matrix(0.).abs_diff_eq(*m, 0.001))
+            );
+            // A user's confirmed calibration is never silently replaced.
+            old_seats.calibrated = true;
+            let mut manual = scene.clone();
+            manual.apply(&old_seats.definition());
+            assert!(manual.calibrated);
+            assert_eq!(lid_angle(&manual), Some(12.));
+            assert!(
+                manual
+                    .parts
+                    .iter()
+                    .zip(&old_seats.parts)
+                    .all(|(a, b)| a.pose.matrix(0.).abs_diff_eq(b.pose.matrix(0.), 0.001))
+            );
             let mut legacy = scene.clone();
             for relation in &mut legacy.relations {
                 relation.label = "Sustainer: legacy (estimated)".into();
@@ -1765,11 +1940,18 @@ mod tests {
                     let a = &scene.parts[pair.a];
                     let b = &scene.parts[pair.b];
                     if [a, b].iter().any(|p| p.pose.path.contains("/Locks/")) {
-                        panic!(
-                            "Latch surface crossing {width}{depth}/{height} angle={angle}: {} / {} @ {:?}",
+                        assert!(
+                            holder_marking_crossing(&scene, pair),
+                            "Unexpected latch crossing {width}{depth}/{height} angle={angle}: {} / {} @ {:?}",
                             a.label(false),
                             b.label(false),
                             pair.point
+                        );
+                        // Do not accept a larger crossing at the same feature.
+                        let coarse = crate::collision::check(&scene, 0.2).unwrap();
+                        assert!(
+                            !coarse.pairs.iter().any(|p| p.a == pair.a && p.b == pair.b),
+                            "Holder marking crossing exceeds review threshold"
                         );
                     }
                 }

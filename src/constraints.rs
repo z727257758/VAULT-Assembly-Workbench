@@ -187,6 +187,7 @@ struct LatchRecipes {
     tall: LatchDisplayPose,
     xl4: LatchDisplayPose,
     release_inner_degrees: f32,
+    release_outer_degrees: f32,
 }
 fn latch_recipes() -> &'static LatchRecipes {
     static RECIPES: std::sync::LazyLock<LatchRecipes> = std::sync::LazyLock::new(|| {
@@ -205,8 +206,12 @@ pub fn latch_display_pose(tall: bool, xl4: bool) -> LatchDisplayPose {
         recipes.one_floor
     }
 }
-pub fn latch_release_inner_degrees() -> f32 {
-    latch_recipes().release_inner_degrees
+pub fn latch_release_pose() -> LatchDisplayPose {
+    let r = latch_recipes();
+    LatchDisplayPose {
+        inner_degrees: r.release_inner_degrees,
+        outer_degrees: r.release_outer_degrees,
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceHit {
