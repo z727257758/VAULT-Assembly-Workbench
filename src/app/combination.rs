@@ -1,3 +1,4 @@
+pub(super) mod exterior;
 #[cfg(test)]
 mod regression;
 mod spatial;
@@ -9,6 +10,7 @@ pub(super) struct SpecEdit {
     target: Option<usize>,
     anchor: usize,
     preset: Preset,
+    exterior: crate::catalog::exterior::Exterior,
     side: Side,
     pattern: u8,
     clear_inserts: bool,
@@ -19,6 +21,8 @@ pub(super) struct Member {
     pub name: String,
     pub placement: Placement,
     pub preset: Preset,
+    #[serde(default)]
+    pub exterior: crate::catalog::exterior::Exterior,
 }
 #[derive(Serialize, Deserialize)]
 pub(super) struct CombinationPreset {
@@ -43,7 +47,16 @@ fn modules(members: &[Member]) -> Vec<crate::constraints::stacking::Module<'_>> 
         .collect()
 }
 fn validate_layout(members: &[Member], gap: f32) -> Result<(), String> {
-    crate::constraints::stacking::plan(&modules(members), gap).map(|_| ())
+    let descriptors = modules(members);
+    let layout = crate::constraints::stacking::plan(&descriptors, gap)?;
+    crate::constraints::exterior::validate_layout(
+        &descriptors,
+        &layout,
+        &members
+            .iter()
+            .map(|m| m.exterior.clone())
+            .collect::<Vec<_>>(),
+    )
 }
 impl Preset {
     fn validate_member(&self, catalog: &Catalog) -> Result<(), String> {
@@ -107,6 +120,11 @@ impl CombinationPreset {
                         .into(),
                 );
             }
+            catalog.exterior_components(
+                &member.preset.selection,
+                &member.exterior,
+                member.preset.assembly_kind == AssemblyKind::Sustainer,
+            )?;
             member
                 .preset
                 .validate_member(catalog)
@@ -149,6 +167,7 @@ impl App {
         }
     }
     fn close_member_editors(&mut self) {
+        self.exterior_edit = None;
         self.gridfinity_open = false;
         self.label_open = false;
         self.colors_open = false;
@@ -188,6 +207,7 @@ impl App {
     fn ensure_members(&mut self) {
         if self.members.is_empty() {
             self.members.push(Member {
+                exterior: Default::default(),
                 name: "成员 1".into(),
                 placement: Default::default(),
                 preset: self.member_snapshot(),
@@ -323,6 +343,11 @@ impl App {
             preset.bom.clear();
         }
         self.combination_spec = Some(SpecEdit {
+            exterior: if kind.is_none() {
+                self.members[self.active_member].exterior.clone()
+            } else {
+                Default::default()
+            },
             target: None,
             anchor: self.active_member,
             preset,
@@ -336,6 +361,7 @@ impl App {
         self.commit_member();
         self.ensure_members();
         self.combination_spec = Some(SpecEdit {
+            exterior: self.members[self.active_member].exterior.clone(),
             target: Some(self.active_member),
             anchor: self.active_member,
             preset: self.members[self.active_member].preset.clone(),
@@ -394,6 +420,7 @@ impl App {
             }
             for (i, preset) in additions.into_iter().enumerate() {
                 next.push(Member {
+                    exterior: draft.exterior.clone(),
                     name: format!(
                         "{} {}",
                         if preset.assembly_kind == AssemblyKind::Sustainer {
@@ -419,6 +446,13 @@ impl App {
             )?;
         }
         validate_layout(&next, self.combination_gap)?;
+        for m in &next {
+            self.catalog.exterior_components(
+                &m.preset.selection,
+                &m.exterior,
+                m.preset.assembly_kind == AssemblyKind::Sustainer,
+            )?;
+        }
         if next.len() > 64 {
             return Err("最多 64 个成员 / Up to 64 members".into());
         }
@@ -649,6 +683,12 @@ impl App {
         {
             self.undo_layout(ctx);
         }
+        if ui
+            .button(t(z, "安装 / 修改配件…", "Install / edit accessories…"))
+            .clicked()
+        {
+            self.open_exterior();
+        }
         self.combination_dimensions(ui);
         ui.small(t(
             z,
@@ -667,18 +707,35 @@ impl App {
             .max_height(120.)
             .show(ui, |ui| {
                 for (i, m) in self.members.iter().enumerate() {
-                    let count: u32 = m
-                        .preset
-                        .bom
-                        .iter()
-                        .filter(|b| b.enabled)
-                        .map(|b| b.qty)
-                        .sum();
+                    let extras = self
+                        .catalog
+                        .exterior_components(
+                            &m.preset.selection,
+                            &m.exterior,
+                            m.preset.assembly_kind == AssemblyKind::Sustainer,
+                        )
+                        .unwrap_or_default();
+                    let count: u32 = extras.iter().map(|c| c.bom.qty).sum::<u32>()
+                        + m.preset
+                            .bom
+                            .iter()
+                            .filter(|b| b.enabled)
+                            .map(|b| b.qty)
+                            .sum::<u32>();
                     ui.collapsing(
                         format!("{} · {} {}", m.name, count, t(self.zh, "份", "copies")),
                         |ui| {
-                            for b in m.preset.bom.iter().filter(|b| b.enabled) {
+                            for b in m
+                                .preset
+                                .bom
+                                .iter()
+                                .chain(extras.iter().map(|c| &c.bom))
+                                .filter(|b| b.enabled)
+                            {
                                 ui.label(format!("{} × {}", b.name(), b.qty));
+                            }
+                            for h in m.exterior.hardware(&m.preset.selection) {
+                                ui.label(h.line());
                             }
                         },
                     )
@@ -837,8 +894,14 @@ pub(super) fn load(
     gap: f32,
     cancel: &crate::preview::Cancel,
 ) -> Result<Scene, String> {
+    validate_layout(members, gap)?;
     let descriptors = modules(members);
     let layout = crate::constraints::stacking::plan(&descriptors, gap)?;
+    let exterior_catalog = if members.iter().any(|m| !m.exterior.is_empty()) {
+        Some(Catalog::scan(root.to_path_buf())?)
+    } else {
+        None
+    };
     let rules = crate::display::Rules::load(&home.join("config/display-rules.toml"))?;
     let mut scenes = Vec::new();
     for member in members {
@@ -911,7 +974,46 @@ pub(super) fn load(
             crate::sustainer::set_lid_angle(scene, 0.)?;
         }
     }
-    let shifts = crate::constraints::stacking::shifts(&layout, &descriptors, &closed)?;
+    let mut shifts = crate::constraints::stacking::shifts(&layout, &descriptors, &closed)?;
+    let mut lift = vec![0f32; members.len()];
+    for &i in &layout.order {
+        if let Some(catalog) = &exterior_catalog {
+            let member = &members[i];
+            let components = catalog.exterior_components(
+                &member.preset.selection,
+                &member.exterior,
+                member.preset.assembly_kind == AssemblyKind::Sustainer,
+            )?;
+            let d = crate::constraints::stacking::datum(&closed[i])?;
+            let tower_height = d.top + shifts[i].y;
+            let parts = closed[i].append_exterior(root, &components, &rules)?;
+            crate::constraints::exterior::attach(
+                &mut closed[i],
+                &member.preset.selection,
+                &member.exterior,
+                &parts,
+                tower_height,
+            )?;
+            if let Some(&below) = layout.supports[i].first() {
+                lift[i] = lift[below];
+                if layout.supports[i]
+                    .iter()
+                    .any(|&j| (lift[j] - lift[i]).abs() > 0.25)
+                {
+                    return Err(
+                        "底座使两侧支承高度不同 / Base heights differ across supports".into(),
+                    );
+                }
+            } else if member.exterior.base != crate::catalog::exterior::Base::None {
+                lift[i] = (d.bottom - closed[i].closed_extent()?.0.y).max(0.);
+            }
+            shifts[i].y += lift[i];
+            scenes[i].0 = closed[i].clone();
+        }
+    }
+    if exterior_catalog.is_some() {
+        crate::constraints::exterior::space_groups(&layout, &closed, &mut shifts)?;
+    }
     for (i, (_, _, angle)) in scenes.iter_mut().enumerate() {
         if layout.supports.iter().any(|below| below.contains(&i)) {
             *angle = 0.;
@@ -977,13 +1079,26 @@ fn export_members(
     if parent.starts_with(&library) || target.exists() {
         return Err("目标已存在或位于模型库内 / Existing destination or model library".into());
     }
-    let total: u32 = saved
+    let catalog = Catalog::scan(root.to_path_buf())?;
+    let extras: Vec<_> = saved
         .members
         .iter()
-        .flat_map(|m| &m.preset.bom)
-        .filter(|b| b.enabled)
-        .map(|b| b.qty)
-        .sum();
+        .map(|m| {
+            catalog.exterior_components(
+                &m.preset.selection,
+                &m.exterior,
+                m.preset.assembly_kind == AssemblyKind::Sustainer,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let total: u32 = extras.iter().flatten().map(|c| c.bom.qty).sum::<u32>()
+        + saved
+            .members
+            .iter()
+            .flat_map(|m| &m.preset.bom)
+            .filter(|b| b.enabled)
+            .map(|b| b.qty)
+            .sum::<u32>();
     if total == 0 || total > 1000 {
         return Err("组合单次导出需为 1–1000 份 / Export requires 1–1000 copies".into());
     }
@@ -993,7 +1108,9 @@ fn export_members(
         .map_err(|e| e.to_string())?;
     for (index, member) in saved.members.iter().enumerate() {
         let p = &member.preset;
-        if !p.bom.iter().any(|b| b.enabled) {
+        let mut items = p.bom.clone();
+        items.extend(extras[index].iter().map(|c| c.bom.clone()));
+        if !items.iter().any(|b| b.enabled) {
             continue;
         }
         let name = format!(
@@ -1012,7 +1129,7 @@ fn export_members(
             });
         crate::export::run_configured(
             root,
-            &p.bom,
+            &items,
             &destination,
             &crate::export::Options {
                 format,
@@ -1023,6 +1140,16 @@ fn export_members(
         )
         .map_err(|e| format!("{}: {e}", member.name))?;
     }
+    let mut hardware = String::from(
+        "整体配件五金清单 / Exterior hardware\n尺寸只包含预览零件；采购件按手册核对。\n",
+    );
+    for m in &saved.members {
+        hardware.push_str(&format!("\n{}\n", m.name));
+        for h in m.exterior.hardware(&m.preset.selection) {
+            hardware.push_str(&format!("{}\n", h.line()));
+        }
+    }
+    std::fs::write(staging.path().join("hardware.txt"), hardware).map_err(|e| e.to_string())?;
     std::fs::write(
         staging.path().join("combination.toml"),
         toml::to_string_pretty(saved).map_err(|e| e.to_string())?,
@@ -1072,6 +1199,7 @@ impl App {
             config.set_part_slot(p.assembly_kind.label_path(), i + 2);
             config.set_text_slot(p.assembly_kind.label_path(), 6);
             self.members.push(Member {
+                exterior: Default::default(),
                 name: format!("成员 {}", i + 1),
                 placement: Placement {
                     column: if i == 1 { 1 } else { 0 },
@@ -1274,6 +1402,7 @@ impl App {
                     .sustainer_bom(&p.selection, p.sustainer_options)
                     .unwrap();
                 self.members = vec![Member {
+                    exterior: Default::default(),
                     name: "支承盒子".into(),
                     placement: Default::default(),
                     preset: p,
@@ -1440,6 +1569,7 @@ mod tests {
                 let mut p = preset();
                 p.label.text = name.into();
                 Member {
+                    exterior: Default::default(),
                     name: name.into(),
                     placement: Placement {
                         column: i as u32,
@@ -1477,11 +1607,13 @@ mod tests {
         b.label.text = "B".into();
         let members = vec![
             Member {
+                exterior: Default::default(),
                 name: "base".into(),
                 placement: Default::default(),
                 preset: base,
             },
             Member {
+                exterior: Default::default(),
                 name: "A".into(),
                 placement: Placement {
                     level: 1,
@@ -1490,6 +1622,7 @@ mod tests {
                 preset: a,
             },
             Member {
+                exterior: Default::default(),
                 name: "B".into(),
                 placement: Placement {
                     column: 1,
@@ -1532,11 +1665,13 @@ mod tests {
             preset: a.clone(),
             members: vec![
                 Member {
+                    exterior: Default::default(),
                     name: "A".into(),
                     placement: Default::default(),
                     preset: a,
                 },
                 Member {
+                    exterior: Default::default(),
                     name: "B".into(),
                     placement: Placement {
                         column: 1,
@@ -1607,11 +1742,13 @@ mod tests {
             preset: p.clone(),
             members: vec![
                 Member {
+                    exterior: Default::default(),
                     name: "A".into(),
                     placement: Default::default(),
                     preset: p,
                 },
                 Member {
+                    exterior: Default::default(),
                     name: "B".into(),
                     placement: Placement {
                         level: 1,

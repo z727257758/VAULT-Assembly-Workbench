@@ -1,3 +1,4 @@
+mod exterior;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
 use glam::{Mat4, Quat, Vec3};
 const MAX_SCENE_TRIANGLES: usize = 16_000_000;
@@ -597,7 +598,7 @@ impl Placement {
     }
 }
 impl Scene {
-    fn closed_extent(&self) -> Result<(Vec3, Vec3), String> {
+    pub(crate) fn closed_extent(&self) -> Result<(Vec3, Vec3), String> {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for p in &self.parts {

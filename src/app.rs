@@ -1,4 +1,5 @@
 mod combination;
+mod exterior_smoke;
 mod large_stl_smoke;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
@@ -143,6 +144,7 @@ pub struct App {
     combination_gap: f32,
     combination_move_source: Option<usize>,
     combination_spec: Option<combination::SpecEdit>,
+    exterior_edit: Option<combination::exterior::Edit>,
     combination_view_state: Option<(Camera, f32, bool, bool)>,
     combination_layout_history: Vec<Vec<crate::scene::Placement>>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
@@ -279,6 +281,7 @@ impl App {
             combination_gap: 0.,
             combination_move_source: None,
             combination_spec: None,
+            exterior_edit: None,
             combination_view_state: None,
             combination_layout_history: Vec::new(),
             assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
@@ -835,6 +838,9 @@ impl App {
                             ctx,
                         );
                         continue;
+                    }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
+                        self.setup_exterior_smoke();
                     }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
                         self.setup_combination_smoke();
@@ -3267,6 +3273,7 @@ impl eframe::App for App {
         self.relations_window(ctx);
         self.export_window(ctx);
         self.combination_spec_window(ctx);
+        self.exterior_window(ctx);
         self.label_window(ctx);
         self.gridfinity_window(ctx);
         if self.sustainer_divider_editor.show(
@@ -3310,6 +3317,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
+            self.exterior_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-large-stl") {
             self.large_stl_smoke(ctx);

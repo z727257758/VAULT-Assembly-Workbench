@@ -17,6 +17,7 @@ fn member(
     level: u32,
 ) -> Member {
     Member {
+        exterior: Default::default(),
         name: name.into(),
         placement: Placement {
             column,
@@ -493,4 +494,388 @@ fn library_large_xl_combination_reports_calibration_not_obsolete_size_limit() {
     assert!(error.contains("orientation is unavailable"), "{error}");
     assert!(!error.contains("250 MB"));
     assert_eq!(snapshot(&m), before);
+}
+
+#[test]
+fn exterior_dependencies_and_roundtrip() {
+    use crate::catalog::exterior::*;
+    let s = Selection::default();
+    let mut e = Exterior {
+        stationary_handle: true,
+        ..Default::default()
+    };
+    assert!(e.validate(&s, false).is_err());
+    e.backbone = true;
+    assert!(e.validate(&s, false).is_ok());
+    e.board = Board::Ikea;
+    assert!(e.validate(&s, false).is_err());
+    e.board = Board::None;
+    e.stationary_handle = false;
+    e.pull_handle = true;
+    e.pull_extension = f32::NAN;
+    assert!(e.validate(&s, false).is_err());
+    e.pull_extension = 250.;
+    let mut m = member("configured", "S", 3, "1F", false, 0, 0);
+    m.exterior = e;
+    let restored: Member = toml::from_str(&toml::to_string(&m).unwrap()).unwrap();
+    assert_eq!(restored.exterior, m.exterior);
+}
+#[test]
+fn exterior_moves_and_roof_obstructions_are_atomic() {
+    use crate::catalog::exterior::*;
+    let mut m = vec![
+        member("base", "S", 3, "1F", false, 0, 0),
+        member("top", "S", 3, "1F", false, 1, 0),
+    ];
+    m[1].exterior.base = Base::Plain;
+    let old = snapshot(&m);
+    assert!(position_relative(&m, &[1], 0, Side::Above).is_err());
+    assert_eq!(snapshot(&m), old);
+    m[1].exterior.base = Base::None;
+    m[0].exterior.roof = Roof::Table;
+    assert!(position_relative(&m, &[1], 0, Side::Above).is_err());
+    m[0].exterior.roof = Roof::None;
+    assert!(position_relative(&m, &[1], 0, Side::Above).is_ok());
+}
+#[test]
+fn exterior_missing_sources_and_case_ambiguity_are_rejected() {
+    use crate::catalog::exterior::*;
+    let e = Exterior {
+        base: Base::Plain,
+        ..Default::default()
+    };
+    let s = Selection::default();
+    assert!(
+        Catalog::default()
+            .exterior_components(&s, &e, false)
+            .is_err()
+    );
+    let path = "03. MODIFICATIONS/Base/S/S3 Base.stl";
+    let mut c = Catalog {
+        entries: vec![crate::catalog::Entry {
+            path: path.into(),
+            name: "S3 Base.stl".into(),
+            category: 2,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(c.exterior_components(&s, &e, false).unwrap().len(), 1);
+    c.entries.push(crate::catalog::Entry {
+        path: path.to_lowercase(),
+        name: "duplicate".into(),
+        category: 2,
+    });
+    assert!(c.exterior_components(&s, &e, false).is_err());
+}
+#[test]
+#[ignore = "requires read-only VAULT_MODEL_ROOT"]
+fn library_exterior_sources_orientations_and_assemblies() {
+    use crate::catalog::exterior::*;
+    let (root, catalog, home) = library();
+    let mut report = String::new();
+    for width in ["S", "M", "L", "XL"] {
+        for depth in 3..=7 {
+            let s = Selection {
+                width: width.into(),
+                depth,
+                ..Default::default()
+            };
+            for roof in [
+                Roof::None,
+                Roof::Grid,
+                Roof::Table,
+                Roof::Bowl,
+                Roof::UnderTable,
+            ] {
+                let e = Exterior {
+                    base: if roof == Roof::None {
+                        Base::Plain
+                    } else {
+                        Base::None
+                    },
+                    roof,
+                    ..Default::default()
+                };
+                let parts = catalog.exterior_components(&s, &e, false).unwrap();
+                let raw = Scene::load(
+                    &root,
+                    &parts.iter().map(|c| c.bom.clone()).collect::<Vec<_>>(),
+                    "orientation".into(),
+                    false,
+                )
+                .unwrap();
+                for p in &raw.parts {
+                    let q = crate::constraints::exterior::horizontal_orientation(
+                        p,
+                        stacking::width(width).unwrap() as f32 / 10.,
+                    )
+                    .unwrap();
+                    assert!((q.length() - 1.).abs() < 0.0001);
+                    report.push_str(&format!("PASS {}: {:?}\n", p.pose.path, q));
+                }
+            }
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    for case in 0..5 {
+        let mut m = vec![
+            member("bottom", "S", 3, "2F", false, 0, 0),
+            member("top", "S", 3, "2F", false, 0, 1),
+        ];
+        m[0].exterior = Exterior {
+            base: if case == 0 {
+                Base::Trolley
+            } else {
+                Base::Plain
+            },
+            backbone: case == 0,
+            ..Default::default()
+        };
+        m[1].exterior = match case {
+            0 => Exterior {
+                backbone: true,
+                stationary_handle: false,
+                pull_handle: true,
+                pull_extension: 150.,
+                roof: Roof::Grid,
+                top_handle: true,
+                ..Default::default()
+            },
+            1 => Exterior {
+                backbone: true,
+                board: Board::Ikea,
+                roof: Roof::Table,
+                ..Default::default()
+            },
+            2 => Exterior {
+                backbone: true,
+                board: Board::Ussa,
+                roof: Roof::Bowl,
+                ..Default::default()
+            },
+            3 => Exterior {
+                wall_mount: true,
+                ..Default::default()
+            },
+            _ => Exterior {
+                roof: Roof::UnderTable,
+                ..Default::default()
+            },
+        };
+        configure(&mut m, &catalog);
+        let scene =
+            load(&root, &home, &m, 0., &cancel).unwrap_or_else(|e| panic!("case {case}: {e}"));
+        assert_scene(&scene, 2);
+        assert!(
+            scene
+                .relations
+                .iter()
+                .any(|r| r.label.contains("Exterior estimate:"))
+        );
+        assert!(scene.member_bounds[0].0.y.abs() < 0.02);
+        report.push_str(&format!(
+            "PASS assembly {case}: {} parts\n",
+            scene.parts.len()
+        ));
+    }
+    std::fs::create_dir_all(home.join("output/assembly-accessories-review")).unwrap();
+    std::fs::write(
+        home.join("output/assembly-accessories-review/regression.txt"),
+        report,
+    )
+    .unwrap();
+}
+
+#[test]
+fn exterior_invalid_combinations_and_legacy_member_defaults() {
+    use crate::catalog::exterior::*;
+    let s = Selection::default();
+    for e in [
+        Exterior {
+            top_handle: true,
+            ..Default::default()
+        },
+        Exterior {
+            wall_mount: true,
+            base: Base::Plain,
+            ..Default::default()
+        },
+        Exterior {
+            backbone: true,
+            pull_handle: true,
+            stationary_handle: true,
+            ..Default::default()
+        },
+        Exterior {
+            backbone: true,
+            pull_handle: true,
+            board: Board::Ikea,
+            ..Default::default()
+        },
+        Exterior {
+            pull_extension: 801.,
+            ..Default::default()
+        },
+    ] {
+        assert!(e.validate(&s, false).is_err());
+    }
+    assert!(
+        Exterior {
+            roof: Roof::Grid,
+            ..Default::default()
+        }
+        .validate(&s, true)
+        .is_err()
+    );
+    let m = member("legacy", "S", 3, "1F", false, 0, 0);
+    let mut value = toml::Value::try_from(&m).unwrap();
+    value.as_table_mut().unwrap().remove("exterior");
+    let restored: Member = value.try_into().unwrap();
+    assert!(restored.exterior.is_empty());
+}
+#[test]
+fn exterior_follows_moves_and_preserves_member_interior() {
+    use crate::catalog::exterior::*;
+    let mut m = vec![
+        member("a", "S", 3, "2F", false, 0, 0),
+        member("b", "M", 3, "2F", false, 1, 0),
+    ];
+    m[0].exterior = Exterior {
+        backbone: true,
+        stationary_handle: true,
+        base: Base::Plain,
+        ..Default::default()
+    };
+    m[0].preset.label.text = "KEEP".into();
+    let moved = position_relative(&m, &[0], 1, Side::Right).unwrap();
+    assert_eq!(moved[0].exterior, m[0].exterior);
+    assert_eq!(
+        toml::to_string(&moved[0].preset).unwrap(),
+        toml::to_string(&m[0].preset).unwrap()
+    );
+    let restored = position_relative(&moved, &[0], 1, Side::Left).unwrap();
+    assert_eq!(restored[0].exterior, m[0].exterior);
+}
+#[test]
+#[ignore = "requires read-only VAULT_MODEL_ROOT"]
+fn library_exterior_spacing_and_export_regression() {
+    use crate::catalog::exterior::*;
+    let (root, catalog, home) = library();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut m = vec![
+        member("trolley", "S", 3, "2F", false, 0, 0),
+        member("neighbor", "S", 3, "2F", false, 1, 0),
+    ];
+    m[0].exterior.base = Base::Trolley;
+    configure(&mut m, &catalog);
+    let scene = load(&root, &home, &m, 0., &cancel).unwrap();
+    assert!(scene.member_bounds[0].1.x <= scene.member_bounds[1].0.x + 0.02);
+    let old = snapshot(&m);
+    for width in ["S", "M", "L", "XL"] {
+        let mut one = vec![member("handle", width, 3, "1F", true, 0, 0)];
+        one[0].exterior = Exterior {
+            base: Base::Plain,
+            backbone: true,
+            pull_handle: true,
+            pull_extension: 0.,
+            ..Default::default()
+        };
+        configure(&mut one, &catalog);
+        let scene = load(&root, &home, &one, 0., &cancel).unwrap();
+        assert_scene(&scene, 1);
+        let rods: Vec<_> = scene
+            .parts
+            .iter()
+            .filter(|p| p.pose.path.starts_with("@hardware/"))
+            .collect();
+        assert_eq!(rods.len(), 2);
+        assert!((rods[0].mesh.size.x - 16.).abs() < 0.001);
+        let lock = scene
+            .parts
+            .iter()
+            .find(|p| p.pose.path.ends_with(" Pull-out Handle Lock.stl"))
+            .unwrap();
+        let (_, hi) = crate::constraints::world_bounds(lock);
+        for rod in rods {
+            assert!((rod.pose.position[2] - (hi.z - 19.)).abs() < 0.05);
+            assert!(
+                (rod.pose.position[0]
+                    - (scene.member_bounds[0].0.x + stacking::width(width).unwrap() as f32 / 20.))
+                    .abs()
+                    > 5.
+            );
+        }
+    }
+    assert_eq!(snapshot(&m), old);
+    // A small source-only export exercises the real packaging path without duplicating the library.
+    m.truncate(1);
+    m[0].preset
+        .bom
+        .retain(|b| b.path.ends_with("/Facade Cap.stl"));
+    m[0].exterior = Exterior {
+        backbone: true,
+        stationary_handle: true,
+        ..Default::default()
+    };
+    let out = home.join("output/assembly-accessories-review");
+    std::fs::create_dir_all(&out).unwrap();
+    let temp = tempfile::tempdir_in(&out).unwrap();
+    let saved = project(m);
+    let target = temp.path().join("export");
+    export_members(&root, &home, &target, crate::export::Format::Stl, &saved).unwrap();
+    assert!(target.join("hardware.txt").is_file());
+    let restored: CombinationPreset =
+        toml::from_str(&std::fs::read_to_string(target.join("combination.toml")).unwrap()).unwrap();
+    assert_eq!(restored.members[0].exterior, saved.members[0].exterior);
+    let mut files = Vec::new();
+    fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                collect(&p, files)
+            } else {
+                files.push(p)
+            }
+        }
+    }
+    collect(&target, &mut files);
+    assert!(files.iter().any(|p| {
+        p.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("Stationary Handle")
+    }));
+    assert!(
+        !files
+            .iter()
+            .any(|p| p.to_string_lossy().contains("@hardware"))
+    );
+}
+
+#[test]
+fn pull_stroke_respects_tower_height_and_lid_clearance() {
+    use crate::catalog::exterior::Exterior;
+    let mut m = vec![member("short", "S", 3, "1F", false, 0, 0)];
+    m[0].exterior = Exterior {
+        backbone: true,
+        pull_handle: true,
+        pull_extension: 30.,
+        ..Default::default()
+    };
+    assert!(validate_layout(&m, 0.).unwrap_err().contains("stroke"));
+    m[0].exterior.pull_extension = 0.;
+    validate_layout(&m, 0.).unwrap();
+    m[0].exterior = Default::default();
+    m[0].preset.selection.height = "2F".into();
+    m.push(member("middle", "S", 3, "2F", false, 0, 1));
+    m.push(member("top", "S", 3, "2F", false, 0, 2));
+    m[2].exterior = Exterior {
+        backbone: true,
+        pull_handle: true,
+        pull_extension: 180.,
+        ..Default::default()
+    };
+    validate_layout(&m, 0.).unwrap();
+    m[2].exterior.pull_extension = 260.;
+    assert!(validate_layout(&m, 0.).is_err());
 }

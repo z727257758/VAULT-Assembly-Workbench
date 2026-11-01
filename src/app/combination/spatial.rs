@@ -151,7 +151,11 @@ impl App {
             ui.label(t(self.zh, "组合闭合外形", "Overall closed envelope"));
             ui.strong(dimensions((lo, hi)));
         }
-        ui.small(t(self.zh,"按源 STL 顶点计算闭合外形；含外伸件，源单位按 mm。","Closed envelope measured from STL vertices, including protrusions; source units assumed mm."));
+        ui.small(t(
+            self.zh,
+            "闭盖外形包含配件及已显示的五金示意；单位 mm。",
+            "Closed-lid envelope includes accessories and displayed hardware schematics; units mm.",
+        ));
     }
     pub(super) fn apply_spatial_move(
         &mut self,
@@ -233,6 +237,9 @@ impl App {
                     } else {
                         ui.strong(&self.members[selected].name);
                         ui.horizontal_wrapped(|ui| {
+                            if ui.button(t(z, "安装配件…", "Accessories…")).clicked() {
+                                self.open_exterior();
+                            }
                             if ui.button(t(z, "修改尺寸…", "Change size…")).clicked() {
                                 self.edit_member_size();
                             }
@@ -409,6 +416,7 @@ mod tests {
         let mut p = p;
         p.selection.width = width.into();
         Member {
+            exterior: Default::default(),
             name: width.into(),
             placement: Placement {
                 column,

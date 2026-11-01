@@ -777,6 +777,40 @@ pub fn remove_runner_supports(mesh: &Arc<Mesh>) -> Arc<Mesh> {
     })
 }
 
+/// Known-diameter purchased M16 rod, a schematic display mesh, never a print source.
+pub fn hardware_rod(length: f32) -> Arc<Mesh> {
+    let mut vertices = Vec::new();
+    let mut tri = |a: Vec3, b: Vec3, c: Vec3| {
+        let normal = (b - a).cross(c - a).normalize_or_zero().to_array();
+        for p in [a, b, c] {
+            vertices.push(Vertex {
+                position: p.to_array(),
+                normal,
+                shade: 1.,
+            });
+        }
+    };
+    for i in 0..48 {
+        let a = i as f32 * std::f32::consts::TAU / 48.;
+        let b = (i + 1) as f32 * std::f32::consts::TAU / 48.;
+        let p = Vec3::new(a.cos() * 8., -length / 2., a.sin() * 8.);
+        let q = Vec3::new(b.cos() * 8., -length / 2., b.sin() * 8.);
+        let r = p + Vec3::Y * length;
+        let s = q + Vec3::Y * length;
+        tri(p, r, q);
+        tri(q, r, s);
+        tri(Vec3::Y * (-length / 2.), p, q);
+        tri(Vec3::Y * (length / 2.), s, r);
+    }
+    let size = Vec3::new(16., length, 16.);
+    Arc::new(Mesh {
+        vertices,
+        min: -size / 2.,
+        max: size / 2.,
+        size,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

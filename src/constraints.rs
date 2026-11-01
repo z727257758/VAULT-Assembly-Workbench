@@ -1,3 +1,4 @@
+pub mod exterior;
 pub mod stacking;
 // Directed assembly constraints. One parent per child; roots remain grounded.
 // Solving is deterministic/topological, not a physics relaxation simulation.
