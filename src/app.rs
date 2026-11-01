@@ -6,7 +6,7 @@ use crate::{
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
@@ -1839,25 +1839,33 @@ impl App {
                     }
                 });
                 ui.separator();
+                let mut expand = None;
+                ui.horizontal(|ui| {
+                    ui.strong(format!("{} ({})", t(z, "元件", "Parts"), self.scene.parts.len()));
+                    if ui.small_button(t(z, "展开全部", "Expand all")).clicked() {
+                        expand = Some(true);
+                    }
+                    if ui.small_button(t(z, "收起全部", "Collapse all")).clicked() {
+                        expand = Some(false);
+                    }
+                });
+                let selected_id = self.selected.and_then(|index| self.scene.parts.get(index)).map(crate::constraints::PartId::of);
+                let selection_key = ui.make_persistent_id("part_tree_selection");
+                let reveal = ui.data_mut(|data| {
+                    let previous = data.get_temp::<Option<crate::constraints::PartId>>(selection_key).flatten();
+                    data.insert_temp(selection_key, selected_id.clone());
+                    selected_id.is_some() && previous != selected_id
+                });
+                let tree = part_tree(&self.scene, &self.bom, z);
+                for group in &tree {
+                    group.prepare(ctx, expand, self.selected, reveal);
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("parts")
                     .max_height(230.)
                     .show(ui, |ui| {
-                        for (i, p) in self.scene.parts.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut p.visible, "");
-
-                                if ui
-                                    .selectable_label(
-                                        self.selected == Some(i),
-                                        format!("{} · {}", i + 1, p.label(z)),
-                                    )
-                                    .on_hover_text(&p.pose.path)
-                                    .clicked()
-                                {
-                                    self.selected = Some(i);
-                                }
-                            });
+                        for group in &tree {
+                            group.show(ui, &mut self.scene, &mut self.selected, z, reveal);
                         }
                     });
                 ui.separator();
@@ -3840,6 +3848,242 @@ fn open_file(path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// Presentation groups only; mating relationships remain owned by constraints.rs.
+struct PartTreeNode {
+    key: String,
+    label: String,
+    parts: Vec<usize>,
+    children: Vec<PartTreeNode>,
+}
+// Stop at the nearest major subassembly: a facade stays separate from its
+// drawer, while keys, caps and springs inherit the facade through their mates.
+fn part_tree_group_owner(index: usize, categories: &[&str], parents: &[Option<usize>]) -> usize {
+    let mut current = index;
+    for _ in 0..categories.len() {
+        if matches!(
+            categories[current],
+            "Structure" | "Drawer" | "Facade" | "Roof"
+        ) {
+            return current;
+        }
+        let Some(parent) = parents[current].filter(|&parent| parent < categories.len()) else {
+            break;
+        };
+        current = parent;
+    }
+    // Partial previews and invalid/cyclic relations must never hide a part.
+    index
+}
+fn part_tree(scene: &Scene, bom: &[Bom], zh: bool) -> Vec<PartTreeNode> {
+    let categories: Vec<_> = scene
+        .parts
+        .iter()
+        .map(|part| {
+            bom.iter()
+                .find(|item| item.path == part.pose.path)
+                .map_or("", |item| item.group.as_str())
+        })
+        .collect();
+    let indices: HashMap<_, _> = scene
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| (crate::constraints::PartId::of(part), index))
+        .collect();
+    let mut parents = vec![None; scene.parts.len()];
+    for relation in &scene.relations {
+        if let (Some(&child), Some(&parent)) =
+            (indices.get(&relation.child), indices.get(&relation.parent))
+        {
+            parents[child] = Some(parent);
+        }
+    }
+    let mut groups: Vec<PartTreeNode> = Vec::new();
+    for (index, part) in scene.parts.iter().enumerate() {
+        let path = &part.pose.path;
+        let owner = part_tree_group_owner(index, &categories, &parents);
+        let owner_path = &scene.parts[owner].pose.path;
+        let item = bom.iter().find(|item| item.path == *owner_path);
+        let metadata = crate::accessories::info(path, zh);
+        let (key, label) = if let Some(item) = item.filter(|item| !item.group.is_empty()) {
+            let label = match item.group.as_str() {
+                "Structure" => t(zh, "外壳组件", "Housing assembly"),
+                "Drawer" => t(zh, "抽屉组件", "Drawer assembly"),
+                "Facade" => t(zh, "面板组件", "Front panel assembly"),
+                "Roof" => t(zh, "顶盖组件", "Lid assembly"),
+                other => group_label(zh, other),
+            };
+            (item.group.clone(), label.to_owned())
+        } else if let Some(info) = &metadata {
+            let key = crate::accessories::info(path, false)
+                .unwrap()
+                .group
+                .to_owned();
+            (key, info.group.to_owned())
+        } else {
+            ("Other".into(), t(zh, "其他元件", "Other parts").into())
+        };
+        let group_index = groups
+            .iter()
+            .position(|group| group.key == key)
+            .unwrap_or_else(|| {
+                groups.push(PartTreeNode {
+                    key,
+                    label,
+                    parts: Vec::new(),
+                    children: Vec::new(),
+                });
+                groups.len() - 1
+            });
+        let group = &mut groups[group_index];
+        group.parts.push(index);
+        let source_key = format!("{}:{path}", group.key);
+        if let Some(source) = group
+            .children
+            .iter_mut()
+            .find(|source| source.key == source_key)
+        {
+            source.parts.push(index);
+        } else {
+            group.children.push(PartTreeNode {
+                key: source_key,
+                label: metadata.map_or_else(
+                    || path.rsplit('/').next().unwrap_or(path).to_owned(),
+                    |info| info.name,
+                ),
+                parts: vec![index],
+                children: Vec::new(),
+            });
+        }
+    }
+    groups
+}
+fn part_tree_leaf(
+    ui: &mut egui::Ui,
+    scene: &mut Scene,
+    selected: &mut Option<usize>,
+    index: usize,
+    zh: bool,
+    reveal: bool,
+) {
+    let part = &mut scene.parts[index];
+    ui.push_id(crate::constraints::PartId::of(part), |ui| {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut part.visible, "").on_hover_text(t(
+                zh,
+                "显示 / 隐藏元件",
+                "Show / hide part",
+            ));
+            let response = ui
+                .add(
+                    egui::Button::selectable(
+                        *selected == Some(index),
+                        format!("{} · {}", index + 1, part.label(zh)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&part.pose.path);
+            if reveal && *selected == Some(index) {
+                response.scroll_to_me(Some(egui::Align::Center));
+            }
+            if response.clicked() {
+                *selected = Some(index);
+            }
+        });
+    });
+}
+impl PartTreeNode {
+    fn id(&self) -> egui::Id {
+        egui::Id::new(("assembly_part_tree", &self.key))
+    }
+    fn prepare(
+        &self,
+        ctx: &egui::Context,
+        expand: Option<bool>,
+        selected: Option<usize>,
+        reveal: bool,
+    ) {
+        let open = expand.or_else(|| {
+            (reveal && selected.is_some_and(|index| self.parts.contains(&index))).then_some(true)
+        });
+        if let Some(open) = open {
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ctx,
+                self.id(),
+                true,
+            );
+            state.set_open(open);
+            state.store(ctx);
+            // Bulk actions and selection reveal must reach children even when a parent is closed.
+            ctx.animate_bool_with_time(self.id(), open, 0.);
+        }
+        for child in &self.children {
+            child.prepare(ctx, expand, selected, reveal);
+        }
+    }
+    fn show(
+        &self,
+        ui: &mut egui::Ui,
+        scene: &mut Scene,
+        selected: &mut Option<usize>,
+        zh: bool,
+        reveal: bool,
+    ) {
+        ui.push_id(&self.key, |ui| {
+            let contains_selected = selected.is_some_and(|index| self.parts.contains(&index));
+            let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                self.id(),
+                true,
+            );
+            state
+                .show_header(ui, |ui| {
+                    let visible_count = self
+                        .parts
+                        .iter()
+                        .filter(|&&index| scene.parts[index].visible)
+                        .count();
+                    let mut visible = visible_count == self.parts.len();
+                    let mixed = visible_count > 0 && !visible;
+                    if ui
+                        .add(egui::Checkbox::new(&mut visible, "").indeterminate(mixed))
+                        .on_hover_text(t(zh, "显示 / 隐藏整组", "Show / hide group"))
+                        .changed()
+                    {
+                        for &index in &self.parts {
+                            scene.parts[index].visible = visible;
+                        }
+                    }
+                    let label = RichText::new(format!("{} ({})", self.label, self.parts.len()));
+                    ui.add(
+                        egui::Label::new(if contains_selected {
+                            label.strong()
+                        } else {
+                            label
+                        })
+                        .truncate(),
+                    )
+                    .on_hover_text(&self.label);
+                })
+                .body(|ui| {
+                    if self.children.is_empty() {
+                        for &index in &self.parts {
+                            part_tree_leaf(ui, scene, selected, index, zh, reveal);
+                        }
+                    } else {
+                        for child in &self.children {
+                            if child.parts.len() == 1 {
+                                part_tree_leaf(ui, scene, selected, child.parts[0], zh, reveal);
+                            } else {
+                                child.show(ui, scene, selected, zh, reveal);
+                            }
+                        }
+                    }
+                });
+        });
+    }
+}
+
 fn group_label(zh: bool, group: &str) -> &str {
     if !zh {
         return group;
@@ -3871,6 +4115,48 @@ fn group_label(zh: bool, group: &str) -> &str {
 #[cfg(test)]
 mod accessory_export_tests {
     use super::*;
+    #[test]
+    fn tree_groups_follow_subassemblies_without_absorbing_other_assemblies() {
+        // Housing -> drawer -> facade -> key -> cap; springs also mate to facade.
+        // The two runner instances attach to different assemblies.
+        let categories = [
+            "Structure",
+            "Drawer",
+            "Facade",
+            "Key",
+            "Mechanism",
+            "Mechanism",
+            "Runners",
+            "Runners",
+            "Optional accessory",
+            "Roof",
+            "Upper hinges",
+            "Mechanism",
+        ];
+        let parents = [
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(2),
+            Some(0),
+            Some(1),
+            None,
+            Some(0),
+            Some(9),
+            Some(99),
+        ];
+        let owners: Vec<_> = (0..categories.len())
+            .map(|i| part_tree_group_owner(i, &categories, &parents))
+            .collect();
+        assert_eq!(owners, [0, 1, 2, 2, 2, 2, 0, 1, 8, 9, 9, 11]);
+        // Broken graphs retain the original categories and terminate.
+        let cyclic = [Some(1), Some(0)];
+        assert_eq!(part_tree_group_owner(0, &["Key", "Mechanism"], &cyclic), 0);
+        assert_eq!(part_tree_group_owner(1, &["Key", "Mechanism"], &cyclic), 1);
+    }
+
     #[test]
     fn library_settings_require_user_choice_and_remember_last_directory() {
         let home = tempfile::tempdir().unwrap();
