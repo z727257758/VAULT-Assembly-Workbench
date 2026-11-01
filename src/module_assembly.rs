@@ -59,7 +59,33 @@ fn source_rotation(part: &crate::scene::Part) -> Quat {
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(a, _)| a as f32 / 10.)
         .unwrap_or(90.);
-    Quat::from_rotation_y((90. - angle).to_radians())
+    let q = Quat::from_rotation_y((90. - angle).to_radians());
+    // Tall 4F housings have larger side faces than floor faces. Resolve the
+    // 90-degree ambiguity against the family width rather than face area alone.
+    let name = part.pose.path.rsplit('/').next().unwrap_or("");
+    let family: String = name
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    let Ok(expected) = crate::constraints::stacking::width(&family) else {
+        return q;
+    };
+    [q, Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2) * q]
+        .into_iter()
+        .min_by(|a, b| {
+            let error = |q: Quat| {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for v in &part.mesh.vertices {
+                    let x = (q * Vec3::from(v.position)).x;
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+                ((hi - lo) - expected as f32 / 10.).abs()
+            };
+            error(*a).total_cmp(&error(*b))
+        })
+        .unwrap_or(q)
 }
 
 fn dominant_positive_raw_y(part: &crate::scene::Part) -> Option<f32> {

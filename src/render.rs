@@ -108,13 +108,14 @@ pub struct ViewOptions {
 
 pub struct Renderer {
     pub print_colors: Option<crate::print_plate::Config>,
+    pub member_colors: Vec<crate::print_plate::Config>,
     pub state: egui_wgpu::RenderState,
     pipeline: wgpu::RenderPipeline,
     ghost_pipeline: wgpu::RenderPipeline,
     camera: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
-    meshes: HashMap<(String, Option<u32>), GpuMesh>,
+    meshes: HashMap<usize, GpuMesh>,
     parts: Vec<GpuPart>,
     targets: Vec<Option<Target>>,
 }
@@ -207,6 +208,7 @@ impl Renderer {
         let ghost_pipeline = make_pipeline(true);
         Self {
             print_colors: None,
+            member_colors: Vec::new(),
             state,
             pipeline,
             ghost_pipeline,
@@ -346,14 +348,16 @@ impl Renderer {
             ),
         );
         for (i, p) in scene.parts.iter().enumerate() {
-            let mut color = self
-                .print_colors
-                .as_ref()
-                .map_or(p.color, |c| c.color(&p.pose.path));
+            let print_colors = self.print_colors.as_ref().map(|default| {
+                self.member_colors
+                    .get((p.pose.instance / crate::scene::MEMBER_STRIDE) as usize)
+                    .unwrap_or(default)
+            });
+            let mut color = print_colors.map_or(p.color, |c| c.color(&p.pose.path));
             if colliding.contains(&i) {
                 color = [0.95, 0.30, 0.32, 1.];
             }
-            if selected == Some(i) && self.print_colors.is_none() {
+            if selected == Some(i) && print_colors.is_none() {
                 color = [0.98, 0.72, 0.30, 1.];
             }
             if ghost && ghost_shell(&p.pose.path) {
@@ -362,7 +366,7 @@ impl Renderer {
             let uniform = ObjectUniform {
                 model: p.pose.matrix(explosion).to_cols_array_2d(),
                 color,
-                text_color: self.print_colors.as_ref().map_or([0.; 4], |c| {
+                text_color: print_colors.map_or([0.; 4], |c| {
                     let mut v = c.slot_color(c.text_slot(&p.pose.path));
                     v[3] = color[3];
                     v

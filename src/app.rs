@@ -1,8 +1,10 @@
+mod combination;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     render::{Camera, Renderer, ViewOptions},
     scene::{Definition, Scene},
 };
+use combination::{CombinationPreset, Member};
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,7 +38,7 @@ impl AssemblyKind {
         }
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Preset {
     #[serde(default)]
     sustainer_dividers: crate::sustainer_dividers::Layout,
@@ -99,6 +101,8 @@ enum Loaded {
 }
 #[derive(Clone, Serialize)]
 struct SceneRequest {
+    members: Vec<Member>,
+    combination_gap: f32,
     sustainer_options: Option<SustainerOptions>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     gridfinity: crate::gridfinity::Layout,
@@ -132,6 +136,14 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    members: Vec<Member>,
+    active_member: usize,
+    combination_view: bool,
+    combination_gap: f32,
+    combination_drag: Option<usize>,
+    combination_spec: Option<combination::SpecEdit>,
+    combination_view_state: Option<(Camera, f32, bool, bool)>,
+    combination_layout_history: Vec<Vec<crate::scene::Placement>>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     sustainer_divider_editor: crate::sustainer_divider_editor::Editor,
     sustainer_layout_cache: BTreeMap<String, crate::sustainer_dividers::Layout>,
@@ -176,6 +188,7 @@ pub struct App {
     debug_ui: bool,
     export_options: crate::export::Options,
     export_open: bool,
+    export_all_members: bool,
     colors_open: bool,
     export_rx: Option<Receiver<ExportResult>>,
     export_last: Option<PathBuf>,
@@ -259,6 +272,14 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            members: Vec::new(),
+            active_member: 0,
+            combination_view: false,
+            combination_gap: 0.,
+            combination_drag: None,
+            combination_spec: None,
+            combination_view_state: None,
+            combination_layout_history: Vec::new(),
             assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
                 AssemblyKind::Sustainer
             } else {
@@ -314,6 +335,7 @@ impl App {
                 .map(|s| s.export.clone())
                 .unwrap_or_default(),
             export_open: false,
+            export_all_members: false,
             colors_open: false,
             export_rx: None,
             export_last: None,
@@ -388,7 +410,12 @@ impl App {
         assembly: bool,
         ctx: &egui::Context,
     ) {
-        let key = if assembly {
+        if assembly && self.combination_view {
+            self.commit_member();
+        }
+        let key = if assembly && self.combination_view {
+            "combination".into()
+        } else if assembly {
             if self.assembly_kind == AssemblyKind::Sustainer {
                 self.sustainer_options.key(&self.selection)
             } else {
@@ -402,6 +429,12 @@ impl App {
         };
         self.preview.schedule(
             SceneRequest {
+                members: if assembly && self.combination_view {
+                    self.members.clone()
+                } else {
+                    Vec::new()
+                },
+                combination_gap: self.combination_gap,
                 sustainer_options: (assembly && self.assembly_kind == AssemblyKind::Sustainer)
                     .then_some(self.sustainer_options),
                 sustainer_dividers: if assembly && self.assembly_kind == AssemblyKind::Sustainer {
@@ -453,122 +486,132 @@ impl App {
         let ctx = ctx.clone();
         let display_rules = self.home.join("config/display-rules.toml");
         std::thread::spawn(move || {
-            let result = crate::display::Rules::load(&display_rules).and_then(|rules| {
-                let originals: Vec<_> = request
-                    .items
-                    .iter()
-                    .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
-                    .cloned()
-                    .collect();
-                crate::preview::check(Some(&cancel))?;
-                // Reuse the assembled non-Gridfinity scene while only bins change.
-                static BASE: std::sync::Mutex<Option<(String, Scene)>> =
-                    std::sync::Mutex::new(None);
-                let mut base_request = request.clone();
-                base_request.gridfinity = Default::default();
-                base_request.items = originals.clone();
-                let source_stamps: Vec<_> = originals
-                    .iter()
-                    .filter(|b| b.enabled)
-                    .map(|b| {
-                        let meta = std::fs::metadata(request.root.join(&b.path));
-                        meta.map(|m| (m.len(), m.modified().ok())).ok()
-                    })
-                    .collect();
-                let signature = format!(
-                    "{}{}{:?}",
-                    toml::to_string(&base_request).map_err(|e| e.to_string())?,
-                    std::fs::read_to_string(&display_rules).unwrap_or_default(),
-                    source_stamps
-                );
-                let previous = BASE
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .filter(|(key, _)| key == &signature)
-                    .map(|(_, scene)| scene.clone());
-                let mut scene = if let Some(scene) = previous {
-                    scene
-                } else {
-                    let mut scene = if originals.is_empty() && !request.assembly {
-                        Scene {
-                            title: request.title.clone(),
-                            ..Default::default()
-                        }
+            let result = if !request.members.is_empty() {
+                combination::load(
+                    &request.root,
+                    &request.home,
+                    &request.members,
+                    request.combination_gap,
+                    &cancel,
+                )
+            } else {
+                crate::display::Rules::load(&display_rules).and_then(|rules| {
+                    let originals: Vec<_> = request
+                        .items
+                        .iter()
+                        .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
+                        .cloned()
+                        .collect();
+                    crate::preview::check(Some(&cancel))?;
+                    // Reuse the assembled non-Gridfinity scene while only bins change.
+                    static BASE: std::sync::Mutex<Option<(String, Scene)>> =
+                        std::sync::Mutex::new(None);
+                    let mut base_request = request.clone();
+                    base_request.gridfinity = Default::default();
+                    base_request.items = originals.clone();
+                    let source_stamps: Vec<_> = originals
+                        .iter()
+                        .filter(|b| b.enabled)
+                        .map(|b| {
+                            let meta = std::fs::metadata(request.root.join(&b.path));
+                            meta.map(|m| (m.len(), m.modified().ok())).ok()
+                        })
+                        .collect();
+                    let signature = format!(
+                        "{}{}{:?}",
+                        toml::to_string(&base_request).map_err(|e| e.to_string())?,
+                        std::fs::read_to_string(&display_rules).unwrap_or_default(),
+                        source_stamps
+                    );
+                    let previous = BASE
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|(key, _)| key == &signature)
+                        .map(|(_, scene)| scene.clone());
+                    let mut scene = if let Some(scene) = previous {
+                        scene
                     } else {
-                        Scene::load_with_rules(
-                            &request.root,
-                            &originals,
-                            request.title.clone(),
-                            request.assembly,
-                            &rules,
-                        )?
-                    };
-                    if let Some(options) = request.sustainer_options {
-                        let catalog = Catalog {
-                            root: request.root.clone(),
-                            entries: request
-                                .items
-                                .iter()
-                                .map(|b| crate::catalog::Entry {
-                                    path: b.path.clone(),
-                                    name: b.name().to_string(),
-                                    category: 2,
-                                })
-                                .collect(),
+                        let mut scene = if originals.is_empty() && !request.assembly {
+                            Scene {
+                                title: request.title.clone(),
+                                ..Default::default()
+                            }
+                        } else {
+                            Scene::load_with_rules(
+                                &request.root,
+                                &originals,
+                                request.title.clone(),
+                                request.assembly,
+                                &rules,
+                            )?
                         };
-                        crate::sustainer_dividers::apply(
-                            &mut scene,
-                            &request.sustainer_dividers,
-                            &catalog,
+                        if let Some(options) = request.sustainer_options {
+                            let catalog = Catalog {
+                                root: request.root.clone(),
+                                entries: request
+                                    .items
+                                    .iter()
+                                    .map(|b| crate::catalog::Entry {
+                                        path: b.path.clone(),
+                                        name: b.name().to_string(),
+                                        category: 2,
+                                    })
+                                    .collect(),
+                            };
+                            crate::sustainer_dividers::apply(
+                                &mut scene,
+                                &request.sustainer_dividers,
+                                &catalog,
+                                &request.selection,
+                                options,
+                            )?;
+                        } else if request.assembly {
+                            crate::dividers::apply(
+                                &mut scene,
+                                &request.divider_layout,
+                                &request.selection,
+                            )?;
+                        }
+                        crate::label::apply(&mut scene, &request.label)?;
+                        *BASE.lock().unwrap() = Some((signature, scene.clone()));
+                        scene
+                    };
+                    crate::preview::check(Some(&cancel))?;
+                    if !request.gridfinity.bins.is_empty() {
+                        let mut draft = scene.clone();
+                        crate::gridfinity::apply_preview(
+                            &mut draft,
+                            &request.home,
+                            &request.gridfinity,
                             &request.selection,
-                            options,
+                            &request.items,
+                            true,
+                            Some(&cancel),
                         )?;
-                    } else if request.assembly {
-                        crate::dividers::apply(
-                            &mut scene,
-                            &request.divider_layout,
-                            &request.selection,
-                        )?;
+                        load_scene_definition(&mut draft, &request.home, &request.key)?;
+                        draft.title += "（简化预览；正在生成精确模型）";
+                        let _ = tx.send(Loaded::Scene {
+                            revision,
+                            finished: false,
+                            key: request.key.clone(),
+                            result: Ok(draft),
+                        });
+                        ctx.request_repaint();
                     }
-                    crate::label::apply(&mut scene, &request.label)?;
-                    *BASE.lock().unwrap() = Some((signature, scene.clone()));
-                    scene
-                };
-                crate::preview::check(Some(&cancel))?;
-                if !request.gridfinity.bins.is_empty() {
-                    let mut draft = scene.clone();
                     crate::gridfinity::apply_preview(
-                        &mut draft,
+                        &mut scene,
                         &request.home,
                         &request.gridfinity,
                         &request.selection,
                         &request.items,
-                        true,
+                        false,
                         Some(&cancel),
                     )?;
-                    load_scene_definition(&mut draft, &request.home, &request.key)?;
-                    draft.title += "（简化预览；正在生成精确模型）";
-                    let _ = tx.send(Loaded::Scene {
-                        revision,
-                        finished: false,
-                        key: request.key.clone(),
-                        result: Ok(draft),
-                    });
-                    ctx.request_repaint();
-                }
-                crate::gridfinity::apply_preview(
-                    &mut scene,
-                    &request.home,
-                    &request.gridfinity,
-                    &request.selection,
-                    &request.items,
-                    false,
-                    Some(&cancel),
-                )?;
-                load_scene_definition(&mut scene, &request.home, &request.key)?;
-                Ok(scene)
-            });
+                    load_scene_definition(&mut scene, &request.home, &request.key)?;
+                    Ok(scene)
+                })
+            };
             let _ = tx.send(Loaded::Scene {
                 revision,
                 finished: true,
@@ -693,6 +736,7 @@ impl App {
         );
     }
     fn single(&mut self, path: String, ctx: &egui::Context) {
+        self.combination_view = false;
         let name = crate::accessories::info(&path, self.zh)
             .map(|m| m.name)
             .unwrap_or_else(|| {
@@ -744,6 +788,12 @@ impl App {
                 Loaded::Catalog(Ok(c)) => {
                     self.last_model_root = c.root.clone();
                     self.catalog = c;
+                    self.members.clear();
+                    self.combination_drag = None;
+                    self.combination_layout_history.clear();
+                    self.combination_view_state = None;
+                    self.active_member = 0;
+                    self.combination_view = false;
                     self.divider_layout = Default::default();
                     self.sustainer_dividers = Default::default();
                     self.sustainer_layout_cache.clear();
@@ -764,12 +814,17 @@ impl App {
                             continue;
                         }
                     };
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
+                        self.setup_combination_smoke();
+                    }
                     self.status = format!(
                         "{} STL · {}",
                         self.catalog.stl_count(),
                         self.catalog.root.display()
                     );
-                    if let Err(e) = self.save_settings() {
+                    if !self.smoke
+                        && let Err(e) = self.save_settings()
+                    {
                         self.status = e;
                     }
                     if self.catalog.stl_count() > 0
@@ -829,7 +884,11 @@ impl App {
                     self.scene_key = key;
                     if preserve {
                         let previous = previous.unwrap();
-                        s.retain_assembly_state(&previous.scene);
+                        if self.scene_key != "combination" {
+                            s.retain_assembly_state(&previous.scene);
+                        } else {
+                            combination::retain_visibility(&mut s, &previous.scene);
+                        }
                         self.camera = previous.camera.clone();
                         self.explosion = previous.explosion;
                         self.dimensions = previous.dimensions;
@@ -844,12 +903,14 @@ impl App {
                         self.dimensions = false;
                         self.ghost = false;
                         if !self.scene.assembly {
-                            self.explosion =
-                                if s.assembly && self.assembly_kind == AssemblyKind::Drawer {
-                                    1.
-                                } else {
-                                    0.
-                                };
+                            self.explosion = if s.assembly
+                                && self.assembly_kind == AssemblyKind::Drawer
+                                && self.scene_key != "combination"
+                            {
+                                1.
+                            } else {
+                                0.
+                            };
                         }
                         if !s.assembly {
                             self.explosion = 0.;
@@ -866,7 +927,20 @@ impl App {
                             self.camera.pitch = 1.25;
                         }
                     }
-                    if s.assembly && crate::sustainer::lid_angle(&s).is_some() {
+                    if self.scene_key == "combination"
+                        && !preserve
+                        && let Some((camera, explosion, dimensions, ghost)) =
+                            &self.combination_view_state
+                    {
+                        self.camera = camera.clone();
+                        self.explosion = *explosion;
+                        self.dimensions = *dimensions;
+                        self.ghost = *ghost;
+                    }
+                    if s.assembly
+                        && self.scene_key != "combination"
+                        && crate::sustainer::lid_angle(&s).is_some()
+                    {
                         if let Err(e) =
                             crate::sustainer::set_lid_angle(&mut s, self.sustainer_angle)
                         {
@@ -1113,10 +1187,20 @@ impl App {
                     if ui.button(t(z, "载入方案", "Load preset")).clicked() {
                         self.load_preset(ctx);
                     }
-                    if ui.button(t(z, "配色", "Colors")).clicked() {
+                    if ui
+                        .add_enabled(
+                            !self.bom.is_empty(),
+                            egui::Button::new(t(z, "配色", "Colors")),
+                        )
+                        .clicked()
+                    {
+                        if self.combination_view {
+                            self.focus_member(ctx);
+                        }
                         self.colors_open = true;
                     }
                     if ui.button(t(z, "导出", "Export")).clicked() {
+                        self.export_all_members = self.combination_view;
                         self.export_open = true;
                     }
                     if self.export_rx.is_some() {
@@ -1135,6 +1219,40 @@ impl App {
                     }
                 });
             });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.bom.is_empty(),
+                        egui::Button::new(t(z, "整体装配", "Overall assembly"))
+                            .selected(self.combination_view),
+                    )
+                    .clicked()
+                {
+                    self.show_combination(ctx);
+                }
+                if ui
+                    .selectable_label(
+                        !self.combination_view,
+                        t(z, "单盒 / 单抽屉装配", "Box / drawer assembly"),
+                    )
+                    .clicked()
+                {
+                    if !self.members.is_empty() {
+                        self.focus_member(ctx);
+                    } else {
+                        self.assembly(ctx);
+                    }
+                }
+                if !self.members.is_empty() {
+                    ui.separator();
+                    ui.label(format!(
+                        "{}：{}",
+                        t(z, "当前成员", "Selected"),
+                        self.members[self.active_member].name
+                    ));
+                }
+            });
             ui.add_space(5.);
         });
     }
@@ -1145,6 +1263,7 @@ impl App {
             .width_range(235. ..=470.)
             .resizable(true)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().id_salt("configuration-panel-scroll").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, 0, t(z, "装配配置", "Assembly"));
                     ui.selectable_value(&mut self.tab, 1, t(z, "全部组件", "Library"));
@@ -1152,6 +1271,8 @@ impl App {
                 });
                 ui.separator();
                 if self.tab == 0 {
+                    self.combination_controls(ui,ctx);
+                    if self.combination_view {return;}
                     let previous_selection=self.selection.clone();
                     let before = (
                         self.selection.width.clone(),
@@ -1162,68 +1283,13 @@ impl App {
                         self.sustainer_options,
                     );
                     ui.add_enabled_ui(!self.catalog.root.as_os_str().is_empty(), |ui| {
-                        ui.label(t(z, "方案类型", "Assembly type"));
-                        egui::ComboBox::from_id_salt("assembly-kind")
-                            .width(ui.available_width()-10.)
-                            .selected_text(self.assembly_kind.label(z))
-                            .show_ui(ui,|ui| {
-                                for kind in [AssemblyKind::Drawer,AssemblyKind::Sustainer] {
-                                    ui.selectable_value(&mut self.assembly_kind,kind,kind.label(z));
-                                }
-                            });
-                        ui.separator();
-                        ui.strong(t(z, "装配规格", "Assembly specifications"));
-                        egui::Grid::new("specifications")
-                            .num_columns(2)
-                            .spacing([12., 12.])
-                            .show(ui, |ui| {
-                                ui.label(t(z, "宽度", "Width"));
-                                egui::ComboBox::from_id_salt("width")
-                                    .selected_text(&self.selection.width)
-                                    .show_ui(ui, |ui| {
-                                        for w in ["S", "M", "L", "XL"] {
-                                            ui.selectable_value(
-                                                &mut self.selection.width,
-                                                w.into(),
-                                                w,
-                                            );
-                                        }
-                                    });
-                                ui.end_row();
-                                ui.label(t(z, "深度", "Depth"));
-                                egui::ComboBox::from_id_salt("depth")
-                                    .selected_text(format!("{} grids", self.selection.depth))
-                                    .show_ui(ui, |ui| {
-                                        for d in 3..=7 {
-                                            ui.selectable_value(
-                                                &mut self.selection.depth,
-                                                d,
-                                                d.to_string(),
-                                            );
-                                        }
-                                    });
-                                ui.end_row();
-                                if self.selection.width == "XL" {
-                                    self.selection.height = "1F".into();
-                                }
-                                ui.label(t(z, "层高", "Height"));
-                                egui::ComboBox::from_id_salt("height")
-                                    .selected_text(&self.selection.height)
-                                    .show_ui(ui, |ui| {
-                                        for h in if self.selection.width == "XL" {
-                                            vec!["1F"]
-                                        } else {
-                                            vec!["1F", "2F", "4F"]
-                                        } {
-                                            ui.selectable_value(
-                                                &mut self.selection.height,
-                                                h.into(),
-                                                h,
-                                            );
-                                        }
-                                    });
-                                ui.end_row();
-                            });
+                        ui.strong(t(z,"装配规格（在整体页修改）","Specification (edit in overall assembly)"));
+                        ui.label(format!("{} · {}{} / {}",self.assembly_kind.label(z),self.selection.width,self.selection.depth,self.selection.height));
+                        if ui.button(t(z,"返回整体页修改尺寸…","Change size in overall assembly…")).clicked() {
+                            self.show_combination(ctx);
+                            self.edit_member_size();
+                            return;
+                        }
                         ui.add_space(8.);
                         if self.assembly_kind==AssemblyKind::Drawer {
                             ui.checkbox(&mut self.selection.hidden_key,t(z,"隐藏钥匙（两件方案）","Hidden key (two-file option)"));
@@ -1275,7 +1341,7 @@ impl App {
                         ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().color(Color32::GRAY));
                     });
                     if self.assembly_kind==AssemblyKind::Sustainer {
-                        if !self.scene.mating_checks.is_empty() {
+                        if !self.combination_view && !self.scene.mating_checks.is_empty() {
                             let results:Vec<_>=self.scene.mating_checks.iter().map(|c|c.evaluate(&self.scene)).filter(|r|r.active).collect();
                             let passed=results.iter().filter(|r|r.within_tolerance).count();
                             ui.colored_label(if passed==results.len(){Color32::LIGHT_GREEN}else{Color32::from_rgb(225,184,112)},
@@ -1291,7 +1357,9 @@ impl App {
                             for note in crate::sustainer::review_notes(&self.scene,z) {ui.small(note);}
                         }
                         ui.small(t(z,"开盖预览先松开卡扣；仅展示状态，未验证机械行程。螺钉未建模。","Lid preview releases the clasps first. States are illustrative; mechanical travel is unverified. Screws are not modeled."));
-                        if let Some(mut angle)=crate::sustainer::lid_angle(&self.scene)
+                        if self.combination_view {
+                            if ui.add(egui::Slider::new(&mut self.sustainer_angle,0. ..=110.).text(t(z,"当前盒子开盖 °","Selected box lid °"))).changed() {self.assembly(ctx);}
+                        } else if let Some(mut angle)=crate::sustainer::lid_angle(&self.scene)
                             && ui.add(egui::Slider::new(&mut angle,0. ..=110.).text(t(z,"开盖 °","Lid angle °"))).changed() {
                                 match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
                         }
@@ -1497,6 +1565,7 @@ impl App {
                         self.add_to_bom(path, ctx);
                     }
                 }
+                });
             });
     }
     fn remove_dividers(&mut self, ctx: &egui::Context) {
@@ -1585,6 +1654,7 @@ impl App {
         let z = self.zh;
         egui::TopBottomPanel::bottom("bottom").resizable(true)
             .default_height(240.).height_range(180. ..=400.).show(ctx, |ui| {
+            if self.combination_view {self.combination_summary(ui);return;}
             ui.horizontal(|ui| {
                 ui.strong(t(z, "打印清单", "PRINT LIST"));
                 ui.label(format!("{} {}", self.bom.iter().filter(|i| i.enabled).count(), t(z, "个已选文件", "selected files")));
@@ -1709,7 +1779,10 @@ impl App {
             .parts
             .iter()
             .filter(|p| {
-                crate::print_plate::color_key(&p.pose.path) == crate::print_plate::color_key(&path)
+                (self.scene_key != "combination"
+                    || p.pose.instance / crate::scene::MEMBER_STRIDE == self.active_member as u32)
+                    && crate::print_plate::color_key(&p.pose.path)
+                        == crate::print_plate::color_key(&path)
             })
             .count();
         let has_text = crate::label::is_label(&path)
@@ -1830,6 +1903,7 @@ impl App {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.heading(t(z, "装配与属性", "Assembly & properties"));
+                if self.scene_key == "combination" {self.combination_properties(ui);return;}
                 ui.horizontal(|ui| {
                     if ui.small_button(t(z, "显示全部", "Show all")).clicked() {
                         for p in &mut self.scene.parts {
@@ -2043,6 +2117,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if self.debug_ui
+                        && self.scene_key != "combination"
                         && ui
                             .button(t(z, "装配关系 / 检查", "Relations / Check"))
                             .clicked()
@@ -2249,8 +2324,20 @@ impl App {
                             self.scene.pick(o, d, self.explosion)
                         };
                         self.selected = self.last_hit.map(|h| h.part);
+                        if self.scene_key == "combination"
+                            && let Some(index) = self.selected
+                        {
+                            self.select_combination_part(index, ctx);
+                        }
                     }
-                    if response.double_clicked() {
+                    if response.double_clicked()
+                        && self.scene_key == "combination"
+                        && !self.busy
+                        && !self.preview.has_pending()
+                        && self.selected.is_some()
+                    {
+                        self.focus_member(ctx);
+                    } else if response.double_clicked() {
                         self.camera.fit(
                             &if self.interior_editor_open() {
                                 self.interior_scene()
@@ -2311,7 +2398,11 @@ impl App {
                         egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
                         Color32::WHITE,
                     );
+                    if self.scene_key == "combination" {
+                        self.paint_active_member(ui, rect);
+                    }
                     if self.export_options.plate.preview_colors
+                        && self.scene_key != "combination"
                         && !self.interior_editor_open()
                         && let Some(part) = self
                             .selected
@@ -2425,6 +2516,18 @@ impl App {
             });
     }
     fn save_preset(&mut self) {
+        self.commit_member();
+        if let Err(e) = (CombinationPreset {
+            preset: self.member_snapshot(),
+            members: self.members.clone(),
+            active_member: self.active_member,
+            combination_gap: self.combination_gap,
+        })
+        .validate(&self.catalog)
+        {
+            self.status = e;
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name("vault-configuration.toml")
             .add_filter(
@@ -2440,29 +2543,11 @@ impl App {
             let result = self
                 .check_destination(&path)
                 .and_then(|_| {
-                    toml::to_string_pretty(&Preset {
-                        sustainer_dividers: if self.assembly_kind == AssemblyKind::Sustainer {
-                            self.sustainer_dividers.clone()
-                        } else {
-                            Default::default()
-                        },
-                        print_config: Some(self.export_options.plate.clone()),
-                        gridfinity: if self.assembly_kind == AssemblyKind::Drawer {
-                            self.gridfinity.clone()
-                        } else {
-                            Default::default()
-                        },
-                        label: self.label.clone(),
-                        assembly_kind: self.assembly_kind,
-                        sustainer_options: self.sustainer_options.normalized(&self.selection),
-                        sustainer_angle: self.sustainer_angle,
-                        selection: self.selection.clone(),
-                        bom: self.bom.clone(),
-                        divider_layout: if self.assembly_kind == AssemblyKind::Drawer {
-                            self.divider_layout.clone()
-                        } else {
-                            Default::default()
-                        },
+                    toml::to_string_pretty(&CombinationPreset {
+                        preset: self.member_snapshot(),
+                        members: self.members.clone(),
+                        active_member: self.active_member,
+                        combination_gap: self.combination_gap,
                     })
                     .map_err(|e| e.to_string())
                 })
@@ -2487,9 +2572,23 @@ impl App {
         {
             let result = std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
-                .and_then(|s| toml::from_str::<Preset>(&s).map_err(|e| e.to_string()));
+                .and_then(|s| toml::from_str::<CombinationPreset>(&s).map_err(|e| e.to_string()));
             match result {
-                Ok(p) => {
+                Ok(saved) => {
+                    if let Err(e) = saved.validate(&self.catalog) {
+                        self.status = e;
+                        return;
+                    }
+                    let CombinationPreset {
+                        preset,
+                        members,
+                        active_member,
+                        combination_gap,
+                    } = saved;
+                    let p = members
+                        .get(active_member)
+                        .map(|m| m.preset.clone())
+                        .unwrap_or(preset);
                     if !p.sustainer_angle.is_finite()
                         || !(0. ..=110.).contains(&p.sustainer_angle)
                         || p.assembly_kind == AssemblyKind::Sustainer
@@ -2604,6 +2703,22 @@ impl App {
                             .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
                             .count();
                         self.bom = next;
+                        self.members = members;
+                        self.combination_drag = None;
+                        self.combination_layout_history.clear();
+                        self.combination_view_state = None;
+                        self.active_member = active_member;
+                        self.combination_gap = combination_gap;
+                        self.combination_view = !self.members.is_empty();
+                        self.scene_key.clear();
+                        self.assembly_view = None;
+                        self.drawer_state = None;
+                        self.box_state = None;
+                        self.layout_cache.clear();
+                        self.sustainer_layout_cache.clear();
+                        self.gridfinity_open = false;
+                        self.label_open = false;
+                        self.selected = None;
                         self.assembly(ctx);
                         self.status = format!(
                             "{} {excluded}",
@@ -2971,8 +3086,11 @@ impl App {
         let mut start = false;
         egui::Window::new(t(z,"导出","Export")).id(egui::Id::new("export-options"))
             .open(&mut open).resizable(true).vscroll(true).default_width(540.).default_height(680.).show(ctx,|ui|{
-                ui.label(t(z,"导出当前打印清单中勾选的零件，按份数生成。","Export checked items in the print list, including every copy."));
-                let selected:Vec<_>=self.bom.iter().filter(|b|b.enabled).collect();
+                if !self.members.is_empty() {ui.checkbox(&mut self.export_all_members,t(z,"导出整个组合（按成员分文件夹 / 3MF）","Export all members (separate folders / 3MF files)"));}
+                if self.export_all_members {ui.label(t(z,"每个成员使用各自的打印清单、标签、配色及摆盘设置；输出到同一文件夹。","Each member uses its own print list, labels, colors and plate settings, in one output folder."));}
+                else {ui.label(t(z,"导出当前成员打印清单中勾选的零件，按份数生成。","Export checked items from the current member print list."));}
+                let combined:Vec<_>=self.members.iter().enumerate().flat_map(|(i,m)|if i==self.active_member {&self.bom}else{&m.preset.bom}).filter(|b|b.enabled).collect();
+                let selected:Vec<_>=if self.export_all_members {combined}else{self.bom.iter().filter(|b|b.enabled).collect()};
                 ui.label(format!("{} {} / {} {}",selected.len(),t(z,"种源文件","source files"),selected.iter().map(|b|b.qty).sum::<u32>(),t(z,"份","copies")));
                 ui.add_enabled_ui(self.export_rx.is_none(),|ui|{
                     for (format,label) in [
@@ -2980,7 +3098,7 @@ impl App {
                         (crate::export::Format::ThreeMf,t(z,"3MF 工程（P1S 自动摆盘）","3MF project (P1S plate layout)")),
                     ] {ui.radio_value(&mut self.export_options.format,format,label);}
                     ui.separator();
-                    if self.export_options.format==crate::export::Format::ThreeMf {
+                    if self.export_options.format==crate::export::Format::ThreeMf && !self.export_all_members {
                         ui.strong("Bambu Lab P1S · 0.4 mm");
                         ui.small(t(z,"256 × 256 mm；参考配置限高 250 mm；自动避开左前禁放区与起始擦料线。","256 × 256 mm; profile height 250 mm; front-left keep-out and start purge lines reserved."));
                         let p=&mut self.export_options.plate;
@@ -3002,7 +3120,7 @@ impl App {
                         ui.checkbox(&mut p.module_clip_supports,t(z,"模块底部卡扣局部支撑","Local supports under module clips")).on_hover_text(t(z,"为识别到的标准 S/M/L Module 底部卡扣写入强制支撑涂绘，使用手动树状支撑；切片后生成，可在 Bambu Studio 修改。","Paint recognized lower clips of standard S/M/L modules with manual tree supports; generated on slicing and editable in Bambu Studio."));
                         ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。按上述朝向选项摆盘，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings and the orientation options above; unsliced. Review supports, filament and first layer in Bambu Studio."));
                     }
-                    if ui.add_enabled(!selected.is_empty() && !self.busy && !self.preview.has_pending(),
+                    if ui.add_enabled((!selected.is_empty() || self.export_all_members) && !self.busy && !self.preview.has_pending(),
                         egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
                 });
                 if self.export_rx.is_some() {ui.horizontal(|ui|{ui.spinner();ui.label(t(z,"正在后台导出…","Exporting in background…"));});}
@@ -3014,6 +3132,10 @@ impl App {
         }
     }
     fn start_export(&mut self, ctx: &egui::Context) {
+        if self.export_all_members && !self.members.is_empty() {
+            self.export_combination(ctx);
+            return;
+        }
         let name = format!(
             "VAULT-{}{}-{}",
             self.selection.width, self.selection.depth, self.selection.height
@@ -3102,9 +3224,21 @@ impl eframe::App for App {
             .plate
             .preview_colors
             .then(|| self.export_options.plate.clone());
+        if self.combination_view {
+            self.commit_member();
+        }
+        self.renderer.member_colors = if self.scene_key == "combination" {
+            self.members
+                .iter()
+                .map(|m| m.preset.print_config.clone().unwrap_or_default())
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.viewport(ctx);
         self.relations_window(ctx);
         self.export_window(ctx);
+        self.combination_spec_window(ctx);
         self.label_window(ctx);
         self.gridfinity_window(ctx);
         if self.sustainer_divider_editor.show(
@@ -3148,6 +3282,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
+            self.combination_smoke(ctx);
+            return;
         }
         if self.smoke {
             ctx.request_repaint_after(Duration::from_millis(100));

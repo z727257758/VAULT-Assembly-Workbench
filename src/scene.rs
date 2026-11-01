@@ -57,8 +57,8 @@ pub struct Scene {
     pub mating_checks: Vec<crate::constraints::MateCheck>,
 }
 impl Part {
-    pub fn mesh_key(&self) -> (String, Option<u32>) {
-        (self.pose.path.clone(), self.pose.body)
+    pub fn mesh_key(&self) -> usize {
+        Arc::as_ptr(&self.mesh) as usize
     }
     pub fn label(&self, zh: bool) -> String {
         if self.pose.path.contains("/Geared Rails/") && self.pose.body.is_some() {
@@ -566,5 +566,335 @@ mod tests {
             p.matrix(1.).transform_point3(Vec3::ZERO),
             Vec3::new(110., 20., 30.)
         );
+    }
+}
+
+/// Source instances occupy [0, MEMBER_STRIDE); combined identities add a member offset.
+pub const MEMBER_STRIDE: u32 = 10_000;
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Placement {
+    pub column: u32,
+    pub level: u32,
+    #[serde(default)]
+    pub offset: [f32; 3],
+}
+impl Placement {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.column > 63
+            || self.level > 63
+            || self
+                .offset
+                .iter()
+                .any(|v| !v.is_finite() || v.abs() > 10_000.)
+        {
+            return Err("组合位置无效 / Invalid combination placement".into());
+        }
+        Ok(())
+    }
+}
+impl Scene {
+    fn closed_extent(&self) -> Result<(Vec3, Vec3), String> {
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for p in &self.parts {
+            let matrix = p.pose.matrix(0.);
+            for x in [p.mesh.min.x, p.mesh.max.x] {
+                for y in [p.mesh.min.y, p.mesh.max.y] {
+                    for z in [p.mesh.min.z, p.mesh.max.z] {
+                        let v = matrix.transform_point3(Vec3::new(x, y, z));
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+            }
+        }
+        if !lo.is_finite() || !hi.is_finite() {
+            return Err("Empty or invalid assembly bounds".into());
+        }
+        Ok((lo, hi))
+    }
+    /// Generic envelope composer retained for identity/resource unit tests.
+    /// Production combinations supply seating offsets from constraints::stacking.
+    #[cfg(test)]
+    pub fn combine(members: Vec<(Scene, Placement, f32)>, gap: f32) -> Result<Self, String> {
+        Self::combine_positioned(members, gap, None)
+    }
+    pub fn combine_positioned(
+        mut members: Vec<(Scene, Placement, f32)>,
+        gap: f32,
+        shifts: Option<Vec<Vec3>>,
+    ) -> Result<Self, String> {
+        if members.is_empty()
+            || members.len() > 64
+            || !gap.is_finite()
+            || !(0. ..=100.).contains(&gap)
+        {
+            return Err("组合数量或间距无效 / Invalid combination size or spacing".into());
+        }
+        let mut slots = std::collections::HashSet::new();
+        let mut bounds = Vec::new();
+        let mut widths = std::collections::BTreeMap::<u32, f32>::new();
+        let mut triangles = 0usize;
+        let mut shared = HashMap::<u64, Vec<Arc<Mesh>>>::new();
+        let mut seen = std::collections::HashSet::new();
+        for (scene, placement, _) in &mut members {
+            placement.validate()?;
+            if !slots.insert((placement.column, placement.level)) {
+                return Err("同一列和层只能放置一个成员 / Duplicate column and level".into());
+            }
+            // Share identical display geometry across members, including repeated source copies.
+            // Labels and generated inserts only share when every vertex (including material shading) matches.
+            for part in &mut scene.parts {
+                let pointer = Arc::as_ptr(&part.mesh) as usize;
+                if seen.contains(&pointer) {
+                    continue;
+                }
+                use std::hash::{Hash, Hasher};
+                let bytes = bytemuck::cast_slice::<_, u8>(&part.mesh.vertices);
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hash);
+                for value in part
+                    .mesh
+                    .min
+                    .to_array()
+                    .into_iter()
+                    .chain(part.mesh.max.to_array())
+                {
+                    value.to_bits().hash(&mut hash);
+                }
+                let bucket = shared.entry(hash.finish()).or_default();
+                if let Some(mesh) = bucket.iter().find(|m| {
+                    m.min == part.mesh.min
+                        && m.max == part.mesh.max
+                        && bytemuck::cast_slice::<_, u8>(&m.vertices) == bytes
+                }) {
+                    part.mesh = mesh.clone();
+                } else {
+                    triangles += part.mesh.vertices.len() / 3;
+                    if triangles > 8_000_000 {
+                        return Err("Combination exceeds 8 million unique triangles; remove members or inserts".into());
+                    }
+                    bucket.push(part.mesh.clone());
+                }
+                seen.insert(Arc::as_ptr(&part.mesh) as usize);
+            }
+            if crate::sustainer::lid_angle(scene).is_some() {
+                crate::sustainer::set_lid_angle(scene, 0.)?;
+            }
+            let (lo, hi) = scene.closed_extent()?;
+            widths
+                .entry(placement.column)
+                .and_modify(|w| *w = w.max(hi.x - lo.x))
+                .or_insert(hi.x - lo.x);
+            bounds.push((lo, hi));
+        }
+        let mut left = std::collections::BTreeMap::new();
+        let mut x = 0.;
+        for (&column, &width) in &widths {
+            left.insert(column, x);
+            x += width + gap;
+        }
+        let mut result = Scene { title: format!("组合 / Combination · {}", members.len()), assembly: true,
+            constraint_warning: Some("组合遵循文档规格规则；安装面按网格估算，接口啮合未验证 / Document-compatible layout; mesh seating estimates, connector engagement unverified".into()), ..Default::default() };
+        for (index, (mut scene, placement, angle)) in members.iter().cloned().enumerate() {
+            let (lo, hi) = bounds[index];
+            let y: f32 = members
+                .iter()
+                .zip(&bounds)
+                .filter(|((_, p, _), _)| p.column == placement.column && p.level < placement.level)
+                .map(|(_, (lo, hi))| hi.y - lo.y + gap)
+                .sum();
+            let shift = shifts.as_ref().map(|v| v[index]).unwrap_or_else(|| {
+                Vec3::new(
+                    left[&placement.column] + (widths[&placement.column] - (hi.x - lo.x)) * 0.5
+                        - lo.x,
+                    y - lo.y,
+                    -hi.z,
+                ) + Vec3::from(placement.offset)
+            });
+            if crate::sustainer::lid_angle(&scene).is_some() {
+                crate::sustainer::set_lid_angle(&mut scene, angle)?;
+            }
+            crate::constraints::namespace_member(&mut scene, index)?;
+            for part in &mut scene.parts {
+                part.pose.position = (Vec3::from(part.pose.position) + shift).to_array();
+            }
+            result.parts.extend(scene.parts);
+            result.relations.extend(scene.relations);
+            result.mating_checks.extend(scene.mating_checks);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod combination_tests {
+    use super::*;
+    fn unit_scene() -> Scene {
+        let mesh = Arc::new(Mesh {
+            vertices: vec![],
+            min: Vec3::ZERO,
+            max: Vec3::new(10., 20., 30.),
+            size: Vec3::new(10., 20., 30.),
+        });
+        let part = Part {
+            mesh,
+            pose: Pose {
+                path: "same.stl".into(),
+                instance: 0,
+                body: None,
+                position: [0.; 3],
+                rotation: [0.; 3],
+                travel: [0.; 3],
+                travel_frame: None,
+            },
+            color: [1.; 4],
+            visible: true,
+            source_size: Vec3::new(10., 20., 30.),
+            source_bodies: 1,
+        };
+        let mut child = part.clone();
+        child.pose.instance = 1;
+        child.pose.position = [1., 2., 3.];
+        let mut scene = Scene {
+            parts: vec![part, child],
+            assembly: true,
+            calibrated: true,
+            ..Default::default()
+        };
+        scene.relations.push(crate::constraints::Relation {
+            parent: crate::constraints::PartId::of(&scene.parts[0]),
+            child: crate::constraints::PartId::of(&scene.parts[1]),
+            joint: crate::constraints::Joint::Fixed {
+                position: [1., 2., 3.],
+                rotation: Quat::IDENTITY.to_array(),
+            },
+            label: "fixed".into(),
+        });
+        scene
+    }
+    #[test]
+    fn combined_members_keep_unique_identities_and_local_constraints() {
+        let a = unit_scene();
+        let mut b = unit_scene();
+        b.parts[0].mesh = Arc::new((*b.parts[0].mesh).clone());
+        assert_ne!(a.parts[0].mesh_key(), b.parts[0].mesh_key());
+        let mut scene = Scene::combine(
+            vec![
+                (a, Placement::default(), 0.),
+                (
+                    b,
+                    Placement {
+                        level: 1,
+                        ..Default::default()
+                    },
+                    0.,
+                ),
+                (
+                    unit_scene(),
+                    Placement {
+                        column: 1,
+                        ..Default::default()
+                    },
+                    0.,
+                ),
+            ],
+            2.,
+        )
+        .unwrap();
+        assert!(!scene.calibrated);
+        let ids: std::collections::HashSet<_> = scene
+            .parts
+            .iter()
+            .map(crate::constraints::PartId::of)
+            .collect();
+        assert_eq!(ids.len(), 6);
+        assert_eq!(
+            scene.parts[2].pose.position[1] - scene.parts[0].pose.position[1],
+            24.
+        );
+        assert_eq!(
+            scene.parts[4].pose.position[0] - scene.parts[0].pose.position[0],
+            13.
+        );
+        let before: Vec<_> = scene.parts.iter().map(|p| p.pose.position).collect();
+        crate::constraints::solve(&mut scene).unwrap();
+        for (part, expected) in scene.parts.iter().zip(before) {
+            assert!((Vec3::from(part.pose.position) - Vec3::from(expected)).length() < 0.001);
+            assert_eq!(part.pose.path, "same.stl");
+        }
+        scene.parts[0].pose.position[0] += 5.;
+        crate::constraints::solve(&mut scene).unwrap();
+        assert_eq!(scene.parts[1].pose.position[0], 6.);
+        assert_eq!(scene.parts[3].pose.position[0], 1.);
+    }
+    #[test]
+    fn combined_repeated_geometry_shares_resources_but_text_shading_stays_independent() {
+        let mut a = unit_scene();
+        let mut mesh = (*a.parts[0].mesh).clone();
+        mesh.vertices = vec![
+            crate::mesh::Vertex {
+                position: [0.; 3],
+                normal: [0., 1., 0.],
+                shade: 0.
+            };
+            3
+        ];
+        a.parts[0].mesh = Arc::new(mesh.clone());
+        let mut b = unit_scene();
+        b.parts[0].mesh = Arc::new(mesh.clone());
+        mesh.vertices[0].shade = 1.;
+        let mut c = unit_scene();
+        c.parts[0].mesh = Arc::new(mesh);
+        assert!(!Arc::ptr_eq(&a.parts[0].mesh, &b.parts[0].mesh));
+        let scene = Scene::combine(
+            vec![
+                (a, Placement::default(), 0.),
+                (
+                    b,
+                    Placement {
+                        column: 1,
+                        ..Default::default()
+                    },
+                    0.,
+                ),
+                (
+                    c,
+                    Placement {
+                        column: 2,
+                        ..Default::default()
+                    },
+                    0.,
+                ),
+            ],
+            0.,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&scene.parts[0].mesh, &scene.parts[2].mesh));
+        assert!(!Arc::ptr_eq(&scene.parts[0].mesh, &scene.parts[4].mesh));
+        assert_eq!(scene.parts[0].mesh_key(), scene.parts[2].mesh_key());
+        assert_ne!(scene.parts[0].mesh_key(), scene.parts[4].mesh_key());
+    }
+    #[test]
+    fn duplicate_slots_and_nonfinite_placements_are_rejected() {
+        assert!(
+            Scene::combine(
+                vec![
+                    (unit_scene(), Placement::default(), 0.),
+                    (unit_scene(), Placement::default(), 0.)
+                ],
+                0.
+            )
+            .is_err()
+        );
+        assert!(
+            Placement {
+                offset: [f32::NAN, 0., 0.],
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(Scene::combine(vec![(unit_scene(), Placement::default(), 0.)], f32::NAN).is_err());
     }
 }

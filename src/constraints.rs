@@ -1,5 +1,6 @@
-//! Directed assembly constraints. One parent per child; roots remain grounded.
-//! Solving is deterministic/topological, not a physics relaxation simulation.
+pub mod stacking;
+// Directed assembly constraints. One parent per child; roots remain grounded.
+// Solving is deterministic/topological, not a physics relaxation simulation.
 use crate::scene::{Part, Pose, Scene};
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -676,6 +677,42 @@ pub fn basic_relations(scene: &mut Scene) -> Result<usize, String> {
     }
     result
 }
+/// Give each assembly its own identities without changing any source file path.
+pub fn namespace_member(scene: &mut Scene, member: usize) -> Result<(), String> {
+    let offset = u32::try_from(member)
+        .ok()
+        .and_then(|m| m.checked_mul(crate::scene::MEMBER_STRIDE))
+        .ok_or("Too many assembly members")?;
+    if scene
+        .parts
+        .iter()
+        .any(|p| p.pose.instance >= crate::scene::MEMBER_STRIDE)
+    {
+        return Err("Assembly instance exceeds member namespace".into());
+    }
+    let remap = |id: &mut PartId| {
+        id.instance += offset;
+    };
+    let prefix = format!("Member {}: ", member + 1);
+    for part in &mut scene.parts {
+        part.pose.instance += offset;
+    }
+    for relation in &mut scene.relations {
+        remap(&mut relation.parent);
+        remap(&mut relation.child);
+        relation.label = format!("{prefix}{}", relation.label);
+    }
+    for check in &mut scene.mating_checks {
+        remap(&mut check.parent);
+        remap(&mut check.child);
+        check.label = format!("{prefix}{}", check.label);
+        if let Some(label) = &mut check.when_hinge_closed {
+            *label = format!("{prefix}{label}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
