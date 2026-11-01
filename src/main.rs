@@ -27,6 +27,8 @@ mod render;
 mod runners;
 mod scene;
 mod sustainer;
+mod sustainer_divider_editor;
+mod sustainer_dividers;
 pub const APP_NAME: &str = "VAULT 装配工作台";
 pub const APP_NAME_EN: &str = "VAULT Assembly Workbench";
 pub fn app_name(zh: bool) -> &'static str {

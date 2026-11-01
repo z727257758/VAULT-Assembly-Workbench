@@ -172,6 +172,42 @@ pub fn module_clip_count(path: &str) -> Option<usize> {
 }
 
 impl Catalog {
+    pub fn sustainer_divider(
+        &self,
+        s: &Selection,
+        options: SustainerOptions,
+        axis: crate::sustainer_dividers::Axis,
+        lane: usize,
+    ) -> Result<String, String> {
+        use crate::sustainer_dividers::Axis;
+        let o = options.normalized(s);
+        let name = match (s.width.as_str(), o.body, axis) {
+            ("S" | "M", _, Axis::Width) => {
+                format!("{} Dividers/{}{} Divider.stl", s.width, s.width, s.height)
+            }
+            ("L", SustainerBody::Dividers, Axis::Width) => {
+                format!("L Width Dividers/L-{} Width Divider.stl", s.height)
+            }
+            ("L", SustainerBody::Dividers, Axis::Depth) => format!(
+                "L Depth Dividers/L{}-{} Depth Divider.stl",
+                s.depth, s.height
+            ),
+            ("XL", SustainerBody::Dividers, Axis::Width) => "XL Width Divider.stl".into(),
+            ("XL", SustainerBody::Dividers, Axis::Depth) => {
+                format!("XL Depth Dividers/XL{} Depth Divider.stl", s.depth)
+            }
+            ("L", SustainerBody::Sealed, Axis::Width) => {
+                format!("L Seal Dividers/L-{} Seal Divider.stl", s.height)
+            }
+            ("XL", SustainerBody::Sealed, Axis::Width) => format!(
+                "XL Seal Divider ({}).stl",
+                if lane == 1 { "Center" } else { "Sides" }
+            ),
+            _ => return Err("当前箱体不支持此类隔板".into()),
+        };
+        self.sustainer_resolve(&format!("{}{name}", crate::sustainer_dividers::PREFIX))
+    }
+
     pub fn reconfigure_sustainer(
         &self,
         s: &Selection,

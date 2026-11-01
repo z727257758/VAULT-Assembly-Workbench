@@ -47,6 +47,7 @@ pub struct Part {
 }
 #[derive(Clone, Default)]
 pub struct Scene {
+    pub sustainer_interior: Option<Box<crate::sustainer_dividers::Geometry>>,
     pub title: String,
     pub parts: Vec<Part>,
     pub calibrated: bool,
@@ -262,6 +263,7 @@ impl Scene {
             return Err("No enabled model files".into());
         }
         let mut scene = Self {
+            sustainer_interior: None,
             title,
             parts,
             calibrated: !assembly,

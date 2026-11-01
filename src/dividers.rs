@@ -8,7 +8,12 @@ use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub fn interior_part(path: &str) -> bool {
-    path.contains("/Boxes/") || path.contains("/Grid Dividers/")
+    path.contains("/Boxes/")
+        || path.contains("/Grid Dividers/")
+        || (path.starts_with(crate::sustainer::PREFIX)
+            && (path.contains("/Modules/")
+                || path.ends_with("Facade.stl")
+                || path.starts_with(crate::sustainer_dividers::PREFIX)))
 }
 pub const PITCH: f32 = 10.5;
 pub const GROUP: &str = "Divider layout";
