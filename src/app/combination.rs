@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod regression;
 mod spatial;
 use super::*;
 use crate::scene::Placement;
@@ -1321,7 +1323,7 @@ fn paired_members(members: &[Member], index: usize) -> Vec<usize> {
         return vec![];
     };
     if support.len() == 1 {
-        let group: Vec<_> = layout
+        let mut group: Vec<_> = layout
             .supports
             .iter()
             .enumerate()
@@ -1331,6 +1333,7 @@ fn paired_members(members: &[Member], index: usize) -> Vec<usize> {
             .map(|(i, _)| i)
             .collect();
         if group.len() == 2 {
+            group.sort_by_key(|&i| members[i].placement.column);
             return group;
         }
     }

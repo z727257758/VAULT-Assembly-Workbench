@@ -1,5 +1,6 @@
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
 use glam::{Mat4, Quat, Vec3};
+const MAX_SCENE_TRIANGLES: usize = 16_000_000;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
@@ -126,9 +127,9 @@ impl Scene {
                 let mesh = Mesh::load(&root.join(&item.path))
                     .map_err(|e| format!("{}: {e}", item.name()))?;
                 tris += mesh.vertices.len() / 3;
-                if tris > 8_000_000 {
+                if tris > MAX_SCENE_TRIANGLES {
                     return Err(
-                        "Scene exceeds 8 million unique triangles; select fewer files".into(),
+                        "Scene exceeds 16 million unique triangles; select fewer files".into(),
                     );
                 }
                 cache.insert(item.path.clone(), mesh);
@@ -634,6 +635,12 @@ impl Scene {
         {
             return Err("组合数量或间距无效 / Invalid combination size or spacing".into());
         }
+        if shifts
+            .as_ref()
+            .is_some_and(|v| v.len() != members.len() || v.iter().any(|p| !p.is_finite()))
+        {
+            return Err("组合位移数量或坐标无效 / Invalid combination shifts".into());
+        }
         let mut slots = std::collections::HashSet::new();
         let mut bounds = Vec::new();
         let mut widths = std::collections::BTreeMap::<u32, f32>::new();
@@ -674,8 +681,8 @@ impl Scene {
                     part.mesh = mesh.clone();
                 } else {
                     triangles += part.mesh.vertices.len() / 3;
-                    if triangles > 8_000_000 {
-                        return Err("Combination exceeds 8 million unique triangles; remove members or inserts".into());
+                    if triangles > MAX_SCENE_TRIANGLES {
+                        return Err("Combination exceeds 16 million unique triangles; remove members or inserts".into());
                     }
                     bucket.push(part.mesh.clone());
                 }
@@ -772,6 +779,54 @@ mod combination_tests {
         let expected = 10. / 2f32.sqrt();
         assert!((lo - Vec3::new(20. - expected, 30., 40.)).length() < 0.001);
         assert!((hi - Vec3::new(20. + expected, 30. + expected, 40.)).length() < 0.001);
+    }
+    #[test]
+    fn positioned_combination_rejects_invalid_shift_vectors_instead_of_panicking() {
+        for shifts in [
+            vec![],
+            vec![Vec3::ZERO, Vec3::ONE],
+            vec![Vec3::splat(f32::NAN)],
+            vec![Vec3::splat(f32::INFINITY)],
+        ] {
+            assert!(
+                Scene::combine_positioned(
+                    vec![(unit_scene(), Placement::default(), 0.)],
+                    0.,
+                    Some(shifts)
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn namespaces_remain_disjoint_at_full_member_capacity() {
+        let members = (0..64)
+            .map(|i| {
+                (
+                    unit_scene(),
+                    Placement {
+                        column: i,
+                        ..Default::default()
+                    },
+                    0.,
+                )
+            })
+            .collect();
+        let scene = Scene::combine(members, 0.).unwrap();
+        let ids: std::collections::HashSet<_> = scene
+            .parts
+            .iter()
+            .map(crate::constraints::PartId::of)
+            .collect();
+        assert_eq!(ids.len(), 128);
+        assert_eq!(scene.member_bounds.len(), 64);
+        for relation in &scene.relations {
+            assert!(ids.contains(&relation.parent) && ids.contains(&relation.child));
+            assert_eq!(
+                relation.parent.instance / MEMBER_STRIDE,
+                relation.child.instance / MEMBER_STRIDE
+            );
+        }
     }
     fn unit_scene() -> Scene {
         let mesh = Arc::new(Mesh {

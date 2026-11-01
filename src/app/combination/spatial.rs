@@ -29,6 +29,12 @@ pub(super) fn position_relative(
 ) -> Result<Vec<Member>, String> {
     if moving.is_empty()
         || moving.len() > 2
+        || moving
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != moving.len()
         || anchor >= members.len()
         || moving.contains(&anchor)
         || moving.iter().any(|&i| i >= members.len())
@@ -78,7 +84,12 @@ pub(super) fn position_relative(
         if insert && m.placement.column >= column {
             m.placement.column += moving.len() as u32;
         }
-        if !insert && moving.len() == 2 && m.placement.column > column {
+        // Reuse a free adjacent slot when reattaching an existing pair.
+        if !insert
+            && moving.len() == 2
+            && widths.contains_key(&(column + 1))
+            && m.placement.column > column
+        {
             m.placement.column += 1;
         }
     }

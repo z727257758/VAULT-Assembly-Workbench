@@ -83,8 +83,7 @@ struct ObjectUniform {
 }
 struct GpuMesh {
     source: std::sync::Arc<crate::mesh::Mesh>,
-    buffer: wgpu::Buffer,
-    count: u32,
+    chunks: Vec<(wgpu::Buffer, u32)>,
 }
 struct GpuPart {
     uniform: wgpu::Buffer,
@@ -120,6 +119,9 @@ pub struct Renderer {
     targets: Vec<Option<Target>>,
 }
 impl Renderer {
+    pub fn mesh_chunk_count(&self) -> usize {
+        self.meshes.values().map(|m| m.chunks.len()).sum()
+    }
     pub fn new(state: egui_wgpu::RenderState) -> Self {
         let device = &state.device;
         let layout = |label| {
@@ -233,15 +235,23 @@ impl Renderer {
         for p in &scene.parts {
             self.meshes.entry(p.mesh_key()).or_insert_with(|| GpuMesh {
                 source: p.mesh.clone(),
-                buffer: self
-                    .state
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&p.pose.path),
-                        contents: bytemuck::cast_slice(&p.mesh.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                count: p.mesh.vertices.len() as u32,
+                chunks: p
+                    .mesh
+                    .vertices
+                    .chunks(vertex_chunk_size(
+                        self.state.device.limits().max_buffer_size,
+                    ))
+                    .map(|vertices| {
+                        let buffer = self.state.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some(&p.pose.path),
+                                contents: bytemuck::cast_slice(vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        );
+                        (buffer, vertices.len() as u32)
+                    })
+                    .collect(),
             });
             let uniform = self.state.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Part transform"),
@@ -426,12 +436,34 @@ impl Renderer {
                     }
                     let mesh = &self.meshes[&p.mesh_key()];
                     pass.set_bind_group(1, &self.parts[i].bind, &[]);
-                    pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                    pass.draw(0..mesh.count, 0..1);
+                    for (buffer, count) in &mesh.chunks {
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..*count, 0..1);
+                    }
                 }
             }
         }
         self.state.queue.submit([encoder.finish()]);
         target.id
+    }
+}
+
+/// Whole triangles per buffer, below both device and transient upload budgets.
+fn vertex_chunk_size(max_bytes: u64) -> usize {
+    ((max_bytes.min(64 * 1024 * 1024) / std::mem::size_of::<Vertex>() as u64) / 3 * 3) as usize
+}
+#[cfg(test)]
+mod large_mesh_tests {
+    #[test]
+    fn gpu_chunks_preserve_triangle_boundaries_and_device_limit() {
+        for limit in [65536, 268435456, 1073741824] {
+            let size = super::vertex_chunk_size(limit);
+            assert!(size > 0);
+            assert_eq!(size % 3, 0);
+            assert!(
+                size as u64 * std::mem::size_of::<super::Vertex>() as u64
+                    <= limit.min(64 * 1024 * 1024)
+            );
+        }
     }
 }

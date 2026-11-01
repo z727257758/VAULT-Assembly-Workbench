@@ -1,4 +1,5 @@
 mod combination;
+mod large_stl_smoke;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     render::{Camera, Renderer, ViewOptions},
@@ -814,6 +815,27 @@ impl App {
                             continue;
                         }
                     };
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-large-stl") {
+                        let selection = Selection {
+                            width: "XL".into(),
+                            ..Default::default()
+                        };
+                        let items = self
+                            .catalog
+                            .bom(&selection)
+                            .into_iter()
+                            .filter(|b| b.path.contains("/Modules/"))
+                            .collect();
+                        self.tab = 1;
+                        self.start_scene(
+                            items,
+                            self.catalog.root.clone(),
+                            "XL3 · 原始壳体 / source housing".into(),
+                            false,
+                            ctx,
+                        );
+                        continue;
+                    }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
                         self.setup_combination_smoke();
                     }
@@ -3288,6 +3310,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-large-stl") {
+            self.large_stl_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
             self.combination_smoke(ctx);

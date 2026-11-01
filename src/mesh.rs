@@ -1,6 +1,14 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use std::{path::Path, sync::Arc};
+#[cfg(test)]
+use std::io::Cursor;
+use std::{
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    path::Path,
+    sync::Arc,
+};
+/// Per-source geometry budget, independent of ASCII/binary file encoding.
+pub const MAX_TRIANGLES: usize = 8_000_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -18,90 +26,134 @@ pub struct Mesh {
 }
 impl Mesh {
     pub fn load(path: &Path) -> Result<Arc<Self>, String> {
-        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-        if meta.len() > 250_000_000 {
-            return Err("STL exceeds 250 MB".into());
-        }
-        Self::parse(&std::fs::read(path).map_err(|e| e.to_string())?).map(Arc::new)
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let length = file.metadata().map_err(|e| e.to_string())?.len();
+        Self::read(BufReader::with_capacity(1024 * 1024, file), length).map(Arc::new)
     }
+    #[cfg(test)]
     pub fn parse(data: &[u8]) -> Result<Self, String> {
-        let count = if data.len() >= 84 {
-            u32::from_le_bytes(data[80..84].try_into().unwrap()) as usize
+        Self::read(Cursor::new(data), data.len() as u64)
+    }
+    fn read(mut reader: impl BufRead + Seek, length: u64) -> Result<Self, String> {
+        let mut header = [0u8; 84];
+        let count = if length >= 84 {
+            reader.read_exact(&mut header).map_err(|e| e.to_string())?;
+            u32::from_le_bytes(header[80..84].try_into().unwrap()) as usize
         } else {
             0
         };
-        let binary = count > 0 && count <= 4_000_000 && 84 + count * 50 <= data.len();
-        let mut points = Vec::new();
+        let binary = count > 0 && 84 + count as u64 * 50 <= length;
+        let mut vertices = Vec::new();
+        let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let mut push = |p: Vec3, vertices: &mut Vec<Vertex>| -> Result<(), String> {
+            if !p.is_finite() {
+                return Err("Non-finite STL coordinate".into());
+            }
+            if vertices.len() >= MAX_TRIANGLES * 3 {
+                return Err(format!("STL exceeds {MAX_TRIANGLES} triangles"));
+            }
+            if vertices.len() == vertices.capacity() {
+                vertices
+                    .try_reserve_exact((MAX_TRIANGLES * 3 - vertices.len()).min(65536))
+                    .map_err(|e| format!("STL vertex allocation: {e}"))?;
+            }
+            min = min.min(p);
+            max = max.max(p);
+            vertices.push(Vertex {
+                position: p.to_array(),
+                normal: [0.; 3],
+                shade: 1.,
+            });
+            Ok(())
+        };
         if binary {
-            points.reserve(count * 3);
-            for i in 0..count {
+            if count > MAX_TRIANGLES {
+                return Err(format!("STL exceeds {MAX_TRIANGLES} triangles ({count})"));
+            }
+            vertices
+                .try_reserve_exact(count * 3)
+                .map_err(|e| format!("STL vertex allocation: {e}"))?;
+            let mut triangle = [0u8; 50];
+            for _ in 0..count {
+                reader
+                    .read_exact(&mut triangle)
+                    .map_err(|e| format!("Truncated binary STL: {e}"))?;
                 for j in 0..3 {
-                    let o = 84 + i * 50 + 12 + j * 12;
-                    let v = Vec3::new(
-                        read_float(data, o),
-                        read_float(data, o + 4),
-                        read_float(data, o + 8),
-                    );
-                    if !v.is_finite() {
-                        return Err("Non-finite STL coordinate".into());
-                    }
-                    points.push(v);
+                    let o = 12 + j * 12;
+                    push(
+                        Vec3::new(
+                            read_float(&triangle, o),
+                            read_float(&triangle, o + 4),
+                            read_float(&triangle, o + 8),
+                        ),
+                        &mut vertices,
+                    )?;
                 }
             }
         } else {
-            let text = std::str::from_utf8(data).map_err(|_| "Invalid binary or ASCII STL")?;
-            if !text.trim_start().starts_with("solid") {
-                return Err("Invalid ASCII STL header".into());
-            }
-            for line in text.lines() {
-                let mut p = line.split_whitespace();
-                if p.next() == Some("vertex") {
+            reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            let mut line = Vec::new();
+            let mut saw_header = false;
+            loop {
+                line.clear();
+                // Bound ASCII record memory, even for malformed inputs without newlines.
+                let n = reader
+                    .by_ref()
+                    .take(65537)
+                    .read_until(b'\n', &mut line)
+                    .map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                if n > 65536 {
+                    return Err("ASCII STL line exceeds 64 KiB".into());
+                }
+                let text = std::str::from_utf8(&line)
+                    .map_err(|_| "Invalid or truncated binary/ASCII STL")?;
+                let mut words = text.split_whitespace();
+                let Some(word) = words.next() else {
+                    continue;
+                };
+                if !saw_header {
+                    if word != "solid" {
+                        return Err("Invalid or truncated binary/ASCII STL header".into());
+                    }
+                    saw_header = true;
+                    continue;
+                }
+                if word == "vertex" {
                     let mut xyz = [0.; 3];
                     for value in &mut xyz {
-                        *value = p
+                        *value = words
                             .next()
                             .ok_or("Incomplete STL vertex")?
                             .parse::<f32>()
                             .map_err(|_| "Invalid STL number")?;
                     }
-                    let v = Vec3::from(xyz);
-                    if !v.is_finite() {
-                        return Err("Non-finite STL coordinate".into());
-                    }
-                    points.push(v);
-                    if points.len() > 12_000_000 {
-                        return Err("Too many triangles".into());
-                    }
+                    push(Vec3::from(xyz), &mut vertices)?;
                 }
             }
         }
-        if points.is_empty() || points.len() % 3 != 0 {
+        if vertices.is_empty() || vertices.len() % 3 != 0 {
             return Err("Empty or incomplete STL triangles".into());
         }
-        let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for p in &points {
-            min = min.min(*p);
-            max = max.max(*p);
-        }
-        let center = (min + max) * 0.5;
+        let center = min * 0.5 + max * 0.5;
         let size = max - min;
-        if size.max_element() < 1e-6 {
-            return Err("Degenerate STL".into());
+        if !size.is_finite() || size.max_element() < 1e-6 {
+            return Err("Degenerate or out-of-range STL".into());
         }
-        // Use a local origin to retain precision for files translated thousands of mm.
-        for p in &mut points {
-            let v = *p - center;
-            *p = Vec3::new(v.x, v.z, -v.y);
-        }
-        let mut vertices = Vec::with_capacity(points.len());
-        for tri in points.chunks_exact(3) {
-            let n = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
-            for p in tri {
-                vertices.push(Vertex {
-                    position: p.to_array(),
-                    normal: n.to_array(),
-                    shade: 1.,
-                });
+        // Recenter in place: no full file buffer or second array of all coordinates.
+        for triangle in vertices.chunks_exact_mut(3) {
+            for vertex in triangle.iter_mut() {
+                let p = Vec3::from(vertex.position) - center;
+                vertex.position = [p.x, p.z, -p.y];
+            }
+            let a = Vec3::from(triangle[0].position);
+            let b = Vec3::from(triangle[1].position);
+            let c = Vec3::from(triangle[2].position);
+            let normal = (b - a).cross(c - a).normalize_or_zero().to_array();
+            for vertex in triangle {
+                vertex.normal = normal;
             }
         }
         let half = Vec3::new(size.x, size.z, size.y) * 0.5;
@@ -120,6 +172,70 @@ fn read_float(bytes: &[u8], offset: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_truncated_binary_and_bounds_ascii_record_memory() {
+        let mut bytes = vec![0u8; 134];
+        bytes[80..84].copy_from_slice(&2u32.to_le_bytes());
+        assert!(Mesh::parse(&bytes).is_err());
+        assert!(
+            Mesh::parse(&[b'a'; 65537])
+                .err()
+                .unwrap()
+                .contains("64 KiB")
+        );
+    }
+    #[test]
+    fn rejects_over_budget_header_before_allocating() {
+        let mut header = [0u8; 84];
+        header[80..84].copy_from_slice(&((MAX_TRIANGLES + 1) as u32).to_le_bytes());
+        let error = Mesh::read(Cursor::new(header), 84 + (MAX_TRIANGLES as u64 + 1) * 50)
+            .err()
+            .unwrap();
+        assert!(error.contains("triangles"));
+    }
+    #[test]
+    fn large_xl_drawer_library_regression() {
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let catalog = crate::catalog::Catalog::scan(root.clone()).unwrap();
+        let selection = crate::catalog::Selection {
+            width: "XL".into(),
+            ..Default::default()
+        };
+        let scene =
+            crate::scene::Scene::load(&root, &catalog.bom(&selection), "XL3".into(), true).unwrap();
+        let module = scene
+            .parts
+            .iter()
+            .find(|p| p.pose.path.contains("/Modules/"))
+            .unwrap();
+        assert_eq!(module.mesh.vertices.len() / 3, 6_749_642);
+        assert!(
+            module
+                .mesh
+                .vertices
+                .iter()
+                .all(|v| Vec3::from(v.position).is_finite())
+        );
+        let mut report = format!(
+            "Triangles: {}\n",
+            scene
+                .parts
+                .iter()
+                .map(|p| p.mesh.vertices.len() / 3)
+                .sum::<usize>()
+        );
+        for p in &scene.parts {
+            report.push_str(&format!(
+                "{} {:?} rotation={:?} position={:?}\n",
+                p.pose.path, p.source_size, p.pose.rotation, p.pose.position
+            ));
+        }
+        std::fs::create_dir_all("output/large-stl").unwrap();
+        std::fs::write("output/large-stl/xl3.txt", report).unwrap();
+    }
     #[test]
     fn ascii_dimensions_and_recentering() {
         let m=Mesh::parse(b"solid a\nvertex 1000 2000 3000\nvertex 1010 2000 3000\nvertex 1000 2020 3005\nendsolid").unwrap();
