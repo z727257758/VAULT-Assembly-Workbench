@@ -273,11 +273,7 @@ impl Scene {
             mating_checks: Vec::new(),
         };
         if assembly {
-            if scene
-                .parts
-                .iter()
-                .all(|p| p.pose.path.starts_with(crate::sustainer::PREFIX))
-            {
+            if crate::sustainer::is_scene(&scene) {
                 crate::sustainer::apply(&mut scene)?;
                 return Ok(scene);
             }
@@ -425,14 +421,7 @@ impl Scene {
         self.constraint_warning = crate::constraints::solve(self).err();
         // Sustainer explosion is derived from the restored assembled poses. Old
         // saved world-axis offsets must not replace the current display layout.
-        if self.constraint_warning.is_none()
-            && self.assembly
-            && !self.parts.is_empty()
-            && self
-                .parts
-                .iter()
-                .all(|p| p.pose.path.starts_with(crate::sustainer::PREFIX))
-        {
+        if self.constraint_warning.is_none() && self.assembly && crate::sustainer::is_scene(self) {
             self.constraint_warning = crate::sustainer::reset_explosion(self).err();
         }
         self.calibrated = old.calibrated

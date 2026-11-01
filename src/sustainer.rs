@@ -10,6 +10,17 @@ use glam::{DVec3, Mat3, Mat4, Quat, Vec3};
 use std::collections::BTreeMap;
 
 pub const PREFIX: &str = "02. SUSTAINERS/";
+pub const STACKING_LATCH: &str = "01. DRAWERS/07. Universal/Latch.stl";
+pub fn is_scene(scene: &Scene) -> bool {
+    scene
+        .parts
+        .iter()
+        .any(|p| p.pose.path.starts_with(PREFIX) && p.pose.path.contains("/Modules/"))
+        && scene
+            .parts
+            .iter()
+            .all(|p| p.pose.path.starts_with(PREFIX) || p.pose.path == STACKING_LATCH)
+}
 pub const LID: &str = "Sustainer datum: lid / paired hinge axes";
 pub const UPPER_SEAT: &str = "Sustainer datum: upper hinge / roof seat / inside-seat-v5";
 pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / inside-seat-v5";
@@ -358,6 +369,118 @@ fn socket_intervals(part: &Part, y: f32, z: f32) -> Result<Vec<[f32; 2]>, String
         .filter(|p| p[1] - p[0] > 1.)
         .collect();
     Ok(slots)
+}
+
+// Match the two rear-facing head pockets on the underside, rather than placing
+// latches on the lid. XL pockets are not symmetric about the housing center.
+fn stacking_latches(scene: &mut Scene, module: usize, edges: &mut Vec<Edge>) -> Result<(), String> {
+    let latches = indices(scene, STACKING_LATCH);
+    if latches.is_empty() {
+        return Ok(());
+    }
+    let part = &scene.parts[module];
+    let frame = part.pose.matrix(0.);
+    let (lo, _) = bounds(part, Quat::from_mat4(&frame));
+    let lo = lo + frame.transform_point3(Vec3::ZERO);
+    let mut patches = Vec::<(Vec3, Vec3)>::new();
+    for tri in part.mesh.vertices.chunks_exact(3) {
+        let p: [Vec3; 3] = std::array::from_fn(|i| frame.transform_point3(tri[i].position.into()));
+        let n = (p[1] - p[0]).cross(p[2] - p[0]);
+        let center = (p[0] + p[1] + p[2]) / 3.;
+        // Same inner head stops as the drawer module: about 63.48 mm from
+        // the rear. The adjacent outer frame end is a different datum.
+        if n.length() > 1e-6
+            && n.z < -n.length() * 0.999
+            // A search window, not a mating tolerance: some M5 source rear
+            // walls protrude by ~0.1 mm. Placement uses the measured stop below.
+            && (center.z - lo.z - 63.48).abs() < 0.5
+            && center.y < lo.y + 5.
+            && center.y > lo.y
+        {
+            patches.push((p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2])));
+        }
+    }
+    patches.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    let mut pockets = Vec::<(Vec3, Vec3)>::new();
+    for (min, max) in patches {
+        if let Some(last) = pockets.last_mut()
+            && min.x <= last.1.x + 0.1
+        {
+            last.0 = last.0.min(min);
+            last.1 = last.1.max(max);
+        } else {
+            pockets.push((min, max));
+        }
+    }
+    if pockets.len() != latches.len() * 2 {
+        return Err(format!(
+            "Sustainer stacking latch: expected {} head pockets, found {}",
+            latches.len() * 2,
+            pockets.len()
+        ));
+    }
+    let q = Quat::from_rotation_x(std::f32::consts::PI);
+    for (i, pair) in latches.into_iter().zip(pockets.chunks_exact(2)) {
+        if pair.iter().any(|(min, max)| {
+            !(4. ..=8.).contains(&(max.x - min.x)) || !(4.5..=4.9).contains(&(max.y - min.y))
+        }) || !(70. ..=72.).contains(&(pair[1].1.x - pair[0].0.x))
+        {
+            return Err(
+                "Sustainer stacking latch pocket profile differs from supported source geometry"
+                    .into(),
+            );
+        }
+        let center_x = (pair[0].0.x + pair[1].1.x) * 0.5;
+        let ceiling = pair[0].1.y.min(pair[1].1.y);
+        let end = (pair[0].1.z + pair[1].1.z) * 0.5;
+        let (_, hi) = bounds(&scene.parts[i], q);
+        let position = Vec3::new(center_x, ceiling - hi.y - 0.05, end - hi.z);
+        pose(&mut scene.parts[i], q, position);
+        scene.parts[i].color = [0.88, 0.60, 0.32, 1.];
+        for (side, (min, max)) in pair.iter().enumerate() {
+            let x = (min.x + max.x) * 0.5;
+            let head_end = scene.parts[i]
+                .mesh
+                .vertices
+                .iter()
+                .map(|v| q * Vec3::from(v.position) + position)
+                .filter(|p| (p.x - x).abs() < 4.)
+                .map(|p| p.z)
+                .reduce(f32::max)
+                .ok_or("Stacking latch rounded head missing")?;
+            record(
+                scene,
+                [module, i],
+                &format!("stacking latch head {} / inner pocket end", side + 1),
+                [
+                    Vec3::new(x, ceiling, max.z),
+                    Vec3::new(x, ceiling, head_end),
+                ],
+                Vec3::Z,
+                MateMeasure::Plane { gap: 0. },
+                0.03,
+            );
+        }
+        record(
+            scene,
+            [module, i],
+            "stacking latch / pocket ceiling",
+            [
+                Vec3::new(center_x, ceiling, end),
+                Vec3::new(center_x, position.y + hi.y, end),
+            ],
+            -Vec3::Y,
+            MateMeasure::Plane { gap: 0.05 },
+            0.02,
+        );
+        edge(
+            edges,
+            module,
+            i,
+            "stacking latch / measured underside pockets",
+        );
+    }
+    Ok(())
 }
 
 pub fn apply(scene: &mut Scene) -> Result<(), String> {
@@ -1182,6 +1305,7 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             0.03,
         );
     }
+    stacking_latches(scene, module, &mut edges)?;
     scene.parts[module].color = [0.53, 0.62, 0.72, 1.];
     scene.parts[facade].color = [0.78, 0.82, 0.87, 1.];
     for e in edges {
@@ -1244,6 +1368,13 @@ pub fn review_notes(scene: &Scene, zh: bool) -> Vec<&'static str> {
     }) {
         notes.push(if zh { "安装配合存在超出检查阈值的偏差，请展开查看；本套装配仍待校准确认。" }
             else { "Some mating checks exceed their thresholds. Expand the discrepancies; this assembly still needs calibration review." });
+    }
+    if scene.parts.iter().any(|p| p.pose.path == STACKING_LATCH) {
+        notes.push(if zh {
+            "堆叠卡闩保留源件自由形态；卡头与槽边有局部相交提示，弹性卡入及实际配合待核对。"
+        } else {
+            "Stacking latches retain their source free shape. Local head / pocket surface crossings require review of elastic insertion and physical fit."
+        });
     }
     notes
 }
@@ -1593,6 +1724,10 @@ pub fn reset_explosion(scene: &mut Scene) -> Result<(), String> {
             let own = if relation.label == LID || name.contains("/Hinges/") {
                 // Set the common vertical layers after all axial offsets exist.
                 Vec3::ZERO
+            } else if name == STACKING_LATCH {
+                let bottom = explosion_mesh_projection(&scene.parts[module], up).0;
+                let top = explosion_mesh_projection(p, up).1;
+                -up * (top - bottom + 25.).max(25.)
             } else if i == facade {
                 front * 90.
             } else if name.contains("/Rods/") || name.contains("/1 SET OF PINS") {
@@ -1855,6 +1990,102 @@ pub fn reset_explosion(scene: &mut Scene) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::catalog::{Catalog, Selection, SustainerBody, SustainerOptions};
+    #[test]
+    fn sustainer_stacking_latches_restore_and_follow_housing() {
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let catalog = Catalog::scan(root.into()).unwrap();
+        let mut surface_reports = Vec::new();
+        for (width, depth, height) in [
+            ("S", 3, "1F"),
+            ("M", 5, "2F"),
+            ("L", 4, "4F"),
+            ("XL", 7, "1F"),
+        ] {
+            let selection = Selection {
+                width: width.into(),
+                depth,
+                height: height.into(),
+                hidden_key: false,
+            };
+            let bom = catalog
+                .sustainer_bom(&selection, Default::default())
+                .unwrap();
+            let mut scene =
+                Scene::load(&catalog.root, &bom, "stacking latches".into(), true).unwrap();
+            assert!(is_scene(&scene));
+            let module = indices(&scene, "/Modules/")[0];
+            let latches = indices(&scene, STACKING_LATCH);
+            let before: Vec<_> = latches
+                .iter()
+                .map(|&i| scene.parts[i].pose.matrix(0.))
+                .collect();
+            for angle in [0., 75., 110.] {
+                set_lid_angle(&mut scene, angle).unwrap();
+                for (&i, original) in latches.iter().zip(&before) {
+                    assert!(scene.parts[i].pose.matrix(0.).abs_diff_eq(*original, 0.001));
+                }
+            }
+            let pair = Scene {
+                parts: std::iter::once(scene.parts[module].clone())
+                    .chain(latches.iter().map(|&i| scene.parts[i].clone()))
+                    .collect(),
+                ..Default::default()
+            };
+            let diagnostic = crate::collision::check(&pair, 0.05).unwrap();
+            // Keep diagnostics for the unmodified elastic latch. A matched
+            // seat is not a proof that its free-state head profile fits.
+            surface_reports.push(serde_json::json!({
+                "size":format!("{width}{depth}/{height}"),"tolerance_mm":0.05,
+                "pairs":diagnostic.pairs.iter().map(|p|serde_json::json!({
+                    "a":constraints::PartId::of(&pair.parts[p.a]),
+                    "b":constraints::PartId::of(&pair.parts[p.b]),"point":p.point.to_array()
+                })).collect::<Vec<_>>()
+            }));
+            let q = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.2);
+            constraints::rotate_subassembly(&mut scene, module, q).unwrap();
+            reset_explosion(&mut scene).unwrap();
+            // A previously confirmed preset lacks the newly added latches.
+            // Keep its saved parts, derive the new children from the moved root,
+            // and require a fresh confirmation for the expanded assembly.
+            let mut legacy = scene.definition();
+            legacy.calibrated = true;
+            legacy.poses.retain(|p| p.path != STACKING_LATCH);
+            legacy.relations.retain(|r| r.child.path != STACKING_LATCH);
+            legacy
+                .mating_checks
+                .retain(|c| c.child.path != STACKING_LATCH);
+            let mut restored =
+                Scene::load(&catalog.root, &bom, "legacy stacking".into(), true).unwrap();
+            restored.apply(&legacy);
+            assert!(restored.constraint_warning.is_none());
+            assert!(!restored.calibrated);
+            for (a, b) in scene.parts.iter().zip(&restored.parts) {
+                for amount in [0., 1.] {
+                    assert!(
+                        a.pose
+                            .matrix(amount)
+                            .abs_diff_eq(b.pose.matrix(amount), 0.01),
+                        "restored {}",
+                        a.pose.path
+                    );
+                }
+            }
+            let single = Scene {
+                parts: vec![scene.parts[latches[0]].clone()],
+                ..Default::default()
+            };
+            assert!(!is_scene(&single));
+        }
+        let output = std::path::Path::new("output/sustainer-latch");
+        std::fs::create_dir_all(output).unwrap();
+        std::fs::write(
+            output.join("surface-report.json"),
+            serde_json::to_vec_pretty(&surface_reports).unwrap(),
+        )
+        .unwrap();
+    }
     #[test]
     fn sustainer_explosion_follows_assembled_axes_and_restored_poses() {
         use constraints::PartId;
@@ -2270,6 +2501,60 @@ mod tests {
                 }
                 let module = indices(&scene, "/Modules/")[0];
                 let facade = indices(&scene, "Facade.stl")[0];
+                let latches = indices(&scene, STACKING_LATCH);
+                assert_eq!(
+                    latches.len(),
+                    if matches!(width, "S" | "M") { 1 } else { 2 }
+                );
+                let housing_lo = scene.parts[module].mesh.vertices.iter().fold(
+                    Vec3::splat(f32::INFINITY),
+                    |lo, v| {
+                        lo.min(
+                            scene.parts[module]
+                                .pose
+                                .matrix(0.)
+                                .transform_point3(v.position.into()),
+                        )
+                    },
+                );
+                for i in latches {
+                    let latch = &scene.parts[i];
+                    let id = constraints::PartId::of(latch);
+                    let relation = scene.relations.iter().find(|r| r.child == id).unwrap();
+                    assert_eq!(
+                        relation.parent,
+                        constraints::PartId::of(&scene.parts[module])
+                    );
+                    assert!(
+                        relation
+                            .label
+                            .contains("stacking latch / measured underside pockets")
+                    );
+                    let (latch_lo, latch_hi) = constraints::world_bounds(latch);
+                    assert!(latch_lo.y > housing_lo.y - 0.1 && latch_hi.y < housing_lo.y + 5.);
+                    assert!((latch_hi.z - housing_lo.z - 63.48).abs() < 0.5);
+                    assert!(latch_hi.y + Vec3::from(latch.pose.travel).y <= housing_lo.y - 24.99);
+                    // Independent plane extraction in each head's narrow window rejects
+                    // an exterior frame end or a centered latch in a wide housing.
+                    for side in [-1., 1.] {
+                        let x = latch.pose.position[0] + side * 32.8;
+                        let patch = display::plane_patch(
+                            &scene.parts[module].mesh,
+                            scene.parts[module].pose.matrix(0.),
+                            2,
+                            -1.,
+                            latch_hi.z,
+                            [
+                                Vec3::new(x - 4., latch_lo.y - 0.1, 0.),
+                                Vec3::new(x + 4., latch_hi.y + 0.1, 0.),
+                            ],
+                            0.03,
+                        )
+                        .unwrap();
+                        assert!((patch.level - latch_hi.z).abs() < 0.03);
+                        assert!((patch.max.y - latch_hi.y - 0.05).abs() < 0.02);
+                    }
+                }
                 let (facade_lo, facade_hi) = constraints::world_bounds(&scene.parts[facade]);
                 for holder in indices(&scene, "/LOCK HOLDER.stl") {
                     let part = &scene.parts[holder];

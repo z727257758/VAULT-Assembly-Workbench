@@ -3153,6 +3153,17 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
             if !self.busy && !self.preview.has_pending() && !self.scene.parts.is_empty() {
                 self.smoke_frame += 1;
+                if self.smoke_frame == 5 && [55, 56].contains(&self.smoke_stage) {
+                    for part in &mut self.scene.parts {
+                        part.visible = part.pose.path.contains("/Modules/")
+                            || part.pose.path == crate::sustainer::STACKING_LATCH;
+                    }
+                    self.selected = None;
+                    self.explosion = 0.;
+                    self.camera.fit(&self.scene, 0.);
+                    self.camera.yaw = 0.3;
+                    self.camera.pitch = -1.1;
+                }
                 if self.smoke_frame == 5 && [36, 37].contains(&self.smoke_stage) {
                     self.selected = Some(0);
                     self.camera.yaw = 0.;
@@ -3333,6 +3344,8 @@ impl eframe::App for App {
                                 "native-sustainer-label-engraved.png",
                                 "native-sustainer-label-flat.png",
                                 "native-sustainer-label-assembled.png",
+                                "native-sustainer-latch-s-bottom.png",
+                                "native-sustainer-latch-xl-bottom.png",
                             ][self.smoke_stage as usize],
                         ),
                         &bytes,
@@ -3351,13 +3364,29 @@ impl eframe::App for App {
                             self.status
                         ),
                     );
-                    if self.smoke_stage == 54 {
+                    if self.smoke_stage == 56 {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     } else {
                         self.smoke_stage += 1;
                         self.smoke_frame = 0;
                         self.screenshot_requested = false;
                         match self.smoke_stage {
+                            55 | 56 => {
+                                self.label_open = false;
+                                self.export_options.plate.preview_colors = false;
+                                self.sustainer_dividers = Default::default();
+                                self.sustainer_options = Default::default();
+                                self.sustainer_angle = 0.;
+                                self.selection = Selection {
+                                    width: if self.smoke_stage == 55 { "S" } else { "XL" }.into(),
+                                    ..Default::default()
+                                };
+                                self.bom = self
+                                    .catalog
+                                    .sustainer_bom(&self.selection, self.sustainer_options)
+                                    .unwrap();
+                                self.assembly(ctx);
+                            }
                             51..=53 => {
                                 self.sustainer_divider_editor.open = false;
                                 self.label_open = true;
@@ -4126,6 +4155,7 @@ fn group_label(zh: bool, group: &str) -> &str {
         "Upper hinges" => "上铰链",
         "Hinge rods" => "铰链轴杆",
         "Locks" => "前锁组件",
+        "Stacking latches" => "堆叠卡闩",
         "Label" => "标签",
         "Base" => "底座",
         "Optional baseplate" => "底板（可选）",

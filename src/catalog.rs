@@ -224,7 +224,8 @@ impl Catalog {
             if let Some(saved) = old.iter().find(|p| p.path == b.path) {
                 b.enabled = saved.enabled;
                 if b.group != "Roof connector"
-                    && (b.group != "Locks" || old_small.is_none_or(|old| old == small))
+                    && (!matches!(b.group.as_str(), "Locks" | "Stacking latches")
+                        || old_small.is_none_or(|old| old == small))
                 {
                     b.qty = saved.qty;
                 }
@@ -360,6 +361,12 @@ impl Catalog {
             ),
             locks,
             "Locks",
+        )?;
+        // The shared underside stacking latch is stored in the drawer Universal folder.
+        add(
+            crate::sustainer::STACKING_LATCH.into(),
+            if small { 1 } else { 2 },
+            "Stacking latches",
         )?;
         add(format!("{universal}/Label for Sustainers.stl"), 1, "Label")?;
         Ok(bom)
@@ -659,8 +666,16 @@ mod tests {
                             let options = SustainerOptions { body, split_roof };
                             let bom = c.sustainer_bom(&s, options).unwrap();
                             configurations += 1;
-                            assert!(bom.iter().all(|b| b.path.starts_with("02. SUSTAINERS/")
+                            assert!(bom.iter().all(|b| (b.path.starts_with("02. SUSTAINERS/")
+                                || b.path == crate::sustainer::STACKING_LATCH)
                                 && c.root.join(&b.path).is_file()));
+                            assert_eq!(
+                                bom.iter()
+                                    .find(|b| b.path == crate::sustainer::STACKING_LATCH)
+                                    .unwrap()
+                                    .qty,
+                                if matches!(width, "S" | "M") { 1 } else { 2 }
+                            );
                             assert_eq!(bom.iter().filter(|b| b.group == "Structure").count(), 1);
                             assert_eq!(bom.iter().filter(|b| b.group == "Facade").count(), 1);
                             assert_eq!(
@@ -730,6 +745,27 @@ mod tests {
         let next = c
             .reconfigure_sustainer(&large, Default::default(), &old)
             .unwrap();
+        assert_eq!(
+            next.iter()
+                .find(|b| b.path == crate::sustainer::STACKING_LATCH)
+                .unwrap()
+                .qty,
+            2
+        );
+        let legacy: Vec<_> = old
+            .iter()
+            .filter(|b| b.path != crate::sustainer::STACKING_LATCH)
+            .cloned()
+            .collect();
+        assert_eq!(
+            c.reconfigure_sustainer(&Selection::default(), Default::default(), &legacy)
+                .unwrap()
+                .iter()
+                .find(|b| b.path == crate::sustainer::STACKING_LATCH)
+                .unwrap()
+                .qty,
+            1
+        );
         assert_eq!(
             next.iter()
                 .find(|b| b.name() == "LOCK HOLDER.stl")
