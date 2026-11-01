@@ -93,6 +93,7 @@ impl App {
             let mut next = self.members.clone();
             next[edit.index].exterior = edit.draft.clone();
             let saved = CombinationPreset {
+                colors: self.global_colors.clone(),
                 preset: self.member_snapshot(),
                 members: next.clone(),
                 active_member: self.active_member,
@@ -100,9 +101,9 @@ impl App {
             };
             match saved.validate(&self.catalog) {
                 Ok(()) => {
-                    self.commit_member();
+                    self.record_workflow();
                     self.members[edit.index].exterior = edit.draft;
-                    self.combination_layout_history.clear();
+                    self.member_selection.clear();
                     self.combination_move_source = None;
                     self.combination_view = true;
                     self.assembly(ctx);

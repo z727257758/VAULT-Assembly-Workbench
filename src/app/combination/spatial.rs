@@ -169,11 +169,8 @@ impl App {
         let group = if pair.len() == 2 { pair } else { vec![source] };
         match position_relative(&self.members, &group, target, side) {
             Ok(candidate) => {
-                self.combination_layout_history
-                    .push(self.members.iter().map(|m| m.placement).collect());
-                if self.combination_layout_history.len() > 20 {
-                    self.combination_layout_history.remove(0);
-                }
+                self.record_workflow();
+                self.member_selection.clear();
                 self.members = candidate;
                 self.restore_member(source);
                 self.combination_view = true;
@@ -195,6 +192,10 @@ impl App {
             || self.busy
             || self.preview.has_pending()
             || self.combination_spec.is_some()
+            || self.export_open
+            || self.colors_open
+            || self.global_colors_draft.is_some()
+            || self.exterior_edit.is_some()
         {
             return false;
         }
@@ -245,6 +246,9 @@ impl App {
                             }
                             if ui.button(t(z, "编辑内部 →", "Edit interior →")).clicked() {
                                 self.focus_member(ctx);
+                            }
+                            if ui.button(t(z, "复制成员…", "Duplicate member…")).clicked() {
+                                self.add_member(None, false, ctx);
                             }
                             let pair = paired_members(&self.members, selected);
                             if ui

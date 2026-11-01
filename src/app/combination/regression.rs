@@ -55,6 +55,7 @@ fn snapshot(members: &[Member]) -> Vec<String> {
 }
 fn project(members: Vec<Member>) -> CombinationPreset {
     CombinationPreset {
+        colors: Default::default(),
         preset: members[0].preset.clone(),
         members,
         active_member: 0,
@@ -822,7 +823,15 @@ fn library_exterior_spacing_and_export_regression() {
     let temp = tempfile::tempdir_in(&out).unwrap();
     let saved = project(m);
     let target = temp.path().join("export");
-    export_members(&root, &home, &target, crate::export::Format::Stl, &saved).unwrap();
+    export_members(
+        &root,
+        &home,
+        &target,
+        crate::export::Format::Stl,
+        &saved,
+        None,
+    )
+    .unwrap();
     assert!(target.join("hardware.txt").is_file());
     let restored: CombinationPreset =
         toml::from_str(&std::fs::read_to_string(target.join("combination.toml")).unwrap()).unwrap();

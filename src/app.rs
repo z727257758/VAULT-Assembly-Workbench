@@ -1,6 +1,7 @@
 mod combination;
 mod exterior_smoke;
 mod large_stl_smoke;
+mod workflow;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     render::{Camera, Renderer, ViewOptions},
@@ -146,7 +147,11 @@ pub struct App {
     combination_spec: Option<combination::SpecEdit>,
     exterior_edit: Option<combination::exterior::Edit>,
     combination_view_state: Option<(Camera, f32, bool, bool)>,
-    combination_layout_history: Vec<Vec<crate::scene::Placement>>,
+    workflow_history: workflow::History,
+    member_edit_baseline: Option<workflow::Snapshot>,
+    global_colors: crate::print_plate::ColorTheme,
+    global_colors_draft: Option<crate::print_plate::ColorTheme>,
+    member_selection: std::collections::BTreeSet<usize>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     sustainer_divider_editor: crate::sustainer_divider_editor::Editor,
     sustainer_layout_cache: BTreeMap<String, crate::sustainer_dividers::Layout>,
@@ -191,7 +196,7 @@ pub struct App {
     debug_ui: bool,
     export_options: crate::export::Options,
     export_open: bool,
-    export_all_members: bool,
+    export_scope: workflow::ExportScope,
     colors_open: bool,
     export_rx: Option<Receiver<ExportResult>>,
     export_last: Option<PathBuf>,
@@ -277,13 +282,20 @@ impl App {
         let mut app = Self {
             members: Vec::new(),
             active_member: 0,
-            combination_view: false,
+            combination_view: !smoke,
             combination_gap: 0.,
             combination_move_source: None,
             combination_spec: None,
             exterior_edit: None,
             combination_view_state: None,
-            combination_layout_history: Vec::new(),
+            workflow_history: Default::default(),
+            member_edit_baseline: None,
+            global_colors: settings
+                .as_ref()
+                .map(|s| crate::print_plate::ColorTheme::from_config(&s.export.plate))
+                .unwrap_or_default(),
+            global_colors_draft: None,
+            member_selection: Default::default(),
             assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
                 AssemblyKind::Sustainer
             } else {
@@ -339,7 +351,7 @@ impl App {
                 .map(|s| s.export.clone())
                 .unwrap_or_default(),
             export_open: false,
-            export_all_members: false,
+            export_scope: workflow::ExportScope::All,
             colors_open: false,
             export_rx: None,
             export_last: None,
@@ -794,10 +806,12 @@ impl App {
                     self.catalog = c;
                     self.members.clear();
                     self.combination_move_source = None;
-                    self.combination_layout_history.clear();
+                    self.workflow_history.clear();
+                    self.member_edit_baseline = None;
+                    self.member_selection.clear();
                     self.combination_view_state = None;
                     self.active_member = 0;
-                    self.combination_view = false;
+                    self.combination_view = !self.smoke;
                     self.divider_layout = Default::default();
                     self.sustainer_dividers = Default::default();
                     self.sustainer_layout_cache.clear();
@@ -854,6 +868,12 @@ impl App {
                         && let Err(e) = self.save_settings()
                     {
                         self.status = e;
+                    }
+                    if !self.smoke {
+                        self.explosion = 0.;
+                        self.global_colors.apply(&mut self.export_options.plate);
+                        self.export_options.plate.follow_global_colors = true;
+                        self.ensure_members();
                     }
                     if self.catalog.stl_count() > 0
                         && self
@@ -1218,17 +1238,34 @@ impl App {
                     if ui
                         .add_enabled(
                             !self.bom.is_empty(),
-                            egui::Button::new(t(z, "配色", "Colors")),
+                            egui::Button::new(if self.combination_view {
+                                t(z, "整体配色", "Overall colors")
+                            } else {
+                                t(z, "成员配色", "Member colors")
+                            }),
                         )
                         .clicked()
                     {
                         if self.combination_view {
-                            self.focus_member(ctx);
+                            self.open_global_colors();
+                        } else {
+                            self.colors_open = true;
                         }
-                        self.colors_open = true;
                     }
-                    if ui.button(t(z, "导出", "Export")).clicked() {
-                        self.export_all_members = self.combination_view;
+                    if ui
+                        .add_enabled(
+                            !self.bom.is_empty(),
+                            egui::Button::new(t(z, "导出 3MF…", "Export 3MF…")),
+                        )
+                        .clicked()
+                    {
+                        self.commit_member();
+                        self.export_options.format = crate::export::Format::ThreeMf;
+                        self.export_scope = if self.combination_view {
+                            workflow::ExportScope::All
+                        } else {
+                            workflow::ExportScope::Current
+                        };
                         self.export_open = true;
                     }
                     if self.export_rx.is_some() {
@@ -1248,36 +1285,28 @@ impl App {
                 });
             });
             ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.bom.is_empty(),
-                        egui::Button::new(t(z, "整体装配", "Overall assembly"))
-                            .selected(self.combination_view),
-                    )
-                    .clicked()
-                {
-                    self.show_combination(ctx);
-                }
-                if ui
-                    .selectable_label(
-                        !self.combination_view,
-                        t(z, "单盒 / 单抽屉装配", "Box / drawer assembly"),
-                    )
-                    .clicked()
-                {
-                    if !self.members.is_empty() {
-                        self.focus_member(ctx);
-                    } else {
-                        self.assembly(ctx);
+            ui.horizontal_wrapped(|ui| {
+                if self.combination_view {
+                    ui.strong(t(z, "1 整体装配", "1 Overall assembly"));
+                    ui.label(t(
+                        z,
+                        "→ 2 配置盒子 / 抽屉 → 3 检查并导出 3MF",
+                        "→ 2 Configure member → 3 Review and export 3MF",
+                    ));
+                } else {
+                    if ui
+                        .button(t(z, "← 整体装配", "← Overall assembly"))
+                        .clicked()
+                    {
+                        self.show_combination(ctx);
                     }
-                }
-                if !self.members.is_empty() {
-                    ui.separator();
-                    ui.label(format!(
-                        "{}：{}",
-                        t(z, "当前成员", "Selected"),
-                        self.members[self.active_member].name
+                    if let Some(m) = self.members.get(self.active_member) {
+                        ui.strong(format!(" / {}", m.name));
+                    }
+                    ui.label(t(
+                        z,
+                        "修改保留在当前方案；保存方案写入磁盘。",
+                        "Edits stay in this project; Save preset writes to disk.",
                     ));
                 }
             });
@@ -1798,6 +1827,7 @@ impl App {
         }
     }
     fn selected_color_properties(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.commit_member();
         let Some(part) = self.selected.and_then(|i| self.scene.parts.get(i)) else {
             return;
         };
@@ -1861,7 +1891,7 @@ impl App {
                 let old_text = c.text_assignment(&path);
                 let mut text_choice = old_text;
                 ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut text_choice, 0, t(z, "跟随底板", "Match body"));
+                    ui.selectable_value(&mut text_choice, 0, t(z, "跟随文字默认色", "Default text color"));
                     for slot in 1..=6 {
                         let [r, g, b] = c.palette[(slot - 1) as usize];
                         let ink = if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
@@ -1917,6 +1947,10 @@ impl App {
         });
         ui.separator();
         if changed {
+            if self.combination_view {
+                self.push_workflow_snapshot(self.workflow_snapshot());
+            }
+            self.export_options.plate.follow_global_colors = false;
             if let Err(e) = self.save_settings() {
                 self.status = e;
             }
@@ -2552,6 +2586,7 @@ impl App {
     fn save_preset(&mut self) {
         self.commit_member();
         if let Err(e) = (CombinationPreset {
+            colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
             active_member: self.active_member,
@@ -2578,6 +2613,7 @@ impl App {
                 .check_destination(&path)
                 .and_then(|_| {
                     toml::to_string_pretty(&CombinationPreset {
+                        colors: self.global_colors.clone(),
                         preset: self.member_snapshot(),
                         members: self.members.clone(),
                         active_member: self.active_member,
@@ -2618,6 +2654,7 @@ impl App {
                         members,
                         active_member,
                         combination_gap,
+                        colors,
                     } = saved;
                     let p = members
                         .get(active_member)
@@ -2708,6 +2745,8 @@ impl App {
                         } else {
                             self.export_options.plate.part_filaments.clear();
                             self.export_options.plate.text_filaments.clear();
+                            self.export_options.plate.role_filaments.clear();
+                            self.export_options.plate.follow_global_colors = false;
                         }
                         self.selection = p.selection;
                         if self.assembly_kind != p.assembly_kind {
@@ -2737,13 +2776,18 @@ impl App {
                             .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
                             .count();
                         self.bom = next;
+                        self.global_colors = colors;
                         self.members = members;
                         self.combination_move_source = None;
-                        self.combination_layout_history.clear();
+                        self.workflow_history.clear();
+                        self.member_edit_baseline = None;
+                        self.member_selection.clear();
                         self.combination_view_state = None;
                         self.active_member = active_member;
                         self.combination_gap = combination_gap;
-                        self.combination_view = !self.members.is_empty();
+                        self.ensure_members();
+                        self.sync_global_colors();
+                        self.combination_view = true;
                         self.scene_key.clear();
                         self.assembly_view = None;
                         self.drawer_state = None;
@@ -3025,10 +3069,11 @@ impl App {
         if !self.colors_open {
             return;
         }
+        self.commit_member();
         let mut open = true;
         let z = self.zh;
         let mut changed = false;
-        egui::Window::new(t(z,"配色与分盘","Colors and plates")).id(egui::Id::new("print-colors"))
+        egui::Window::new(t(z,"当前成员配色","Current member colors")).id(egui::Id::new("print-colors"))
             .open(&mut open).default_width(570.).default_height(650.).vscroll(true).show(ctx,|ui| {
             ui.label(t(z,"编辑 6 个 Bambu PETG Basic 颜色槽；小盒和可拆标牌分别按同类型统一配色，其他零件的同源份数共用颜色。","Edit six Bambu PETG Basic slots. Bins and removable labels each share type colors; other source copies share colors."));
             ui.add_enabled_ui(self.export_rx.is_none(),|ui| {
@@ -3045,7 +3090,7 @@ impl App {
                     egui::ComboBox::from_id_salt("default-filament").selected_text(format!("{} · {}",c.filament,c.color_hex(c.filament))).show_ui(ui,|ui| {
                         for slot in 1..=6 {let name=format!("{slot} · {}",c.color_hex(slot));if ui.selectable_value(&mut c.filament,slot,name).changed(){changed=true;c.preview_colors=true;}}
                     });
-                    if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();changed=true;}
+                    if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();c.role_filaments.clear();changed=true;}
                 });
                 ui.separator();
                 let mut color_rows=std::collections::BTreeSet::new();
@@ -3077,6 +3122,10 @@ impl App {
         });
         self.colors_open = open;
         if changed {
+            if self.combination_view {
+                self.push_workflow_snapshot(self.workflow_snapshot());
+            }
+            self.export_options.plate.follow_global_colors = false;
             if let Err(e) = self.save_settings() {
                 self.status = e;
             }
@@ -3120,19 +3169,14 @@ impl App {
         let mut start = false;
         egui::Window::new(t(z,"导出","Export")).id(egui::Id::new("export-options"))
             .open(&mut open).resizable(true).vscroll(true).default_width(540.).default_height(680.).show(ctx,|ui|{
-                if !self.members.is_empty() {ui.checkbox(&mut self.export_all_members,t(z,"导出整个组合（按成员分文件夹 / 3MF）","Export all members (separate folders / 3MF files)"));}
-                if self.export_all_members {ui.label(t(z,"每个成员使用各自的打印清单、标签、配色及摆盘设置；输出到同一文件夹。","Each member uses its own print list, labels, colors and plate settings, in one output folder."));}
-                else {ui.label(t(z,"导出当前成员打印清单中勾选的零件，按份数生成。","Export checked items from the current member print list."));}
-                let combined:Vec<_>=self.members.iter().enumerate().flat_map(|(i,m)|if i==self.active_member {&self.bom}else{&m.preset.bom}).filter(|b|b.enabled).collect();
-                let selected:Vec<_>=if self.export_all_members {combined}else{self.bom.iter().filter(|b|b.enabled).collect()};
-                ui.label(format!("{} {} / {} {}",selected.len(),t(z,"种源文件","source files"),selected.iter().map(|b|b.qty).sum::<u32>(),t(z,"份","copies")));
+                let total = self.export_review_ui(ui);
                 ui.add_enabled_ui(self.export_rx.is_none(),|ui|{
                     for (format,label) in [
                         (crate::export::Format::Stl,t(z,"STL 文件夹（每份单独文件）","STL folder (one file per copy)")),
                         (crate::export::Format::ThreeMf,t(z,"3MF 工程（P1S 自动摆盘）","3MF project (P1S plate layout)")),
                     ] {ui.radio_value(&mut self.export_options.format,format,label);}
                     ui.separator();
-                    if self.export_options.format==crate::export::Format::ThreeMf && !self.export_all_members {
+                    if self.export_options.format==crate::export::Format::ThreeMf && self.export_scope == workflow::ExportScope::Current {
                         ui.strong("Bambu Lab P1S · 0.4 mm");
                         ui.small(t(z,"256 × 256 mm；参考配置限高 250 mm；自动避开左前禁放区与起始擦料线。","256 × 256 mm; profile height 250 mm; front-left keep-out and start purge lines reserved."));
                         let p=&mut self.export_options.plate;
@@ -3154,7 +3198,7 @@ impl App {
                         ui.checkbox(&mut p.module_clip_supports,t(z,"模块底部卡扣局部支撑","Local supports under module clips")).on_hover_text(t(z,"为识别到的标准 S/M/L Module 底部卡扣写入强制支撑涂绘，使用手动树状支撑；切片后生成，可在 Bambu Studio 修改。","Paint recognized lower clips of standard S/M/L modules with manual tree supports; generated on slicing and editable in Bambu Studio."));
                         ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。按上述朝向选项摆盘，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings and the orientation options above; unsliced. Review supports, filament and first layer in Bambu Studio."));
                     }
-                    if ui.add_enabled((!selected.is_empty() || self.export_all_members) && !self.busy && !self.preview.has_pending(),
+                    if ui.add_enabled((total > 0 && total <= 1000) && !self.busy && !self.preview.has_pending(),
                         egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
                 });
                 if self.export_rx.is_some() {ui.horizontal(|ui|{ui.spinner();ui.label(t(z,"正在后台导出…","Exporting in background…"));});}
@@ -3166,7 +3210,7 @@ impl App {
         }
     }
     fn start_export(&mut self, ctx: &egui::Context) {
-        if self.export_all_members && !self.members.is_empty() {
+        if self.export_scope != workflow::ExportScope::Current && !self.members.is_empty() {
             self.export_combination(ctx);
             return;
         }
@@ -3214,7 +3258,20 @@ impl App {
             self.status = e;
             return;
         }
-        let items = self.bom.clone();
+        let mut items = self.bom.clone();
+        if let Some(m) = self.members.get(self.active_member) {
+            match self.catalog.exterior_components(
+                &self.selection,
+                &m.exterior,
+                self.assembly_kind == AssemblyKind::Sustainer,
+            ) {
+                Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            }
+        }
         let root = self.catalog.root.clone();
         let options = self.export_options.clone();
         let label = self.label.clone();
@@ -3253,6 +3310,7 @@ impl eframe::App for App {
         self.divider_view(ctx);
         self.right(ctx);
         self.color_window(ctx);
+        self.global_colors_window(ctx);
         self.renderer.print_colors = self
             .export_options
             .plate

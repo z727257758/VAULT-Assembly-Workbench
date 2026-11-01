@@ -24,8 +24,10 @@ pub(super) struct Member {
     #[serde(default)]
     pub exterior: crate::catalog::exterior::Exterior,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct CombinationPreset {
+    #[serde(default)]
+    pub colors: crate::print_plate::ColorTheme,
     #[serde(flatten)]
     pub preset: Preset,
     #[serde(default)]
@@ -100,6 +102,7 @@ impl Preset {
 }
 impl CombinationPreset {
     pub fn validate(&self, catalog: &Catalog) -> Result<(), String> {
+        self.colors.validate()?;
         if self.members.len() > 64
             || !self.combination_gap.is_finite()
             || !(0. ..=100.).contains(&self.combination_gap)
@@ -204,11 +207,11 @@ impl App {
         self.scene_key.clear();
         self.explosion = 0.;
     }
-    fn ensure_members(&mut self) {
+    pub(super) fn ensure_members(&mut self) {
         if self.members.is_empty() {
             self.members.push(Member {
                 exterior: Default::default(),
-                name: "成员 1".into(),
+                name: format!("{} 1", self.assembly_kind.label(self.zh)),
                 placement: Default::default(),
                 preset: self.member_snapshot(),
             });
@@ -221,6 +224,7 @@ impl App {
         self.commit_member();
         self.ensure_members();
         if let Err(e) = (CombinationPreset {
+            colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
             active_member: self.active_member,
@@ -231,6 +235,7 @@ impl App {
             self.status = e;
             return;
         }
+        self.finish_member_edit();
         self.close_member_editors();
         self.combination_view = true;
         self.explosion = 0.;
@@ -280,27 +285,15 @@ impl App {
         self.tab = 0;
         self.commit_member();
         self.restore_member(self.active_member);
-        self.assembly(ctx);
-    }
-    fn refresh_layout(&mut self, ctx: &egui::Context) {
-        if !self.combination_view {
-            self.combination_view = true;
-            self.close_member_editors();
+        if self.member_edit_baseline.is_none() {
+            self.member_edit_baseline = Some(self.workflow_snapshot());
         }
         self.assembly(ctx);
-    }
-    fn undo_layout(&mut self, ctx: &egui::Context) {
-        if let Some(previous) = self.combination_layout_history.pop() {
-            for (member, placement) in self.members.iter_mut().zip(previous) {
-                member.placement = placement;
-            }
-            self.refresh_layout(ctx);
-        }
     }
     fn remove_member(&mut self, ctx: &egui::Context) {
         self.remove_members(&[self.active_member], ctx);
     }
-    fn remove_members(&mut self, indices: &[usize], ctx: &egui::Context) {
+    pub(super) fn remove_members(&mut self, indices: &[usize], ctx: &egui::Context) {
         if self.members.len() <= indices.len() {
             return;
         }
@@ -321,10 +314,11 @@ impl App {
             .active_member
             .saturating_sub(indices.iter().filter(|&&i| i < self.active_member).count())
             .min(candidate.len() - 1);
+        self.record_workflow();
         self.members = candidate;
         self.restore_member(selected);
         self.combination_view = true;
-        self.combination_layout_history.clear();
+        self.member_selection.clear();
         self.combination_move_source = None;
         self.assembly(ctx);
     }
@@ -341,6 +335,9 @@ impl App {
             preset.sustainer_angle = 0.;
             preset.sustainer_options = Default::default();
             preset.bom.clear();
+            let c = preset.print_config.get_or_insert_with(Default::default);
+            self.global_colors.apply(c);
+            c.follow_global_colors = true;
         }
         self.combination_spec = Some(SpecEdit {
             exterior: if kind.is_none() {
@@ -421,14 +418,17 @@ impl App {
             for (i, preset) in additions.into_iter().enumerate() {
                 next.push(Member {
                     exterior: draft.exterior.clone(),
-                    name: format!(
-                        "{} {}",
-                        if preset.assembly_kind == AssemblyKind::Sustainer {
-                            t(self.zh, "盒子", "Box")
-                        } else {
-                            t(self.zh, "抽屉", "Drawer")
-                        },
-                        next.len() + 1
+                    name: unique_member_name(
+                        &next,
+                        &format!(
+                            "{} {}",
+                            if preset.assembly_kind == AssemblyKind::Sustainer {
+                                t(self.zh, "盒子", "Box")
+                            } else {
+                                t(self.zh, "抽屉", "Drawer")
+                            },
+                            next.len() + 1
+                        ),
                     ),
                     placement: Placement {
                         column: i as u32,
@@ -457,10 +457,11 @@ impl App {
             return Err("最多 64 个成员 / Up to 64 members".into());
         }
         self.remember_combination_view();
+        self.record_workflow();
         self.members = next;
         self.restore_member(active);
         self.combination_view = true;
-        self.combination_layout_history.clear();
+        self.member_selection.clear();
         self.combination_move_source = None;
         self.combination_view_state = None;
         self.assembly(ctx);
@@ -621,6 +622,7 @@ impl App {
             {
                 self.show_combination(ctx);
             }
+            self.member_color_follow_ui(ui);
             ui.separator();
             return;
         }
@@ -650,39 +652,51 @@ impl App {
         ui.strong(t(z, "组合中的对象", "Objects"));
         let mut selected = None;
         for (i, m) in self.members.iter().enumerate() {
-            if ui
-                .selectable_label(
-                    i == self.active_member,
-                    format!(
-                        "{} · {}{} / {}",
-                        m.name,
-                        m.preset.selection.width,
-                        m.preset.selection.depth,
-                        m.preset.selection.height
-                    ),
-                )
-                .clicked()
-            {
-                selected = Some(i);
-            }
+            ui.horizontal(|ui| {
+                let mut checked = self.member_selection.contains(&i);
+                if ui
+                    .checkbox(&mut checked, "")
+                    .on_hover_text(t(z, "批量选择", "Select for batch actions"))
+                    .changed()
+                {
+                    if checked {
+                        self.member_selection.insert(i);
+                    } else {
+                        self.member_selection.remove(&i);
+                    }
+                }
+                if ui
+                    .selectable_label(
+                        i == self.active_member,
+                        format!(
+                            "{} · {}{} / {}",
+                            m.name,
+                            m.preset.selection.width,
+                            m.preset.selection.depth,
+                            m.preset.selection.height
+                        ),
+                    )
+                    .clicked()
+                {
+                    selected = Some(i);
+                }
+            });
         }
         if let Some(i) = selected {
             self.select_member_in_combination(i, ctx);
         }
         ui.separator();
         ui.label(t(z, "名称", "Name"));
-        ui.add(
-            egui::TextEdit::singleline(&mut self.members[self.active_member].name).char_limit(80),
-        );
+        let mut name = self.members[self.active_member].name.clone();
         if ui
-            .add_enabled(
-                !self.combination_layout_history.is_empty(),
-                egui::Button::new(t(z, "撤销移动", "Undo move")),
-            )
-            .clicked()
+            .add(egui::TextEdit::singleline(&mut name).char_limit(80))
+            .changed()
         {
-            self.undo_layout(ctx);
+            self.record_workflow();
+            self.members[self.active_member].name = name;
         }
+        self.workflow_undo_ui(ui, ctx);
+        self.batch_member_actions(ui, ctx);
         if ui
             .button(t(z, "安装 / 修改配件…", "Install / edit accessories…"))
             .clicked()
@@ -763,6 +777,7 @@ impl App {
             t(self.zh, "当前成员", "Selected member"),
             self.members[self.active_member].name
         ));
+        self.member_color_follow_ui(ui);
         ui.label(format!(
             "{} · {}{} / {}",
             self.assembly_kind.label(self.zh),
@@ -1026,6 +1041,7 @@ impl App {
     pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
         self.commit_member();
         let saved = CombinationPreset {
+            colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
             active_member: self.active_member,
@@ -1049,6 +1065,11 @@ impl App {
             self.status = e;
             return;
         }
+        let indices = self.export_indices();
+        if indices.is_empty() {
+            self.status = "请选择导出成员 / Select members to export".into();
+            return;
+        }
         let root = self.catalog.root.clone();
         let home = self.home.clone();
         let format = self.export_options.format;
@@ -1058,7 +1079,14 @@ impl App {
         self.status = t(self.zh, "正在后台导出组合…", "Exporting combination…").into();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(export_members(&root, &home, &target, format, &saved));
+            let _ = tx.send(export_members(
+                &root,
+                &home,
+                &target,
+                format,
+                &saved,
+                Some(&indices),
+            ));
             ctx.request_repaint();
         });
     }
@@ -1069,7 +1097,13 @@ fn export_members(
     target: &Path,
     format: crate::export::Format,
     saved: &CombinationPreset,
+    selection: Option<&[usize]>,
 ) -> Result<PathBuf, String> {
+    if selection.is_some_and(|ids| ids.is_empty() || ids.iter().any(|&i| i >= saved.members.len()))
+    {
+        return Err("无效的导出成员 / Invalid export members".into());
+    }
+    let included = |i: usize| selection.is_none_or(|ids| ids.contains(&i));
     let library = root.canonicalize().map_err(|e| e.to_string())?;
     let parent = target
         .parent()
@@ -1091,14 +1125,21 @@ fn export_members(
             )
         })
         .collect::<Result<_, _>>()?;
-    let total: u32 = extras.iter().flatten().map(|c| c.bom.qty).sum::<u32>()
-        + saved
-            .members
-            .iter()
-            .flat_map(|m| &m.preset.bom)
-            .filter(|b| b.enabled)
-            .map(|b| b.qty)
-            .sum::<u32>();
+    let total: u32 = saved
+        .members
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| included(*i))
+        .map(|(i, m)| {
+            extras[i].iter().map(|c| c.bom.qty).sum::<u32>()
+                + m.preset
+                    .bom
+                    .iter()
+                    .filter(|b| b.enabled)
+                    .map(|b| b.qty)
+                    .sum::<u32>()
+        })
+        .sum();
     if total == 0 || total > 1000 {
         return Err("组合单次导出需为 1–1000 份 / Export requires 1–1000 copies".into());
     }
@@ -1107,6 +1148,9 @@ fn export_members(
         .tempdir_in(parent)
         .map_err(|e| e.to_string())?;
     for (index, member) in saved.members.iter().enumerate() {
+        if !included(index) {
+            continue;
+        }
         let p = &member.preset;
         let mut items = p.bom.clone();
         items.extend(extras[index].iter().map(|c| c.bom.clone()));
@@ -1140,10 +1184,21 @@ fn export_members(
         )
         .map_err(|e| format!("{}: {e}", member.name))?;
     }
+    let manifest: Vec<_> = saved.members.iter().enumerate().filter(|(i,_)|included(*i)).map(|(i,m)|
+        serde_json::json!({"member_index":i+1,"name":m.name,"specification":format!("{}{}-{}",m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height)})
+    ).collect();
+    std::fs::write(
+        staging.path().join("exported-members.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let mut hardware = String::from(
         "整体配件五金清单 / Exterior hardware\n尺寸只包含预览零件；采购件按手册核对。\n",
     );
-    for m in &saved.members {
+    for (i, m) in saved.members.iter().enumerate() {
+        if !included(i) {
+            continue;
+        }
         hardware.push_str(&format!("\n{}\n", m.name));
         for h in m.exterior.hardware(&m.preset.selection) {
             hardware.push_str(&format!("{}\n", h.line()));
@@ -1334,6 +1389,38 @@ impl App {
                     return Err("Supporting lid is open".into());
                 }
             }
+            if [17, 19, 21].contains(&self.smoke_stage) && self.members.len() != 3 {
+                return Err("Workflow undo/redo member count failed".into());
+            }
+            if [18, 20].contains(&self.smoke_stage) && self.members.len() != 1 {
+                return Err("Workflow delete history failed".into());
+            }
+            if [27, 29].contains(&self.smoke_stage)
+                && (self.members.len() != 4
+                    || self.members[0].name == self.members[3].name
+                    || self.members[0].preset.label.text != self.members[3].preset.label.text)
+            {
+                return Err("Copy data or unique name failed".into());
+            }
+            if self.smoke_stage == 28 && self.members.len() != 3 {
+                return Err("Copy undo failed".into());
+            }
+            if self.smoke_stage == 24 {
+                let c = self.members[1].preset.print_config.as_ref().unwrap();
+                if c.slot(crate::label::PATH) != 2 || !c.follow_global_colors {
+                    return Err("Overall theme did not reach following member".into());
+                }
+            }
+            if self.smoke_stage == 26 {
+                let a = self.members[0].preset.print_config.as_ref().unwrap();
+                let b = self.members[1].preset.print_config.as_ref().unwrap();
+                if a.follow_global_colors
+                    || a.slot(crate::label::PATH) != 5
+                    || b.slot(crate::label::PATH) != 3
+                {
+                    return Err("Custom color override leaked or was overwritten".into());
+                }
+            }
             Ok(())
         })();
         if let Err(e) = result {
@@ -1410,7 +1497,7 @@ impl App {
                 self.restore_member(0);
                 self.combination_view_state = None;
                 self.combination_view = true;
-                self.combination_layout_history.clear();
+                self.member_selection.clear();
                 self.assembly(ctx);
             }
             10 | 12 => {
@@ -1427,13 +1514,62 @@ impl App {
                 self.combination_spec = None;
                 self.apply_spatial_move(1, 0, Side::Ground, ctx);
             }
-            15 => self.undo_layout(ctx),
+            15 => self.undo_workflow(ctx),
             16 => self.remove_members(&[1, 2], ctx),
+            17 => self.undo_workflow(ctx),
+            18 => self.remove_members(&[1, 2], ctx),
+            19 => self.undo_workflow(ctx),
+            20 => self.redo_workflow(ctx),
+            21 => self.undo_workflow(ctx),
+            22 => {
+                self.member_selection = (0..self.members.len()).collect();
+                self.batch_colors(true);
+                self.open_global_colors();
+            }
+            23 => {
+                let mut theme = self.global_colors_draft.take().unwrap();
+                theme.roles.insert("shell".into(), 4);
+                theme.roles.insert("label".into(), 2);
+                theme.roles.insert("text".into(), 1);
+                self.apply_global_theme(theme).unwrap();
+            }
+            24 => {
+                self.select_member_in_combination(0, ctx);
+            }
+            25 => {
+                self.export_options.plate.follow_global_colors = false;
+                self.export_options
+                    .plate
+                    .set_part_slot(crate::label::PATH, 5);
+                self.commit_member();
+                let mut theme = self.global_colors.clone();
+                theme.roles.insert("label".into(), 3);
+                self.apply_global_theme(theme).unwrap();
+            }
+            26 => {
+                self.member_selection = [1].into();
+                self.export_scope = workflow::ExportScope::Selected;
+                self.export_options.format = crate::export::Format::ThreeMf;
+                self.export_open = true;
+            }
+
+            27 => {
+                self.export_open = false;
+                self.select_member_in_combination(0, ctx);
+                self.add_member(None, false, ctx);
+                let draft = self.combination_spec.take().unwrap();
+                if let Err(e) = self.apply_member_spec(&draft, ctx) {
+                    let _ = std::fs::write(folder.join("combination-smoke-error.txt"), e);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            28 => self.undo_workflow(ctx),
+            29 => self.redo_workflow(ctx),
             _ => {
                 let _ = std::fs::write(
                     folder.join("combination-smoke-result.txt"),
                     format!(
-                        "PASS: two pages; single-member label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
+                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; two pages; single-member label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
                         self.renderer.state.adapter.get_info().name,
                         self.scene.parts.len()
                     ),
@@ -1541,6 +1677,16 @@ pub(super) fn retain_visibility(scene: &mut Scene, old: &Scene) {
             part.visible = value;
         }
     }
+}
+
+fn unique_member_name(members: &[Member], requested: &str) -> String {
+    if !members.iter().any(|m| m.name == requested) {
+        return requested.to_owned();
+    }
+    (2..)
+        .map(|i| format!("{requested} ({i})"))
+        .find(|name| !members.iter().any(|m| &m.name == name))
+        .unwrap()
 }
 
 #[cfg(test)]
@@ -1662,6 +1808,7 @@ mod tests {
             .unwrap()
             .set_part_slot(crate::label::PATH, 3);
         let project = CombinationPreset {
+            colors: Default::default(),
             preset: a.clone(),
             members: vec![
                 Member {
@@ -1739,6 +1886,7 @@ mod tests {
         let mut q = p.clone();
         q.bom[0].qty = 3;
         let saved = CombinationPreset {
+            colors: Default::default(),
             preset: p.clone(),
             members: vec![
                 Member {
@@ -1761,7 +1909,15 @@ mod tests {
             combination_gap: 0.,
         };
         let target = temp.path().join("export");
-        export_members(&library, &home, &target, crate::export::Format::Stl, &saved).unwrap();
+        export_members(
+            &library,
+            &home,
+            &target,
+            crate::export::Format::Stl,
+            &saved,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_dir(target.join("01-S3-1F")).unwrap().count(),
             2
@@ -1771,6 +1927,37 @@ mod tests {
             3
         );
         assert!(target.join("combination.toml").is_file());
+        let subset = temp.path().join("selected-export");
+        export_members(
+            &library,
+            &home,
+            &subset,
+            crate::export::Format::Stl,
+            &saved,
+            Some(&[1]),
+        )
+        .unwrap();
+        assert!(!subset.join("01-S3-1F").exists());
+        assert_eq!(
+            std::fs::read_dir(subset.join("02-S3-1F")).unwrap().count(),
+            3
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(subset.join("exported-members.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest.as_array().unwrap().len(), 1);
+        assert_eq!(manifest[0]["name"], "B");
+        assert!(
+            export_members(
+                &library,
+                &home,
+                &temp.path().join("empty"),
+                crate::export::Format::Stl,
+                &saved,
+                Some(&[])
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(library.join("test.stl")).unwrap(),
             source
@@ -1781,7 +1968,8 @@ mod tests {
                 &home,
                 &library.join("bad"),
                 crate::export::Format::Stl,
-                &saved
+                &saved,
+                None
             )
             .is_err()
         );

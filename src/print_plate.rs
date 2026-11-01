@@ -47,6 +47,8 @@ fn set_assignment(map: &mut std::collections::BTreeMap<String, u32>, path: &str,
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub follow_global_colors: bool,
+    pub role_filaments: std::collections::BTreeMap<String, u32>,
     pub margin: f32,
     pub brim: f32,
     pub gap: f32,
@@ -69,6 +71,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            follow_global_colors: false,
+            role_filaments: Default::default(),
             margin: 0.5,
             brim: 0.,
             gap: 6.,
@@ -133,6 +137,7 @@ impl Config {
                 .part_filaments
                 .values()
                 .chain(self.text_filaments.values())
+                .chain(self.role_filaments.values())
                 .any(|slot| !(1..=6).contains(slot))
         {
             return Err("无效的 P1S 打印或摆盘参数".into());
@@ -153,11 +158,17 @@ impl Config {
     }
     pub fn slot(&self, path: &str) -> u32 {
         assignment(&self.part_filaments, path)
+            .or_else(|| {
+                self.role_filaments
+                    .get(crate::catalog::colors::role(path))
+                    .copied()
+            })
             .unwrap_or(self.filament)
             .clamp(1, 6)
     }
     pub fn text_slot(&self, path: &str) -> u32 {
         assignment(&self.text_filaments, path)
+            .or_else(|| self.role_filaments.get("text").copied())
             .unwrap_or_else(|| self.slot(path))
             .clamp(1, 6)
     }
@@ -170,8 +181,7 @@ impl Config {
         format!("#{r:02X}{g:02X}{b:02X}")
     }
     pub fn color(&self, path: &str) -> [f32; 4] {
-        let [r, g, b] = self.palette[(self.slot(path) - 1) as usize];
-        [r as f32 / 255., g as f32 / 255., b as f32 / 255., 1.]
+        self.slot_color(self.slot(path))
     }
     pub fn project_json(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
@@ -217,6 +227,51 @@ impl Config {
         serde_json::to_vec_pretty(&d).map_err(|e| e.to_string())
     }
 }
+
+/// Color-only data: applying a theme must not overwrite plate or support settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorTheme {
+    pub palette: [[u8; 3]; 6],
+    pub filament: u32,
+    pub roles: std::collections::BTreeMap<String, u32>,
+}
+impl Default for ColorTheme {
+    fn default() -> Self {
+        Self::from_config(&Config::default())
+    }
+}
+impl ColorTheme {
+    pub fn from_config(c: &Config) -> Self {
+        Self {
+            palette: c.palette,
+            filament: c.filament,
+            roles: c.role_filaments.clone(),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=6).contains(&self.filament)
+            || self.roles.iter().any(|(key, slot)| {
+                !(1..=6).contains(slot)
+                    || !crate::catalog::colors::ROLES
+                        .iter()
+                        .any(|(role, _, _)| role == key)
+            })
+        {
+            return Err("无效的整体配色 / Invalid overall colors".into());
+        }
+        Ok(())
+    }
+    pub fn apply(&self, c: &mut Config) {
+        c.palette = self.palette;
+        c.filament = self.filament;
+        c.role_filaments = self.roles.clone();
+        c.part_filaments.clear();
+        c.text_filaments.clear();
+        c.preview_colors = true;
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Rect {
     x: f32,
@@ -1713,5 +1768,72 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod overall_color_tests {
+    use super::*;
+    #[test]
+    fn role_colors_cross_sizes_preserve_print_settings_and_allow_overrides() {
+        let theme = ColorTheme {
+            palette: [[10, 20, 30]; 6],
+            filament: 2,
+            roles: [
+                ("shell".into(), 3),
+                ("label".into(), 4),
+                ("text".into(), 5),
+                ("insert".into(), 6),
+            ]
+            .into(),
+        };
+        theme.validate().unwrap();
+        let mut c = Config {
+            margin: 4.,
+            gap: 8.,
+            layer: 0.16,
+            walls: 4,
+            infill: 25,
+            follow_global_colors: true,
+            ..Default::default()
+        };
+        c.set_part_slot("old.stl", 1);
+        theme.apply(&mut c);
+        assert_eq!(
+            (c.margin, c.gap, c.layer, c.walls, c.infill),
+            (4., 8., 0.16, 4, 25)
+        );
+        assert!(c.follow_global_colors);
+        for path in [
+            "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl",
+            "02. SUSTAINERS/02. M Families/M4/Modules/M4 1F Module.stl",
+            "02. SUSTAINERS/02. M Families/M4/Roof/M4 Roof.stl",
+        ] {
+            assert_eq!(c.slot(path), 3, "{path}");
+        }
+        assert_eq!(c.slot(crate::label::PATH), 4);
+        assert_eq!(c.slot(crate::label::SUSTAINER_PATH), 4);
+        assert_eq!(c.text_slot(crate::label::PATH), 5);
+        assert_eq!(c.slot("generated/gridfinity/Gridfinity-9.stl"), 6);
+        assert_eq!(c.slot("generated/gridfinity/Cullenect-9.stl"), 4);
+        c.set_part_slot(crate::label::PATH, 1);
+        c.set_text_slot(crate::label::PATH, 2);
+        assert_eq!(c.slot(crate::label::PATH), 1);
+        assert_eq!(c.text_slot(crate::label::PATH), 2);
+        let loaded: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert!(loaded.follow_global_colors);
+        assert_eq!(loaded.slot(crate::label::PATH), 1);
+        let legacy: Config = toml::from_str("filament = 3").unwrap();
+        assert!(!legacy.follow_global_colors);
+        assert_eq!(legacy.slot(crate::label::PATH), 3);
+    }
+    #[test]
+    fn invalid_global_color_rules_are_rejected() {
+        let mut c = ColorTheme::default();
+        c.roles.insert("shell".into(), 7);
+        assert!(c.validate().is_err());
+        c.roles.clear();
+        c.roles.insert("unknown".into(), 1);
+        assert!(c.validate().is_err());
     }
 }
