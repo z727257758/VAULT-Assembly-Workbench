@@ -140,7 +140,7 @@ pub struct App {
     active_member: usize,
     combination_view: bool,
     combination_gap: f32,
-    combination_drag: Option<usize>,
+    combination_move_source: Option<usize>,
     combination_spec: Option<combination::SpecEdit>,
     combination_view_state: Option<(Camera, f32, bool, bool)>,
     combination_layout_history: Vec<Vec<crate::scene::Placement>>,
@@ -276,7 +276,7 @@ impl App {
             active_member: 0,
             combination_view: false,
             combination_gap: 0.,
-            combination_drag: None,
+            combination_move_source: None,
             combination_spec: None,
             combination_view_state: None,
             combination_layout_history: Vec::new(),
@@ -789,7 +789,7 @@ impl App {
                     self.last_model_root = c.root.clone();
                     self.catalog = c;
                     self.members.clear();
-                    self.combination_drag = None;
+                    self.combination_move_source = None;
                     self.combination_layout_history.clear();
                     self.combination_view_state = None;
                     self.active_member = 0;
@@ -2296,25 +2296,28 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    if response.dragged_by(egui::PointerButton::Primary) {
+                    let spatial_input = self.combination_viewport_actions(ctx, rect);
+                    if !spatial_input && response.dragged_by(egui::PointerButton::Primary) {
                         let delta = ctx.input(|i| i.pointer.delta());
                         self.camera.yaw -= delta.x * 0.008;
                         self.camera.pitch =
                             (self.camera.pitch + delta.y * 0.008).clamp(-1.55, 1.55);
                     }
-                    if response.dragged_by(egui::PointerButton::Secondary)
-                        || response.dragged_by(egui::PointerButton::Middle)
+                    if !spatial_input
+                        && (response.dragged_by(egui::PointerButton::Secondary)
+                            || response.dragged_by(egui::PointerButton::Middle))
                     {
                         let d = ctx.input(|i| i.pointer.delta());
                         self.camera.pan[0] -= d.x / rect.width() * 2.;
                         self.camera.pan[1] += d.y / rect.height() * 2.;
                     }
-                    if response.hovered() {
+                    if !spatial_input && response.hovered() {
                         let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
                         self.camera.zoom =
                             (self.camera.zoom * (scroll * 0.002).exp()).clamp(0.05, 50.);
                     }
-                    if response.clicked()
+                    if !spatial_input
+                        && response.clicked()
                         && let Some(p) = response.interact_pointer_pos()
                     {
                         let (o, d) = self.camera.ray(p, rect);
@@ -2330,14 +2333,16 @@ impl App {
                             self.select_combination_part(index, ctx);
                         }
                     }
-                    if response.double_clicked()
+                    if !spatial_input
+                        && self.combination_move_source.is_none()
+                        && response.double_clicked()
                         && self.scene_key == "combination"
                         && !self.busy
                         && !self.preview.has_pending()
                         && self.selected.is_some()
                     {
                         self.focus_member(ctx);
-                    } else if response.double_clicked() {
+                    } else if !spatial_input && response.double_clicked() {
                         self.camera.fit(
                             &if self.interior_editor_open() {
                                 self.interior_scene()
@@ -2400,6 +2405,7 @@ impl App {
                     );
                     if self.scene_key == "combination" {
                         self.paint_active_member(ui, rect);
+                        self.paint_spatial_dimensions(ui, rect);
                     }
                     if self.export_options.plate.preview_colors
                         && self.scene_key != "combination"
@@ -2704,7 +2710,7 @@ impl App {
                             .count();
                         self.bom = next;
                         self.members = members;
-                        self.combination_drag = None;
+                        self.combination_move_source = None;
                         self.combination_layout_history.clear();
                         self.combination_view_state = None;
                         self.active_member = active_member;

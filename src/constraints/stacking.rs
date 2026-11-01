@@ -91,7 +91,7 @@ pub fn plan(modules: &[Module<'_>], gap: f32) -> Result<Layout, String> {
                 && left[j] < end
             {
                 return Err(format!(
-                    "{} 与 {} 在同层重叠，请移动到空列 / Same-level overlap",
+                    "{} 与 {} 在占用相同空间，请选择其他连接位置 / Occupied attachment space",
                     m.name, modules[j].name
                 ));
             }
@@ -111,7 +111,7 @@ pub fn plan(modules: &[Module<'_>], gap: f32) -> Result<Layout, String> {
         below.sort_by_key(|&j| left[j]);
         if below.is_empty() {
             return Err(format!(
-                "{} 下方没有支承，请先添加下层 / No support below",
+                "{} 下方没有支承，请先添加支承模块 / No support below",
                 m.name
             ));
         }

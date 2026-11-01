@@ -1,11 +1,13 @@
+mod spatial;
 use super::*;
 use crate::scene::Placement;
+use spatial::{Side, position_relative};
 
 pub(super) struct SpecEdit {
     target: Option<usize>,
     anchor: usize,
     preset: Preset,
-    above: bool,
+    side: Side,
     pattern: u8,
     clear_inserts: bool,
     error: String,
@@ -99,7 +101,7 @@ impl CombinationPreset {
                 || !slots.insert((member.placement.column, member.placement.level))
             {
                 return Err(
-                    "成员名称为空、过长或列层重复 / Invalid member name or duplicate position"
+                    "成员名称为空、过长或放置位置重复 / Invalid member name or duplicate position"
                         .into(),
                 );
             }
@@ -265,29 +267,6 @@ impl App {
         }
         self.assembly(ctx);
     }
-    fn relocate(&mut self, index: usize, column: u32, level: u32, ctx: &egui::Context) {
-        let before: Vec<_> = self.members.iter().map(|m| m.placement).collect();
-        let mut candidate = self.members.clone();
-        let result = relocate_member(&mut candidate, index, column, level).and_then(|changed| {
-            validate_layout(&candidate, self.combination_gap)?;
-            Ok(changed)
-        });
-        match result {
-            Ok(true) => {
-                self.members = candidate;
-                self.combination_layout_history.push(before);
-                if self.combination_layout_history.len() > 20 {
-                    self.combination_layout_history.remove(0);
-                }
-                if index != self.active_member {
-                    self.select_member_in_combination(index, ctx);
-                }
-                self.refresh_layout(ctx);
-            }
-            Ok(false) => {}
-            Err(e) => self.status = e,
-        }
-    }
     fn undo_layout(&mut self, ctx: &egui::Context) {
         if let Some(previous) = self.combination_layout_history.pop() {
             for (member, placement) in self.members.iter_mut().zip(previous) {
@@ -324,23 +303,8 @@ impl App {
         self.restore_member(selected);
         self.combination_view = true;
         self.combination_layout_history.clear();
-        self.combination_drag = None;
+        self.combination_move_source = None;
         self.assembly(ctx);
-    }
-    fn detach_pair(&mut self, indices: &[usize], ctx: &egui::Context) {
-        self.commit_member();
-        match detached_pair(&self.members, indices) {
-            Ok(candidate) => {
-                self.combination_layout_history
-                    .push(self.members.iter().map(|m| m.placement).collect());
-                if self.combination_layout_history.len() > 20 {
-                    self.combination_layout_history.remove(0);
-                }
-                self.members = candidate;
-                self.refresh_layout(ctx);
-            }
-            Err(e) => self.status = e,
-        }
     }
     fn add_member(&mut self, kind: Option<AssemblyKind>, above: bool, _ctx: &egui::Context) {
         self.commit_member();
@@ -360,7 +324,7 @@ impl App {
             target: None,
             anchor: self.active_member,
             preset,
-            above,
+            side: if above { Side::Above } else { Side::Right },
             pattern: 0,
             clear_inserts: false,
             error: String::new(),
@@ -373,7 +337,7 @@ impl App {
             target: Some(self.active_member),
             anchor: self.active_member,
             preset: self.members[self.active_member].preset.clone(),
-            above: false,
+            side: Side::Right,
             pattern: 0,
             clear_inserts: false,
             error: String::new(),
@@ -382,7 +346,7 @@ impl App {
     fn apply_member_spec(&mut self, draft: &SpecEdit, ctx: &egui::Context) -> Result<(), String> {
         self.commit_member();
         let mut next = self.members.clone();
-        let anchor = next
+        let _anchor = next
             .get(draft.anchor)
             .ok_or("成员已变更，请重新打开规格窗口 / Member changed")?
             .clone();
@@ -419,16 +383,6 @@ impl App {
                 p.selection.width = "S".into();
             }
             configure(&mut p)?;
-            let column = if draft.above {
-                anchor.placement.column
-            } else {
-                next.iter().map(|m| m.placement.column).max().unwrap_or(0) + 1
-            };
-            let level = if draft.above {
-                anchor.placement.level + 1
-            } else {
-                0
-            };
             active = next.len();
             let mut additions = vec![p.clone()];
             if draft.pattern != 0 {
@@ -448,24 +402,19 @@ impl App {
                         next.len() + 1
                     ),
                     placement: Placement {
-                        column: column + i as u32,
-                        level,
+                        column: i as u32,
+                        level: 0,
                         offset: [0.; 3],
                     },
                     preset,
                 });
             }
-            // A wide member can occupy multiple columns. Find the next valid ground slot.
-            if !draft.above {
-                for shift in 0..64 - column.min(63) {
-                    for (i, m) in next[active..].iter_mut().enumerate() {
-                        m.placement.column = column + shift + i as u32;
-                    }
-                    if validate_layout(&next, 0.).is_ok() {
-                        break;
-                    }
-                }
-            }
+            next = position_relative(
+                &next,
+                &(active..next.len()).collect::<Vec<_>>(),
+                draft.anchor,
+                draft.side,
+            )?;
         }
         validate_layout(&next, self.combination_gap)?;
         if next.len() > 64 {
@@ -476,7 +425,7 @@ impl App {
         self.restore_member(active);
         self.combination_view = true;
         self.combination_layout_history.clear();
-        self.combination_drag = None;
+        self.combination_move_source = None;
         self.combination_view_state = None;
         self.assembly(ctx);
         Ok(())
@@ -498,13 +447,18 @@ impl App {
             ui.separator();
             ui.label(draft.preset.assembly_kind.label(z));
             if draft.target.is_none() {
+                ui.label(format!(
+                    "{}：{}",
+                    t(z, "参照对象", "Relative to"),
+                    self.members
+                        .get(draft.anchor)
+                        .map(|m| m.name.as_str())
+                        .unwrap_or("?")
+                ));
                 ui.horizontal(|ui| {
-                    ui.radio_value(&mut draft.above, false, t(z, "并排添加", "Add beside"));
-                    ui.radio_value(
-                        &mut draft.above,
-                        true,
-                        t(z, "放到所选模块上方", "Above selected module"),
-                    );
+                    for side in [Side::Left, Side::Above, Side::Right] {
+                        ui.radio_value(&mut draft.side, side, side.label(z));
+                    }
                 });
                 egui::ComboBox::from_id_salt("add-pattern")
                     .selected_text(match draft.pattern {
@@ -637,174 +591,68 @@ impl App {
         if self.combination_spec.is_some() {
             ui.disable();
         }
-        ui.strong(t(z, "整体排列", "Overall layout"));
-        ui.small(t(
-            z,
-            "按说明书第 8 页检查堆叠规格与支承。",
-            "Stacking compatibility follows manual page 8.",
-        ));
+        ui.strong(t(z, "三维装配", "3D assembly"));
         if self.members.is_empty() {
             if ui
                 .add_enabled(
                     !self.bom.is_empty(),
-                    egui::Button::new(t(
-                        z,
-                        "创建组合（保留当前装配）",
-                        "Create combination from current assembly",
-                    )),
+                    egui::Button::new(t(z, "开始整体装配", "Start overall assembly")),
                 )
                 .clicked()
             {
                 self.show_combination(ctx);
             }
-            ui.separator();
             return;
         }
+        ui.label(t(
+            z,
+            "在预览中点击盒子或抽屉，通过模型旁的按钮添加或修改。",
+            "Select a box or drawer in the preview, then use its on-model controls.",
+        ));
+        ui.small(t(z,"左键拖动旋转，右键拖动平移；移动对象时点击目标，再选择对齐方向。","Drag to orbit; right-drag to pan. To move a member, pick its target and choose a direction."));
+        ui.separator();
+        ui.strong(t(z, "组合中的对象", "Objects"));
+        let mut selected = None;
+        for (i, m) in self.members.iter().enumerate() {
+            if ui
+                .selectable_label(
+                    i == self.active_member,
+                    format!(
+                        "{} · {}{} / {}",
+                        m.name,
+                        m.preset.selection.width,
+                        m.preset.selection.depth,
+                        m.preset.selection.height
+                    ),
+                )
+                .clicked()
+            {
+                selected = Some(i);
+            }
+        }
+        if let Some(i) = selected {
+            self.select_member_in_combination(i, ctx);
+        }
+        ui.separator();
+        ui.label(t(z, "名称", "Name"));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.members[self.active_member].name).char_limit(80),
+        );
+        if ui
+            .add_enabled(
+                !self.combination_layout_history.is_empty(),
+                egui::Button::new(t(z, "撤销移动", "Undo move")),
+            )
+            .clicked()
+        {
+            self.undo_layout(ctx);
+        }
+        self.combination_dimensions(ui);
         ui.small(t(
             z,
-            "单击选择，双击编辑；拖动卡片移动 / 交换。",
-            "Click to select, double-click to edit; drag to move / swap.",
+            "堆叠规格按原说明书检查；接口啮合尚未实物验证。",
+            "Stacking specifications follow the manual; physical engagement is unverified.",
         ));
-        let action = layout_map(
-            ui,
-            &self.members,
-            self.active_member,
-            &mut self.combination_drag,
-            z,
-        );
-        if let Some(action) = action {
-            match action {
-                LayoutAction::Select(index) => {
-                    if self.combination_view {
-                        self.select_member_in_combination(index, ctx);
-                    } else {
-                        self.commit_member();
-                        self.restore_member(index);
-                        self.assembly(ctx);
-                    }
-                }
-                LayoutAction::Move(index, column, level) => {
-                    self.relocate(index, column, level, ctx)
-                }
-                LayoutAction::Edit(index) => {
-                    self.select_member_in_combination(index, ctx);
-                    self.focus_member(ctx);
-                    return;
-                }
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(self.members.len() < 64, |ui| {
-                if ui.button(t(z, "＋抽屉", "+ Drawer")).clicked() {
-                    self.add_member(Some(AssemblyKind::Drawer), false, ctx);
-                }
-                if ui.button(t(z, "＋盒子", "+ Box")).clicked() {
-                    self.add_member(Some(AssemblyKind::Sustainer), false, ctx);
-                }
-                if ui.button(t(z, "修改尺寸…", "Change size…")).clicked() {
-                    self.edit_member_size();
-                }
-                ui.menu_button(t(z, "复制…", "Copy…"), |ui| {
-                    if ui.button(t(z, "复制到右侧", "Copy beside")).clicked() {
-                        self.add_member(None, false, ctx);
-                        ui.close();
-                    }
-                    if ui.button(t(z, "复制到上方", "Copy above")).clicked() {
-                        self.add_member(None, true, ctx);
-                        ui.close();
-                    }
-                });
-            });
-            if ui
-                .add_enabled(
-                    self.members.len() > 1,
-                    egui::Button::new(t(z, "删除", "Remove")),
-                )
-                .clicked()
-            {
-                self.remove_member(ctx);
-            }
-            if ui
-                .add_enabled(
-                    !self.combination_layout_history.is_empty(),
-                    egui::Button::new(t(z, "撤销移动", "Undo move")),
-                )
-                .clicked()
-            {
-                self.undo_layout(ctx);
-            }
-        });
-        let pair = paired_members(&self.members, self.active_member);
-        if pair.len() == 2 {
-            ui.menu_button(
-                t(z, "成对操作（2 个成员）…", "Pair actions (2 members)…"),
-                |ui| {
-                    if ui
-                        .button(t(z, "成对移到右侧底层", "Move pair to ground at right"))
-                        .clicked()
-                    {
-                        self.detach_pair(&pair, ctx);
-                        ui.close();
-                    }
-                    if ui
-                        .button(t(z, "删除这对成员", "Remove both members"))
-                        .clicked()
-                    {
-                        self.remove_members(&pair, ctx);
-                        ui.close();
-                    }
-                },
-            );
-        }
-        let mut target = None;
-        let selected = self.members[self.active_member].placement;
-        ui.horizontal(|ui| {
-            ui.label(t(z, "移动", "Move"));
-            for (label, dx, dy) in [("←", -1, 0), ("→", 1, 0), ("↑", 0, 1), ("↓", 0, -1)] {
-                let col = selected.column as i32 + dx;
-                let level = selected.level as i32 + dy;
-                if ui
-                    .add_enabled(
-                        (0..64).contains(&col) && (0..64).contains(&level),
-                        egui::Button::new(label),
-                    )
-                    .clicked()
-                {
-                    target = Some((col as u32, level as u32));
-                }
-            }
-        });
-        if let Some((column, level)) = target {
-            self.relocate(self.active_member, column, level, ctx);
-        }
-        let current = self.members[self.active_member].placement;
-        let mut requested = (current.column, current.level);
-        egui::CollapsingHeader::new(t(z, "名称 / 列层位置", "Name / column and level")).show(
-            ui,
-            |ui| {
-                let member = &mut self.members[self.active_member];
-                ui.horizontal(|ui| {
-                    ui.label(t(z, "名称", "Name"));
-                    ui.add(egui::TextEdit::singleline(&mut member.name).char_limit(80));
-                });
-                let (mut column, mut level) =
-                    (member.placement.column + 1, member.placement.level + 1);
-                ui.horizontal(|ui| {
-                    ui.label(t(z, "列 / 层", "Column / level"));
-                    ui.add(egui::DragValue::new(&mut column).range(1..=64));
-                    ui.add(egui::DragValue::new(&mut level).range(1..=64));
-                });
-                requested = (column - 1, level - 1);
-            },
-        );
-        if requested
-            != (
-                self.members[self.active_member].placement.column,
-                self.members[self.active_member].placement.level,
-            )
-        {
-            self.relocate(self.active_member, requested.0, requested.1, ctx);
-        }
         ui.separator();
     }
     pub(super) fn combination_summary(&mut self, ui: &mut egui::Ui) {
@@ -945,55 +793,35 @@ impl App {
         ));
     }
     pub(super) fn paint_active_member(&self, ui: &egui::Ui, rect: egui::Rect) {
+        let Some(&(lo, hi)) = self.scene.member_bounds.get(self.active_member) else {
+            return;
+        };
+        if self.explosion > 0.001 {
+            return;
+        }
+        let matrix = self.camera.matrix(rect.aspect_ratio());
         let mut bounds = egui::Rect::NOTHING;
-        for p in
-            self.scene.parts.iter().filter(|p| {
-                p.visible && p.pose.instance / MEMBER_STRIDE == self.active_member as u32
-            })
-        {
-            let matrix = self.camera.matrix(rect.aspect_ratio()) * p.pose.matrix(self.explosion);
-            for i in 0..8 {
-                let v = glam::Vec3::new(
-                    if i & 1 == 0 {
-                        p.mesh.min.x
-                    } else {
-                        p.mesh.max.x
-                    },
-                    if i & 2 == 0 {
-                        p.mesh.min.y
-                    } else {
-                        p.mesh.max.y
-                    },
-                    if i & 4 == 0 {
-                        p.mesh.min.z
-                    } else {
-                        p.mesh.max.z
-                    },
-                );
-                let ndc = matrix.project_point3(v);
-                if ndc.is_finite() && (0. ..=1.).contains(&ndc.z) {
-                    bounds.extend_with(egui::pos2(
-                        rect.center().x + ndc.x * rect.width() * 0.5,
-                        rect.center().y - ndc.y * rect.height() * 0.5,
-                    ));
-                }
+        for i in 0..8 {
+            let p = glam::Vec3::new(
+                if i & 1 == 0 { lo.x } else { hi.x },
+                if i & 2 == 0 { lo.y } else { hi.y },
+                if i & 4 == 0 { lo.z } else { hi.z },
+            );
+            let v = matrix.project_point3(p);
+            if v.is_finite() && (0. ..=1.).contains(&v.z) {
+                bounds.extend_with(egui::pos2(
+                    rect.center().x + v.x * rect.width() * 0.5,
+                    rect.center().y - v.y * rect.height() * 0.5,
+                ));
             }
         }
         if bounds.is_finite() && bounds.intersects(rect) {
             let painter = ui.painter().with_clip_rect(rect);
-            let bounds = bounds.expand(5.);
             painter.rect_stroke(
-                bounds,
+                bounds.expand(5.),
                 5.,
                 egui::Stroke::new(1.5, Color32::LIGHT_BLUE),
                 egui::StrokeKind::Outside,
-            );
-            painter.text(
-                bounds.left_top() - egui::vec2(0., 5.),
-                egui::Align2::LEFT_BOTTOM,
-                &self.members[self.active_member].name,
-                egui::FontId::proportional(13.),
-                Color32::LIGHT_BLUE,
             );
         }
     }
@@ -1365,7 +1193,7 @@ impl App {
             {
                 return Err("Add/remove failed".into());
             }
-            if [10, 12, 13].contains(&self.smoke_stage) {
+            if [10, 12, 13, 15].contains(&self.smoke_stage) {
                 validate_layout(&self.members, self.combination_gap)?;
                 if self.members.len() != 3 || self.members[0].preset.sustainer_angle != 65. {
                     return Err("Pair addition or saved lid state failed".into());
@@ -1402,7 +1230,7 @@ impl App {
                 self.assembly(ctx);
             }
             4 => self.show_combination(ctx),
-            5 => self.relocate(2, 1, 0, ctx),
+            5 => self.apply_spatial_move(2, 1, Side::Above, ctx),
             6 => {
                 self.edit_member_size();
                 let mut draft = self.combination_spec.take().unwrap();
@@ -1423,6 +1251,7 @@ impl App {
                 }
             }
             7 => {
+                self.select_member_in_combination(1, ctx);
                 self.add_member(Some(AssemblyKind::Sustainer), false, ctx);
                 let draft = self.combination_spec.take().unwrap();
                 if let Err(e) = self.apply_member_spec(&draft, ctx) {
@@ -1463,11 +1292,17 @@ impl App {
                 }
             }
             13 => self.edit_member_size(),
+            14 => {
+                self.combination_spec = None;
+                self.apply_spatial_move(1, 0, Side::Ground, ctx);
+            }
+            15 => self.undo_layout(ctx),
+            16 => self.remove_members(&[1, 2], ctx),
             _ => {
                 let _ = std::fs::write(
                     folder.join("combination-smoke-result.txt"),
                     format!(
-                        "PASS: two pages; single-member label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog. GPU: {}. Parts: {}",
+                        "PASS: two pages; single-member label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
                         self.renderer.state.adapter.get_info().name,
                         self.scene.parts.len()
                     ),
@@ -1506,6 +1341,7 @@ fn paired_members(members: &[Member], index: usize) -> Vec<usize> {
         .cloned()
         .unwrap_or_default()
 }
+#[cfg(test)]
 fn detached_pair(members: &[Member], indices: &[usize]) -> Result<Vec<Member>, String> {
     if indices.len() != 2 || indices.iter().any(|&i| i >= members.len()) {
         return Err("无效配对 / Invalid pair".into());
@@ -1533,6 +1369,7 @@ fn detached_pair(members: &[Member], indices: &[usize]) -> Result<Vec<Member>, S
 }
 
 /// Only layout coordinates change; each member keeps its own configuration and fine offset.
+#[cfg(test)]
 fn relocate_member(
     members: &mut [Member],
     index: usize,
@@ -1560,137 +1397,6 @@ fn relocate_member(
     members[index].placement.column = column;
     members[index].placement.level = level;
     Ok(true)
-}
-#[derive(Debug, PartialEq, Eq)]
-enum LayoutAction {
-    Select(usize),
-    Edit(usize),
-    Move(usize, u32, u32),
-}
-fn layout_map(
-    ui: &mut egui::Ui,
-    members: &[Member],
-    active: usize,
-    dragged: &mut Option<usize>,
-    zh: bool,
-) -> Option<LayoutAction> {
-    let mut columns: std::collections::BTreeSet<_> =
-        members.iter().map(|m| m.placement.column).collect();
-    let mut levels: std::collections::BTreeSet<_> =
-        members.iter().map(|m| m.placement.level).collect();
-    if let Some(&column) = columns.last()
-        && column < 63
-    {
-        columns.insert(column + 1);
-    }
-    if let Some(&level) = levels.last()
-        && level < 63
-    {
-        levels.insert(level + 1);
-    }
-    let position = members
-        .get(active)
-        .map(|m| (active, m.placement.column, m.placement.level, members.len()));
-    let key = ui.make_persistent_id("combination-map-reveal");
-    let reveal = ui.data_mut(|data| {
-        let previous = data
-            .get_temp::<Option<(usize, u32, u32, usize)>>(key)
-            .flatten();
-        data.insert_temp(key, position);
-        previous != position
-    });
-    let mut action = None;
-    let released = ui.input(|i| i.pointer.any_released());
-    if ui.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked()) {
-        *dragged = None;
-    }
-    egui::ScrollArea::both()
-        .id_salt("combination-layout-map")
-        .max_height(240.)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            egui::Grid::new("combination-layout-cells")
-                .spacing([4., 4.])
-                .show(ui, |ui| {
-                    ui.label("");
-                    for col in &columns {
-                        ui.small(format!("{} {}", t(zh, "列", "Column"), col + 1));
-                    }
-                    ui.end_row();
-                    for &level in levels.iter().rev() {
-                        ui.small(format!("{} {}", t(zh, "层", "Level"), level + 1));
-                        for &column in &columns {
-                            let member = members.iter().position(|m| {
-                                m.placement.column == column && m.placement.level == level
-                            });
-                            let text = member
-                                .map(|index| {
-                                    let m = &members[index];
-                                    format!(
-                                        "{}\n{}{} / {}",
-                                        m.name,
-                                        m.preset.selection.width,
-                                        m.preset.selection.depth,
-                                        m.preset.selection.height
-                                    )
-                                })
-                                .unwrap_or_else(|| t(zh, "空位", "Empty").into());
-                            let fill = if member == Some(active) {
-                                Color32::from_rgb(35, 87, 115)
-                            } else if member.is_some() {
-                                Color32::from_rgb(40, 48, 59)
-                            } else {
-                                Color32::from_rgb(25, 30, 37)
-                            };
-                            let response = ui.add_sized(
-                                [96., 52.],
-                                egui::Button::new(text)
-                                    .fill(fill)
-                                    .sense(egui::Sense::click_and_drag()),
-                            );
-                            if reveal && member == Some(active) && dragged.is_none() {
-                                response.scroll_to_me(Some(egui::Align::Center));
-                            }
-                            if let Some(index) = member {
-                                if response.double_clicked() {
-                                    action = Some(LayoutAction::Edit(index));
-                                } else if response.clicked() {
-                                    action = Some(LayoutAction::Select(index));
-                                }
-                                if response.drag_started() {
-                                    *dragged = Some(index);
-                                }
-                            }
-                            let hovered = ui.input(|i| {
-                                i.pointer.interact_pos().is_some_and(|p| {
-                                    response.rect.contains(p) && ui.clip_rect().contains(p)
-                                })
-                            });
-                            if hovered && let Some(index) = *dragged {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    3.,
-                                    egui::Stroke::new(2., Color32::LIGHT_GREEN),
-                                    egui::StrokeKind::Inside,
-                                );
-                                if released {
-                                    action = Some(LayoutAction::Move(index, column, level));
-                                }
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
-    if released {
-        *dragged = None;
-    }
-    ui.small(t(
-        zh,
-        "排列示意，非尺寸比例；宽模块可跨列，堆叠必须连续。",
-        "Not to scale; wide modules span columns; stack levels must be continuous.",
-    ));
-    action
 }
 pub(super) fn retain_visibility(scene: &mut Scene, old: &Scene) {
     let visible: HashMap<_, _> = old
@@ -1757,86 +1463,6 @@ mod tests {
         assert!(relocate_member(&mut members, 0, 0, 1).unwrap());
         assert_eq!(members[0].placement.level, 1);
         assert!(!relocate_member(&mut members, 0, 0, 1).unwrap());
-    }
-    #[test]
-    fn layout_map_pointer_selection_drag_swap_and_outside_cancel() {
-        let ctx = egui::Context::default();
-        let members = members();
-        let mut dragged = None;
-        let mut time = 0.;
-        let mut frame = |events: Vec<egui::Event>| {
-            time += 0.05;
-            let mut action = None;
-            let output = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(600., 400.),
-                    )),
-                    time: Some(time),
-                    events,
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        action = layout_map(ui, &members, 0, &mut dragged, false);
-                    });
-                },
-            );
-            let mut centers = HashMap::new();
-            for clipped in output.shapes {
-                if let egui::Shape::Text(text) = clipped.shape {
-                    let value = text.galley.text();
-                    for name in ["Alpha", "Beta"] {
-                        if value.starts_with(name) {
-                            centers.insert(
-                                name,
-                                egui::Rect::from_min_size(text.pos, text.galley.size()).center(),
-                            );
-                        }
-                    }
-                }
-            }
-            (action, centers)
-        };
-        for _ in 0..3 {
-            frame(vec![]);
-        }
-        let (_, centers) = frame(vec![]);
-        let a = centers["Alpha"];
-        let b = centers["Beta"];
-        let button = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        frame(vec![egui::Event::PointerMoved(b), button(b, true)]);
-        assert_eq!(
-            frame(vec![button(b, false)]).0,
-            Some(LayoutAction::Select(1))
-        );
-        frame(vec![egui::Event::PointerMoved(a), button(a, true)]);
-        frame(vec![egui::Event::PointerMoved(b)]);
-        assert_eq!(
-            frame(vec![button(b, false)]).0,
-            Some(LayoutAction::Move(0, 1, 0))
-        );
-        let outside = egui::pos2(550., 350.);
-        frame(vec![egui::Event::PointerMoved(a), button(a, true)]);
-        frame(vec![egui::Event::PointerMoved(outside)]);
-        assert_eq!(frame(vec![button(outside, false)]).0, None);
-        // A fresh click after the canceled drag is a selection, not a stale drop.
-        for _ in 0..10 {
-            frame(vec![]);
-        }
-        frame(vec![egui::Event::PointerMoved(b), button(b, true)]);
-        assert_eq!(
-            frame(vec![button(b, false)]).0,
-            Some(LayoutAction::Select(1))
-        );
-        frame(vec![button(b, true)]);
-        assert_eq!(frame(vec![button(b, false)]).0, Some(LayoutAction::Edit(1)));
     }
     #[test]
     fn supported_pairs_can_be_detached_and_removed_without_losing_configuration() {

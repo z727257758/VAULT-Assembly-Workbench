@@ -47,6 +47,8 @@ pub struct Part {
 }
 #[derive(Clone, Default)]
 pub struct Scene {
+    /// Closed, world-axis envelopes measured from actual vertices on the worker.
+    pub member_bounds: Vec<(Vec3, Vec3)>,
     pub sustainer_interior: Option<Box<crate::sustainer_dividers::Geometry>>,
     pub title: String,
     pub parts: Vec<Part>,
@@ -263,6 +265,7 @@ impl Scene {
             return Err("No enabled model files".into());
         }
         let mut scene = Self {
+            member_bounds: Vec::new(),
             sustainer_interior: None,
             title,
             parts,
@@ -712,6 +715,14 @@ impl Scene {
                     -hi.z,
                 ) + Vec3::from(placement.offset)
             });
+            let mut closed_lo = Vec3::splat(f32::INFINITY);
+            let mut closed_hi = Vec3::splat(f32::NEG_INFINITY);
+            for part in &scene.parts {
+                let (lo, hi) = crate::constraints::world_bounds(part);
+                closed_lo = closed_lo.min(lo + shift);
+                closed_hi = closed_hi.max(hi + shift);
+            }
+            result.member_bounds.push((closed_lo, closed_hi));
             if crate::sustainer::lid_angle(&scene).is_some() {
                 crate::sustainer::set_lid_angle(&mut scene, angle)?;
             }
@@ -730,6 +741,38 @@ impl Scene {
 #[cfg(test)]
 mod combination_tests {
     use super::*;
+    #[test]
+    fn displayed_dimensions_measure_rotated_vertices_instead_of_rotated_aabb() {
+        let mut source = unit_scene();
+        source.parts.truncate(1);
+        source.relations.clear();
+        source.mating_checks.clear();
+        source.parts[0].mesh = Arc::new(Mesh {
+            vertices: [[0., 0., 0.], [10., 0., 0.], [0., 10., 0.]]
+                .into_iter()
+                .map(|position| crate::mesh::Vertex {
+                    position,
+                    normal: [0., 0., 1.],
+                    shade: 1.,
+                })
+                .collect(),
+            min: Vec3::ZERO,
+            max: Vec3::new(10., 10., 0.),
+            size: Vec3::new(10., 10., 0.),
+        });
+        source.parts[0].pose.rotation = [0., 0., 45.];
+        let shift = Vec3::new(20., 30., 40.);
+        let combined = Scene::combine_positioned(
+            vec![(source, Placement::default(), 0.)],
+            0.,
+            Some(vec![shift]),
+        )
+        .unwrap();
+        let (lo, hi) = combined.member_bounds[0];
+        let expected = 10. / 2f32.sqrt();
+        assert!((lo - Vec3::new(20. - expected, 30., 40.)).length() < 0.001);
+        assert!((hi - Vec3::new(20. + expected, 30. + expected, 40.)).length() < 0.001);
+    }
     fn unit_scene() -> Scene {
         let mesh = Arc::new(Mesh {
             vertices: vec![],
