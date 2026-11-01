@@ -1471,63 +1471,375 @@ pub fn set_lid_angle(scene: &mut Scene, value: f32) -> Result<(), String> {
         }
         return Err(e);
     }
-    Ok(())
+    reset_explosion(scene)
+}
+// Bounding projections provide display spacing only, not a surface-interference check.
+fn explosion_projection(part: &Part, axis: Vec3) -> (f32, f32) {
+    let frame = part.pose.matrix(0.);
+    let center = frame
+        .transform_point3((part.mesh.min + part.mesh.max) * 0.5)
+        .dot(axis);
+    let half = (part.mesh.max - part.mesh.min) * 0.5;
+    let local_axis = frame.inverse().transform_vector3(axis).abs();
+    let extent = half.dot(local_axis);
+    (center - extent, center + extent)
+}
+// Rotated print orientations make a roof's source bounding box much taller
+// than the assembled lid. Use its mesh edges for compact vertical spacing.
+fn explosion_mesh_projection(part: &Part, axis: Vec3) -> (f32, f32) {
+    let frame = part.pose.matrix(0.);
+    let local_axis = frame.inverse().transform_vector3(axis);
+    let origin = frame.transform_point3(Vec3::ZERO).dot(axis);
+    part.mesh
+        .vertices
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), vertex| {
+            let value = Vec3::from(vertex.position).dot(local_axis) + origin;
+            (lo.min(value), hi.max(value))
+        })
+}
+fn explosion_check<'a>(scene: &'a Scene, index: usize, label: &str) -> Option<&'a MateCheck> {
+    let id = constraints::PartId::of(&scene.parts[index]);
+    scene
+        .mating_checks
+        .iter()
+        .find(|check| check.child == id && check.label.contains(label))
+}
+fn explosion_axis(scene: &Scene, index: usize, label: &str, fallback: Vec3) -> Vec3 {
+    explosion_check(scene, index, label).map_or(fallback, |check| {
+        scene.parts[index]
+            .pose
+            .matrix(0.)
+            .transform_vector3(Vec3::from(check.child_axis))
+            .normalize()
+    })
 }
 pub fn reset_explosion(scene: &mut Scene) -> Result<(), String> {
     use constraints::PartId;
-    let mut travel = BTreeMap::<usize, Vec3>::new();
-    for i in 0..scene.parts.len() {
-        if !scene
-            .relations
+    let facade = *indices(scene, "Facade.stl")
+        .first()
+        .ok_or("Sustainer facade missing")?;
+    let module = *indices(scene, "/Modules/")
+        .first()
+        .ok_or("Sustainer module missing")?;
+    // Facade mesh +Y faces out, +Z faces up in the assembled frame.
+    let front = scene.parts[facade]
+        .pose
+        .matrix(0.)
+        .transform_vector3(Vec3::Y)
+        .normalize();
+    let up = scene.parts[facade]
+        .pose
+        .matrix(0.)
+        .transform_vector3(Vec3::Z)
+        .normalize();
+    let right = up.cross(front).normalize();
+    let ids: Vec<_> = scene.parts.iter().map(PartId::of).collect();
+    let mut parents = vec![None; ids.len()];
+    for relation in &scene.relations {
+        let parent = ids
             .iter()
-            .any(|r| r.child == PartId::of(&scene.parts[i]))
-        {
-            travel.insert(i, Vec3::ZERO);
+            .position(|id| id == &relation.parent)
+            .ok_or("Missing explosion parent")?;
+        let child = ids
+            .iter()
+            .position(|id| id == &relation.child)
+            .ok_or("Missing explosion child")?;
+        if parent == child || parents[child].replace(parent).is_some() {
+            return Err("Invalid Sustainer explosion hierarchy".into());
         }
     }
-    for _ in 0..scene.parts.len() {
-        for i in 0..scene.parts.len() {
-            if travel.contains_key(&i) {
+    // In the exploded view, place the removable lock links outside the facade.
+    // The holder stays inside; the solving graph and assembled poses are unchanged.
+    for relation in scene.relations.iter().filter(|r| r.label == LOCK_INNER) {
+        let child = ids
+            .iter()
+            .position(|id| id == &relation.child)
+            .ok_or("Missing inner lock")?;
+        parents[child] = Some(facade);
+    }
+    // Pins visually follow the bearing they pass through. Their solving parent
+    // can instead be the stationary link, which is correct for lid motion.
+    for (i, parent) in parents.iter_mut().enumerate() {
+        if scene.parts[i].pose.path.contains("/1 SET OF PINS")
+            && let Some(check) = explosion_check(scene, i, "pin insertion face")
+        {
+            *parent = Some(
+                ids.iter()
+                    .position(|id| id == &check.parent)
+                    .ok_or("Missing pin bearing")?,
+            );
+        }
+    }
+    let mut travel = vec![None; ids.len()];
+    for _ in 0..ids.len() {
+        for (i, p) in scene.parts.iter().enumerate() {
+            if travel[i].is_some() {
                 continue;
             }
-            let Some(r) = scene
+            let Some(parent) = parents[i] else {
+                travel[i] = Some(Vec3::ZERO);
+                continue;
+            };
+            let Some(base) = travel[parent] else {
+                continue;
+            };
+            let name = &p.pose.path;
+            let relation = scene
                 .relations
                 .iter()
-                .find(|r| r.child == PartId::of(&scene.parts[i]))
-            else {
-                continue;
-            };
-            let Some(parent) = scene.parts.iter().position(|p| PartId::of(p) == r.parent) else {
-                return Err("Missing explosion parent".into());
-            };
-            let Some(&base) = travel.get(&parent) else {
-                continue;
-            };
-            let p = &scene.parts[i];
-            let name = &p.pose.path;
-            let own = if r.label == LID {
-                Vec3::Y * 100.
-            } else if name.contains("Facade.stl") {
-                Vec3::Z * 90.
-            } else if name.contains("/Hinges/") {
-                Vec3::Y * 35.
-            } else if name.contains("/Rods/") {
-                Vec3::X * if p.pose.body == Some(0) { -90. } else { 90. }
+                .find(|r| r.child == ids[i])
+                .ok_or("Missing explosion relation")?;
+            let own = if relation.label == LID || name.contains("/Hinges/") {
+                // Set the common vertical layers after all axial offsets exist.
+                Vec3::ZERO
+            } else if i == facade {
+                front * 90.
+            } else if name.contains("/Rods/") || name.contains("/1 SET OF PINS") {
+                let label = if name.contains("/Rods/") {
+                    "rod rounded head"
+                } else {
+                    "pin insertion face"
+                };
+                let axis = explosion_axis(scene, i, label, right);
+                let head =
+                    explosion_check(scene, i, label).map_or(Vec3::from(p.pose.position), |check| {
+                        p.pose
+                            .matrix(0.)
+                            .transform_point3(Vec3::from(check.child_point))
+                    });
+                let side = if (head - Vec3::from(scene.parts[parent].pose.position)).dot(axis) < 0.
+                {
+                    -1.
+                } else {
+                    1.
+                };
+                let out = axis * side;
+                let (_, end) = explosion_projection(&scene.parts[parent], out);
+                let (start, _) = explosion_projection(p, out);
+                out * (end - start + 20.).max(20.)
             } else if name.contains("/Locks/") {
-                Vec3::Z * 35.
+                // Holder -> facade -> inner link -> outer clasp, from inside out.
+                // Pins inherit their corresponding link's display offset.
+                let out = if name.ends_with("/LOCK HOLDER.stl") {
+                    -front
+                } else {
+                    front
+                };
+                let (_, end) = explosion_projection(&scene.parts[parent], out);
+                let (start, _) = explosion_projection(p, out);
+                out * (end - start + 25.).max(25.)
             } else if name.contains("Label for") {
-                Vec3::new(-40., 0., 25.)
+                explosion_axis(scene, i, "label back", front) * 30.
+            } else if relation.label.contains("split roof / rear panel") {
+                let axis = explosion_axis(scene, i, "split roof mating end planes", front);
+                let sign = if (Vec3::from(p.pose.position)
+                    - Vec3::from(scene.parts[parent].pose.position))
+                .dot(axis)
+                    < 0.
+                {
+                    -1.
+                } else {
+                    1.
+                };
+                axis * sign * 90.
+            } else if relation.label.contains("split roof connector") {
+                let other = scene
+                    .relations
+                    .iter()
+                    .find(|r| {
+                        r.parent == relation.parent && r.label.contains("split roof / rear panel")
+                    })
+                    .and_then(|r| ids.iter().position(|id| id == &r.child));
+                let axis = other.map_or(front, |index| {
+                    explosion_axis(scene, index, "split roof mating end planes", front)
+                });
+                let sign = other.map_or(1., |index| {
+                    if (Vec3::from(scene.parts[index].pose.position)
+                        - Vec3::from(scene.parts[parent].pose.position))
+                    .dot(axis)
+                        < 0.
+                    {
+                        -1.
+                    } else {
+                        1.
+                    }
+                });
+                axis * sign * 45.
+            } else if name.starts_with(crate::sustainer_dividers::PREFIX) {
+                let (_, top) = explosion_projection(&scene.parts[module], up);
+                let (bottom, _) = explosion_projection(p, up);
+                up * (top - bottom + 30.).max(30.)
             } else {
-                Vec3::Y * 25.
+                up * 25.
             };
-            travel.insert(i, base + own);
+            travel[i] = Some(base + own);
         }
     }
-    if travel.len() != scene.parts.len() {
+    if travel.iter().any(Option::is_none) {
         return Err("Sustainer explosion hierarchy contains a cycle".into());
     }
-    for (i, p) in scene.parts.iter_mut().enumerate() {
-        p.pose.travel = travel[&i].to_array();
+    let descends_from = |mut index: usize, root: usize| {
+        for _ in 0..ids.len() {
+            if index == root {
+                return true;
+            }
+            let Some(parent) = parents[index] else {
+                break;
+            };
+            index = parent;
+        }
+        false
+    };
+    let roots = |label: &str| -> Vec<usize> {
+        scene
+            .relations
+            .iter()
+            .filter(|r| r.label.contains(label))
+            .filter_map(|r| ids.iter().position(|id| id == &r.child))
+            .collect()
+    };
+    let lower_roots = roots("lower hinge / back-wall seat");
+    let upper_roots = roots(UPPER_SEAT);
+    let roof_roots = roots(LID);
+    // Shaft checks identify mating partners even when one upper hinge spans
+    // two lower hinges. Align their depth, retaining their axial placement.
+    for check in scene
+        .mating_checks
+        .iter()
+        .filter(|c| c.label == "upper / lower hinge shaft line")
+    {
+        let lower = ids
+            .iter()
+            .position(|id| id == &check.parent)
+            .ok_or("Missing lower hinge")?;
+        let upper = ids
+            .iter()
+            .position(|id| id == &check.child)
+            .ok_or("Missing upper hinge")?;
+        let lower_frame = scene.parts[lower].pose.matrix(0.);
+        let upper_frame = scene.parts[upper].pose.matrix(0.);
+        let axis = lower_frame
+            .transform_vector3(Vec3::from(check.parent_axis))
+            .normalize();
+        let depth = up.cross(axis).normalize_or_zero();
+        let delta = upper_frame.transform_point3(Vec3::from(check.child_point))
+            + travel[upper].unwrap()
+            - lower_frame.transform_point3(Vec3::from(check.parent_point))
+            - travel[lower].unwrap();
+        let correction = depth * delta.dot(depth);
+        for (i, offset) in travel.iter_mut().enumerate() {
+            if descends_from(i, lower) {
+                *offset = Some(offset.unwrap() + correction);
+            }
+        }
+    }
+    let lower_layer: Vec<_> = (0..ids.len())
+        .filter(|&i| lower_roots.iter().any(|&root| descends_from(i, root)))
+        .collect();
+    let upper_layer: Vec<_> = (0..ids.len())
+        .filter(|&i| upper_roots.iter().any(|&root| descends_from(i, root)))
+        .collect();
+    let roof_layer: Vec<_> = (0..ids.len())
+        .filter(|&i| {
+            !upper_layer.contains(&i) && roof_roots.iter().any(|&root| descends_from(i, root))
+        })
+        .collect();
+    let mut ceiling = explosion_projection(&scene.parts[module], up).1;
+    for (i, part) in scene
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.pose.path.starts_with(crate::sustainer_dividers::PREFIX))
+    {
+        ceiling = ceiling.max(explosion_projection(part, up).1 + travel[i].unwrap().dot(up));
+    }
+    // Pack the exploded vertical layers using their actual assembled extents.
+    // This is display spacing, not a collision or mechanical-travel validation.
+    for (layer, gap, exact) in [
+        (lower_layer, 25., false),
+        (upper_layer, 25., false),
+        (roof_layer, 15., true),
+    ] {
+        if layer.is_empty() {
+            continue;
+        }
+        let projection = |i: usize| {
+            if exact {
+                explosion_mesh_projection(&scene.parts[i], up)
+            } else {
+                explosion_projection(&scene.parts[i], up)
+            }
+        };
+        let bottom = layer
+            .iter()
+            .map(|&i| projection(i).0 + travel[i].unwrap().dot(up))
+            .fold(f32::INFINITY, f32::min);
+        let top = layer
+            .iter()
+            .map(|&i| projection(i).1 + travel[i].unwrap().dot(up))
+            .fold(f32::NEG_INFINITY, f32::max);
+        let lift = (ceiling + gap - bottom).max(0.);
+        for i in layer {
+            travel[i] = Some(travel[i].unwrap() + up * lift);
+        }
+        ceiling = top + lift;
+    }
+    // Place the label beyond the facade and the exploded lock-pin envelope,
+    // on its assembled side. Keep its front offset and orientation unchanged.
+    for (i, part) in scene
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.pose.path.ends_with("/Label for Sustainers.stl"))
+    {
+        let side = if (Vec3::from(part.pose.position)
+            - Vec3::from(scene.parts[facade].pose.position))
+        .dot(right)
+            > 0.
+        {
+            1.
+        } else {
+            -1.
+        };
+        let out = right * side;
+        let edge = scene
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(j, p)| *j == facade || p.pose.path.contains("/Locks/"))
+            .map(|(j, p)| explosion_projection(p, out).1 + travel[j].unwrap().dot(out))
+            .fold(f32::NEG_INFINITY, f32::max);
+        let offset = travel[i].unwrap();
+        let start = explosion_projection(part, out).0 + offset.dot(out);
+        travel[i] = Some(offset + out * (edge + 25. - start).max(0.));
+    }
+    let front_branch: Vec<_> = (0..ids.len())
+        .filter(|&i| {
+            let mut current = Some(i);
+            for _ in 0..ids.len() {
+                let Some(index) = current else {
+                    break;
+                };
+                if index == facade {
+                    return true;
+                }
+                current = parents[index];
+            }
+            false
+        })
+        .collect();
+    let rear = front_branch
+        .iter()
+        .map(|&i| explosion_projection(&scene.parts[i], front).0 + travel[i].unwrap().dot(front))
+        .fold(f32::INFINITY, f32::min);
+    let (_, housing_front) = explosion_projection(&scene.parts[module], front);
+    let shift = front * (housing_front + 35. - rear).max(0.);
+    for i in front_branch {
+        travel[i] = Some(travel[i].unwrap() + shift);
+    }
+    for (p, travel) in scene.parts.iter_mut().zip(travel) {
+        p.pose.travel = travel.unwrap().to_array();
         p.pose.travel_frame = Some(
             p.pose
                 .matrix(0.)
@@ -1543,6 +1855,316 @@ pub fn reset_explosion(scene: &mut Scene) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::catalog::{Catalog, Selection, SustainerBody, SustainerOptions};
+    #[test]
+    fn sustainer_explosion_follows_assembled_axes_and_restored_poses() {
+        use constraints::PartId;
+        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
+            return;
+        };
+        let catalog = Catalog::scan(root.into()).unwrap();
+        for (width, depth, height, body, split_roof) in [
+            ("S", 3, "1F", SustainerBody::Flat, false),
+            ("M", 4, "2F", SustainerBody::Flat, false),
+            ("L", 6, "4F", SustainerBody::Dividers, true),
+            ("XL", 7, "1F", SustainerBody::Sealed, true),
+        ] {
+            let selection = Selection {
+                width: width.into(),
+                depth,
+                height: height.into(),
+                hidden_key: false,
+            };
+            let bom = catalog
+                .sustainer_bom(&selection, SustainerOptions { body, split_roof })
+                .unwrap();
+            let mut scene =
+                Scene::load(&catalog.root, &bom, "Explosion regression".into(), true).unwrap();
+            for angle in [0., 75.] {
+                set_lid_angle(&mut scene, angle).unwrap();
+                let before = scene.clone();
+                let relations = toml::to_string(&scene.definition()).unwrap();
+                reset_explosion(&mut scene).unwrap();
+                assert_eq!(relations, toml::to_string(&scene.definition()).unwrap());
+                for (i, part) in scene.parts.iter().enumerate() {
+                    assert!(
+                        part.pose
+                            .matrix(0.)
+                            .abs_diff_eq(before.parts[i].pose.matrix(0.), 0.001)
+                    );
+                    let check = if part.pose.path.contains("/Rods/") {
+                        explosion_check(&scene, i, "rod rounded head")
+                    } else if part.pose.path.contains("/1 SET OF PINS") {
+                        explosion_check(&scene, i, "pin insertion face")
+                    } else {
+                        None
+                    };
+                    if let Some(check) = check {
+                        let parent = scene
+                            .parts
+                            .iter()
+                            .find(|p| PartId::of(p) == check.parent)
+                            .unwrap();
+                        let axis = part
+                            .pose
+                            .matrix(0.)
+                            .transform_vector3(Vec3::from(check.child_axis))
+                            .normalize();
+                        let head = part
+                            .pose
+                            .matrix(0.)
+                            .transform_point3(Vec3::from(check.child_point));
+                        let relative =
+                            Vec3::from(part.pose.travel) - Vec3::from(parent.pose.travel);
+                        assert!(
+                            relative.cross(axis).length() < 0.01,
+                            "pin / rod must follow assembled bore"
+                        );
+                        assert!(
+                            relative.dot(axis)
+                                * (head - Vec3::from(parent.pose.position)).dot(axis)
+                                > 0.,
+                            "head must exit its own side"
+                        );
+                        let out = relative.normalize();
+                        assert!(
+                            explosion_projection(part, out).0 + relative.length()
+                                >= explosion_projection(parent, out).1 + 19.99
+                        );
+                    }
+                }
+                let facade = indices(&scene, "Facade.stl")[0];
+                let front = scene.parts[facade]
+                    .pose
+                    .matrix(0.)
+                    .transform_vector3(Vec3::Y);
+                let module = indices(&scene, "/Modules/")[0];
+                let (_, edge) = explosion_projection(&scene.parts[module], front);
+                for part in scene.parts.iter().filter(|p| {
+                    p.pose.path.contains("/Locks/") || p.pose.path.contains("Facade.stl")
+                }) {
+                    assert!(
+                        explosion_projection(part, front).0
+                            + Vec3::from(part.pose.travel).dot(front)
+                            >= edge + 34.99
+                    );
+                }
+                let panel = &scene.parts[facade];
+                let (panel_back, panel_front) = explosion_projection(panel, front);
+                let panel_travel = Vec3::from(panel.pose.travel).dot(front);
+                for part in scene
+                    .parts
+                    .iter()
+                    .filter(|p| p.pose.path.contains("/Locks/"))
+                {
+                    let (lo, hi) = explosion_projection(part, front);
+                    let offset = Vec3::from(part.pose.travel).dot(front);
+                    if part.pose.path.ends_with("/LOCK HOLDER.stl") {
+                        assert!(
+                            hi + offset <= panel_back + panel_travel - 24.99,
+                            "holder stays inside"
+                        );
+                    } else {
+                        assert!(
+                            lo + offset > panel_front + panel_travel,
+                            "lock links and pins outside facade: {}",
+                            part.pose.path
+                        );
+                    }
+                    if part.pose.path.contains("/LOCK OUTER PART") {
+                        let relation = scene
+                            .relations
+                            .iter()
+                            .find(|r| r.child == PartId::of(part))
+                            .unwrap();
+                        let inner = scene
+                            .parts
+                            .iter()
+                            .find(|p| PartId::of(p) == relation.parent)
+                            .unwrap();
+                        let inner_front = explosion_projection(inner, front).1
+                            + Vec3::from(inner.pose.travel).dot(front);
+                        assert!(
+                            lo + offset >= inner_front + 24.99,
+                            "outer clasp follows inner link"
+                        );
+                    }
+                }
+                let right = panel.pose.matrix(0.).transform_vector3(-Vec3::X);
+                for label in scene
+                    .parts
+                    .iter()
+                    .filter(|p| p.pose.path.ends_with("/Label for Sustainers.stl"))
+                {
+                    let side = if (Vec3::from(label.pose.position)
+                        - Vec3::from(panel.pose.position))
+                    .dot(right)
+                        > 0.
+                    {
+                        1.
+                    } else {
+                        -1.
+                    };
+                    let out = right * side;
+                    let label_edge =
+                        explosion_projection(label, out).0 + Vec3::from(label.pose.travel).dot(out);
+                    for part in scene.parts.iter().filter(|p| {
+                        p.pose.path.contains("/Locks/") || p.pose.path.contains("Facade.stl")
+                    }) {
+                        let edge = explosion_projection(part, out).1
+                            + Vec3::from(part.pose.travel).dot(out);
+                        assert!(
+                            label_edge >= edge + 24.99,
+                            "label must clear facade and exploded pins: {}",
+                            part.pose.path
+                        );
+                    }
+                }
+                let up = panel.pose.matrix(0.).transform_vector3(Vec3::Z);
+                let projected = |p: &Part| {
+                    let (lo, hi) = explosion_projection(p, up);
+                    let offset = Vec3::from(p.pose.travel).dot(up);
+                    (lo + offset, hi + offset)
+                };
+                let lower: Vec<_> = scene
+                    .parts
+                    .iter()
+                    .filter(|p| {
+                        p.pose.path.contains("/Rods/")
+                            || (p.pose.path.contains("/Hinges/")
+                                && !p.pose.path.contains("Hinge Top.stl"))
+                    })
+                    .collect();
+                let upper: Vec<_> = scene
+                    .parts
+                    .iter()
+                    .filter(|p| p.pose.path.contains("Hinge Top.stl"))
+                    .collect();
+                let roofs: Vec<_> = scene
+                    .parts
+                    .iter()
+                    .filter(|p| {
+                        p.pose
+                            .path
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|name| name.contains(" Roof"))
+                    })
+                    .collect();
+                let mut ceiling = projected(&scene.parts[module]).1;
+                for (layer, gap, exact) in [
+                    (&lower, 25., false),
+                    (&upper, 25., false),
+                    (&roofs, 15., true),
+                ] {
+                    assert!(!layer.is_empty());
+                    let bounds = |part: &Part| {
+                        if exact {
+                            let frame = part.pose.matrix(1.);
+                            part.mesh.vertices.iter().fold(
+                                (f32::INFINITY, f32::NEG_INFINITY),
+                                |(lo, hi), v| {
+                                    let value =
+                                        frame.transform_point3(Vec3::from(v.position)).dot(up);
+                                    (lo.min(value), hi.max(value))
+                                },
+                            )
+                        } else {
+                            projected(part)
+                        }
+                    };
+                    let bottom = layer
+                        .iter()
+                        .map(|p| bounds(p).0)
+                        .fold(f32::INFINITY, f32::min);
+                    let top = layer
+                        .iter()
+                        .map(|p| bounds(p).1)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    assert!(
+                        bottom >= ceiling + gap - 0.01,
+                        "vertical layer must retain its display gap"
+                    );
+                    if exact {
+                        assert!(
+                            (bottom - ceiling - 15.).abs() < 0.01,
+                            "roof uses a compact actual-mesh gap"
+                        );
+                    }
+                    ceiling = top;
+                }
+                for check in scene
+                    .mating_checks
+                    .iter()
+                    .filter(|c| c.label == "upper / lower hinge shaft line")
+                {
+                    let lower = scene
+                        .parts
+                        .iter()
+                        .find(|p| PartId::of(p) == check.parent)
+                        .unwrap();
+                    let upper = scene
+                        .parts
+                        .iter()
+                        .find(|p| PartId::of(p) == check.child)
+                        .unwrap();
+                    let axis = lower
+                        .pose
+                        .matrix(0.)
+                        .transform_vector3(Vec3::from(check.parent_axis))
+                        .normalize();
+                    let delta = upper
+                        .pose
+                        .matrix(1.)
+                        .transform_point3(Vec3::from(check.child_point))
+                        - lower
+                            .pose
+                            .matrix(1.)
+                            .transform_point3(Vec3::from(check.parent_point));
+                    assert!(delta.dot(up) > 25., "upper shaft stays above lower shaft");
+                    assert!(
+                        delta.dot(up.cross(axis)).abs() < 0.01,
+                        "hinge shaft lines must align vertically"
+                    );
+                }
+                // The whole exploded layout must rotate with its assembled root,
+                // including pin directions and the inherited parent offsets.
+                let q = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.3);
+                let mut rotated = scene.clone();
+                constraints::rotate_subassembly(&mut rotated, module, q).unwrap();
+                reset_explosion(&mut rotated).unwrap();
+                for (a, b) in scene.parts.iter().zip(&rotated.parts) {
+                    for amount in [0., 0.5, 1.] {
+                        assert!(
+                            b.pose
+                                .matrix(amount)
+                                .abs_diff_eq(Mat4::from_quat(q) * a.pose.matrix(amount), 0.01),
+                            "rotation: {}",
+                            a.pose.path
+                        );
+                    }
+                }
+                let mut saved = rotated.definition();
+                for pose in &mut saved.poses {
+                    pose.travel = [777.; 3];
+                    pose.travel_frame = None;
+                }
+                let mut restored =
+                    Scene::load(&catalog.root, &bom, "Restored explosion".into(), true).unwrap();
+                restored.apply(&saved);
+                assert!(restored.constraint_warning.is_none());
+                for (a, b) in rotated.parts.iter().zip(&restored.parts) {
+                    for amount in [0., 0.5, 1.] {
+                        assert!(
+                            a.pose
+                                .matrix(amount)
+                                .abs_diff_eq(b.pose.matrix(amount), 0.01)
+                        );
+                    }
+                }
+                assert_eq!(restored.calibrated, rotated.calibrated);
+            }
+        }
+    }
     #[test]
     fn sustainer_library_latch_bearing_pairing() {
         let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
