@@ -23,6 +23,12 @@ enum AssemblyKind {
     Sustainer,
 }
 impl AssemblyKind {
+    fn label_path(self) -> &'static str {
+        match self {
+            Self::Drawer => crate::label::PATH,
+            Self::Sustainer => crate::label::SUSTAINER_PATH,
+        }
+    }
     fn label(self, zh: bool) -> &'static str {
         match self {
             Self::Drawer => t(zh, "抽屉", "Drawer"),
@@ -175,6 +181,7 @@ pub struct App {
     export_last: Option<PathBuf>,
     label: crate::label::Config,
     label_open: bool,
+    other_label: crate::label::Config,
     image: Option<(String, egui::TextureHandle)>,
     smoke: bool,
     smoke_start: Instant,
@@ -312,6 +319,7 @@ impl App {
             export_last: None,
             label: Default::default(),
             label_open: false,
+            other_label: Default::default(),
             image: None,
             smoke,
             smoke_start: Instant::now(),
@@ -407,11 +415,7 @@ impl App {
                     Default::default()
                 },
                 home: self.home.clone(),
-                label: if self.assembly_kind == AssemblyKind::Drawer {
-                    self.label.clone()
-                } else {
-                    Default::default()
-                },
+                label: self.label.clone(),
                 items,
                 root,
                 title,
@@ -745,6 +749,7 @@ impl App {
                     self.sustainer_layout_cache.clear();
                     self.sustainer_divider_editor = Default::default();
                     self.label = Default::default();
+                    self.other_label = Default::default();
                     self.gridfinity = Default::default();
                     self.layout_cache.clear();
                     self.divider_editor.reset();
@@ -853,7 +858,7 @@ impl App {
                         self.camera.fit(&s, self.explosion);
                         if !s.assembly
                             && s.parts.iter().any(|p| {
-                                p.pose.path == crate::label::PATH
+                                crate::label::is_label(&p.pose.path)
                                     || p.pose.path.starts_with(crate::gridfinity::PREFIX)
                             })
                         {
@@ -1249,6 +1254,7 @@ impl App {
                             self.sustainer_divider_editor.open=false;
                             let mut old=self.bom.clone();
                             if before.4!=self.assembly_kind {
+                                std::mem::swap(&mut self.label,&mut self.other_label);
                                 let saved=Some((previous_selection.clone(),self.bom.clone(),before.5));
                                 let target=if before.4==AssemblyKind::Drawer {self.drawer_state=saved;self.box_state.clone()}else{self.box_state=saved;self.drawer_state.clone()};
                                 if let Some((selection,bom,options))=target {self.selection=selection;old=bom;if self.assembly_kind==AssemblyKind::Sustainer {self.sustainer_options=options;}} else {old.clear();}
@@ -1260,6 +1266,7 @@ impl App {
                                 Ok(next)=>{self.bom=next;self.assembly(ctx);}
                                 Err(e)=>{
                                     self.selection=previous_selection;
+                                    if self.assembly_kind!=before.4 {std::mem::swap(&mut self.label,&mut self.other_label);}
                                     self.assembly_kind=before.4;self.sustainer_options=before.5;
                                     self.status=e;
                                 }
@@ -1289,8 +1296,15 @@ impl App {
                                 match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
                         }
                     }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.strong(t(z,"标签文字","Label text"));
+                        if ui.button(t(z,"编辑标签…","Edit label…")).clicked() {self.label_open=true;}
+                    });
+                    if self.label.active() {ui.label(self.label.text.replace(char::from(10)," / "));}
+                    else {ui.small(t(z,"原始空白标签","Original blank label"));}
+                    ui.separator();
                     if self.assembly_kind==AssemblyKind::Sustainer {
-                        ui.separator();
                         ui.strong(t(z,"箱子内部配置","Box inserts"));
                         let supported=crate::sustainer_dividers::supported(&self.selection,self.sustainer_options);
                         if !supported {ui.small(t(z,"请将箱体类型切换为隔板槽或密封分区，以配置隔板。","Choose a Dividers or Sealed body to configure inserts."));}
@@ -1305,14 +1319,6 @@ impl App {
                         });
                     }
                     if self.assembly_kind==AssemblyKind::Drawer {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong(t(z,"标签文字","Label text"));
-                        if ui.button(t(z,"编辑标签…","Edit label…")).clicked() {self.label_open=true;}
-                    });
-                    if self.label.active() {ui.label(self.label.text.replace(char::from(10)," / "));}
-                    else {ui.small(t(z,"原始空白标签","Original blank label"));}
-                    ui.separator();
                     ui.strong(t(z, "抽屉内部配置", "Drawer inserts"));
                     let has_dividers=self.divider_layout.enabled || self.bom.iter().any(|b|b.enabled && b.path.contains("/Grid Dividers/"));
                     let mut mode=if has_dividers {2} else if self.bom.iter().any(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")) {1} else {0};
@@ -1706,7 +1712,7 @@ impl App {
                 crate::print_plate::color_key(&p.pose.path) == crate::print_plate::color_key(&path)
             })
             .count();
-        let has_text = path == crate::label::PATH
+        let has_text = crate::label::is_label(&path)
             || self.gridfinity.bins.iter().any(|b| {
                 b.tab
                     && ((!b.detachable() && b.path() == path)
@@ -2446,11 +2452,7 @@ impl App {
                         } else {
                             Default::default()
                         },
-                        label: if self.assembly_kind == AssemblyKind::Drawer {
-                            self.label.clone()
-                        } else {
-                            Default::default()
-                        },
+                        label: self.label.clone(),
                         assembly_kind: self.assembly_kind,
                         sustainer_options: self.sustainer_options.normalized(&self.selection),
                         sustainer_angle: self.sustainer_angle,
@@ -2491,8 +2493,7 @@ impl App {
                     if !p.sustainer_angle.is_finite()
                         || !(0. ..=110.).contains(&p.sustainer_angle)
                         || p.assembly_kind == AssemblyKind::Sustainer
-                            && (p.label.active()
-                                || !p.gridfinity.bins.is_empty()
+                            && (!p.gridfinity.bins.is_empty()
                                 || p.divider_layout.enabled
                                 || !p.divider_layout.items.is_empty())
                     {
@@ -2576,6 +2577,9 @@ impl App {
                             self.export_options.plate.text_filaments.clear();
                         }
                         self.selection = p.selection;
+                        if self.assembly_kind != p.assembly_kind {
+                            std::mem::swap(&mut self.label, &mut self.other_label);
+                        }
                         self.assembly_kind = p.assembly_kind;
                         self.sustainer_options = p.sustainer_options.normalized(&self.selection);
                         self.sustainer_angle = p.sustainer_angle;
@@ -2793,23 +2797,22 @@ impl App {
         }
     }
     fn label_window(&mut self, ctx: &egui::Context) {
-        if self.assembly_kind == AssemblyKind::Sustainer {
-            return;
-        }
         if !self.label_open {
             return;
         }
         let z = self.zh;
         let mut open = true;
+        let path = self.assembly_kind.label_path();
+        let is_box = self.assembly_kind == AssemblyKind::Sustainer;
         let before = self.label.clone();
         let mut preview = false;
         egui::Window::new(t(z,"编辑标签文字","Edit label text")).id(egui::Id::new("label-editor"))
             .open(&mut open).resizable(false).default_width(440.).show(ctx,|ui|{
-                ui.label(t(z,"基于 Label.stl，保留原标签外形与安装结构。","Based on Label.stl, preserving its shape and mounting features."));
+                ui.label(if is_box {t(z,"基于盒子原始标签，保留外形与安装结构。","Based on the original Sustainer label, preserving its shape and mounting features.")} else {t(z,"基于 Label.stl，保留原标签外形与安装结构。","Based on Label.stl, preserving its shape and mounting features.")});
                 ui.checkbox(&mut self.label.enabled,t(z,"启用标签文字","Enable lettering"));
                 ui.add_enabled_ui(self.label.enabled,|ui|{
                     ui.add(egui::TextEdit::multiline(&mut self.label.text).desired_rows(2).char_limit(48));
-                    ui.small(t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area."));
+                    ui.small(if is_box {t(z,"最多两行；文字居中，安全区域 32 × 12 mm。","Up to two centered lines within a 32 × 12 mm safe area.")} else {t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area.")});
                     ui.horizontal(|ui|{
                         ui.radio_value(&mut self.label.style,crate::label::Style::Raised,t(z,"凸字","Raised"));
                         ui.radio_value(&mut self.label.style,crate::label::Style::Engraved,t(z,"凹字","Engraved"));
@@ -2822,7 +2825,7 @@ impl App {
                         ui.selectable_value(&mut self.label.font,crate::label::Font::ChineseBold,t(z,"微软雅黑粗体（推荐）","Microsoft YaHei Bold (recommended)"));
                         ui.selectable_value(&mut self.label.font,crate::label::Font::ArialBold,"Arial Bold");
                     });
-                    crate::label::stroke_check_ui(ui, &self.label);
+                    crate::label::stroke_check_label_ui(ui, &self.label, path);
                     let minimum = self.label.min_size();
                     ui.add(egui::Slider::new(&mut self.label.size,minimum..=12.).text(t(z,"字号 mm","Size mm")));
                     ui.small(t(z,"0.4 mm 喷嘴经验建议：优先粗体；英文/数字最低 4 mm，中文及其他文字最低 5 mm。字号为 em 尺寸，非实际字高；复杂汉字需放大并检查切片。笔画检查结果见下方。","Guidance for a 0.4 mm nozzle: prefer bold; minimum em size 4 mm for ASCII, 5 mm for other scripts. Actual glyph height varies. Enlarge complex glyphs and inspect sliced paths. See the stroke geometry estimate below."));
@@ -2855,24 +2858,18 @@ impl App {
                 let qty = self
                     .bom
                     .iter()
-                    .find(|b| b.path == crate::label::PATH)
+                    .find(|b| b.path == path)
                     .map_or(1, |b| b.qty);
-                Catalog::set_accessory(&mut self.bom, crate::label::PATH.into(), true, qty);
+                Catalog::set_accessory(&mut self.bom, path.into(), true, qty);
             }
-            if !self.scene.assembly
-                && self
-                    .scene
-                    .parts
-                    .iter()
-                    .any(|p| p.pose.path == crate::label::PATH)
-            {
-                self.single(crate::label::PATH.into(), ctx);
+            if !self.scene.assembly && self.scene.parts.iter().any(|p| p.pose.path == path) {
+                self.single(path.into(), ctx);
             } else {
                 self.assembly(ctx);
             }
         }
         if preview {
-            self.single(crate::label::PATH.into(), ctx);
+            self.single(path.into(), ctx);
         }
     }
     fn color_window(&mut self, ctx: &egui::Context) {
@@ -3064,11 +3061,7 @@ impl App {
         let items = self.bom.clone();
         let root = self.catalog.root.clone();
         let options = self.export_options.clone();
-        let label = if self.assembly_kind == AssemblyKind::Drawer {
-            self.label.clone()
-        } else {
-            Default::default()
-        };
+        let label = self.label.clone();
         let gf = if self.assembly_kind == AssemblyKind::Drawer {
             self.gridfinity.clone()
         } else {
@@ -3208,8 +3201,8 @@ impl eframe::App for App {
                 }
                 if self.smoke_frame == 5 && [23, 26].contains(&self.smoke_stage) {
                     for p in &mut self.scene.parts {
-                        p.visible =
-                            p.pose.path.contains("/Facades/") || p.pose.path == crate::label::PATH;
+                        p.visible = p.pose.path.contains("/Facades/")
+                            || crate::label::is_label(&p.pose.path);
                     }
                     self.explosion = 0.;
                     self.camera.fit(&self.scene, 0.);
@@ -3336,6 +3329,10 @@ impl eframe::App for App {
                                 "native-sustainer-divider-l-editor.png",
                                 "native-sustainer-divider-l-sealed.png",
                                 "native-sustainer-divider-xl-sealed.png",
+                                "native-sustainer-label-raised.png",
+                                "native-sustainer-label-engraved.png",
+                                "native-sustainer-label-flat.png",
+                                "native-sustainer-label-assembled.png",
                             ][self.smoke_stage as usize],
                         ),
                         &bytes,
@@ -3354,13 +3351,40 @@ impl eframe::App for App {
                             self.status
                         ),
                     );
-                    if self.smoke_stage == 50 {
+                    if self.smoke_stage == 54 {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     } else {
                         self.smoke_stage += 1;
                         self.smoke_frame = 0;
                         self.screenshot_requested = false;
                         match self.smoke_stage {
+                            51..=53 => {
+                                self.sustainer_divider_editor.open = false;
+                                self.label_open = true;
+                                self.label = crate::label::Config {
+                                    enabled: true,
+                                    text: "收纳\nA8".into(),
+                                    style: match self.smoke_stage {
+                                        51 => crate::label::Style::Raised,
+                                        52 => crate::label::Style::Engraved,
+                                        _ => crate::label::Style::Flat,
+                                    },
+                                    ..Default::default()
+                                };
+                                self.export_options.plate.preview_colors = true;
+                                self.export_options
+                                    .plate
+                                    .set_part_slot(crate::label::SUSTAINER_PATH, 3);
+                                self.export_options
+                                    .plate
+                                    .set_text_slot(crate::label::SUSTAINER_PATH, 2);
+                                self.single(crate::label::SUSTAINER_PATH.into(), ctx);
+                            }
+                            54 => {
+                                self.label_open = false;
+                                self.sustainer_angle = 0.;
+                                self.assembly(ctx);
+                            }
                             46 | 48..=50 => {
                                 self.selection = Selection {
                                     width: match self.smoke_stage {
@@ -4240,11 +4264,20 @@ mod accessory_export_tests {
             split_roof: true,
         };
         box_preset.sustainer_angle = 72.;
+        box_preset.label = crate::label::Config {
+            enabled: true,
+            text: "盒子 A8".into(),
+            style: crate::label::Style::Flat,
+            ..Default::default()
+        };
         let box_preset: Preset = toml::from_str(&toml::to_string(&box_preset).unwrap()).unwrap();
         assert_eq!(box_preset.assembly_kind, AssemblyKind::Sustainer);
         assert_eq!(box_preset.sustainer_options.body, SustainerBody::Sealed);
         assert!(box_preset.sustainer_options.split_roof);
         assert_eq!(box_preset.sustainer_angle, 72.);
+        assert!(box_preset.label.active());
+        assert_eq!(box_preset.label.text, "盒子 A8");
+        assert_eq!(box_preset.label.style, crate::label::Style::Flat);
         assert_eq!(legacy.sustainer_angle, 0.);
         assert_eq!(legacy.sustainer_options, SustainerOptions::default());
         let mut with_layout = preset;

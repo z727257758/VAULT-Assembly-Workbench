@@ -1,4 +1,4 @@
-//! Parametric lettering on the original Label.stl. Never changes its mounting pose.
+//! Parametric lettering on original drawer and Sustainer labels, preserving mounting poses.
 use crate::{
     mesh::{Mesh, Vertex},
     scene::Scene,
@@ -14,6 +14,35 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 pub const PATH: &str = "01. DRAWERS/07. Universal/Label.stl";
+pub const SUSTAINER_PATH: &str = "02. SUSTAINERS/05. Universal/Label for Sustainers.stl";
+
+pub fn is_label(path: &str) -> bool {
+    matches!(path, PATH | SUSTAINER_PATH)
+}
+
+pub fn generate_for_path(
+    source: &Arc<Mesh>,
+    config: &Config,
+    path: &str,
+) -> Result<Arc<Mesh>, String> {
+    if path == PATH {
+        return generate(source, config);
+    }
+    config.validate()?;
+    if !config.active() {
+        return Ok(source.clone());
+    }
+    if path != SUSTAINER_PATH
+        || (source.size - Vec3::new(38.14209, 20.071777, 2.03))
+            .abs()
+            .max_element()
+            > 0.05
+    {
+        return Err("盒子标签尺寸与支持的源模型不同，停止生成文字".into());
+    }
+    let polygons = text_polygons_with_width(config, 16.)?;
+    apply_text(source, config, &polygons, [0., 0.], source.max.y as f64)
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Style {
     #[default]
@@ -160,6 +189,9 @@ impl ttf_parser::OutlineBuilder for Outline {
     }
 }
 pub(crate) fn text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
+    text_polygons_with_width(config, 19.)
+}
+fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<D2>>, String> {
     let file = match config.font {
         Font::Chinese => "msyh.ttc",
         Font::Arial => "arial.ttf",
@@ -222,8 +254,11 @@ pub(crate) fn text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
         p.y -= (lo.y + hi.y) * 0.5;
         p.x += config.offset[0] as f64;
         p.y += config.offset[1] as f64;
-        if p.x.abs() > 19. || p.y.abs() > 6. {
-            return Err("文字超出 38 × 12 mm 安全区域，请缩小字号或减少偏移".into());
+        if p.x.abs() > half_width || p.y.abs() > 6. {
+            return Err(format!(
+                "文字超出 {} × 12 mm 安全区域，请缩小字号或减少偏移",
+                half_width * 2.
+            ));
         }
         // The complete facade is installed with its raw XY axes rotated 180 degrees.
         p.x = -p.x;
@@ -242,9 +277,9 @@ fn narrow_area_fraction(section: &CrossSection, width: f64) -> f64 {
     ((area - opened.area().abs()) / area).clamp(0., 1.)
 }
 
-fn stroke_report(config: &Config) -> Result<String, String> {
+fn stroke_report(config: &Config, half_width: f64) -> Result<String, String> {
     config.validate()?;
-    let section = CrossSection::new(text_polygons(config)?);
+    let section = CrossSection::new(text_polygons_with_width(config, half_width)?);
     let fine = narrow_area_fraction(&section, 0.4) * 100.;
     let recommended = narrow_area_fraction(&section, 0.6) * 100.;
     Ok(format!(
@@ -262,9 +297,13 @@ struct StrokeUiState {
 
 /// One debounced background job per editor; stale results never replace current input.
 pub(crate) fn stroke_check_ui(ui: &mut eframe::egui::Ui, config: &Config) {
+    stroke_check_label_ui(ui, config, PATH);
+}
+pub(crate) fn stroke_check_label_ui(ui: &mut eframe::egui::Ui, config: &Config, path: &str) {
     use eframe::egui;
     use std::sync::Mutex;
-    let id = ui.id().with("stroke-width-check");
+    let half_width: f64 = if path == SUSTAINER_PATH { 16. } else { 19. };
+    let id = ui.id().with(("stroke-width-check", half_width.to_bits()));
     let shared = ui.ctx().data_mut(|data| {
         data.get_temp_mut_or_default::<Arc<Mutex<StrokeUiState>>>(id)
             .clone()
@@ -301,7 +340,7 @@ pub(crate) fn stroke_check_ui(ui: &mut eframe::egui::Ui, config: &Config) {
     let ctx = ui.ctx().clone();
     drop(state);
     std::thread::spawn(move || {
-        let result = stroke_report(&config);
+        let result = stroke_report(&config, half_width);
         let mut state = shared.lock().unwrap();
         state.running = false;
         if state.config.as_ref() == Some(&config) {
@@ -544,13 +583,13 @@ pub fn apply(scene: &mut Scene, config: &Config) -> Result<(), String> {
     if !config.active() {
         return Ok(());
     }
-    let mut generated = None;
-    for part in scene.parts.iter_mut().filter(|p| p.pose.path == PATH) {
-        let mesh = if let Some(mesh) = &generated {
+    let mut generated = HashMap::new();
+    for part in scene.parts.iter_mut().filter(|p| is_label(&p.pose.path)) {
+        let mesh = if let Some(mesh) = generated.get(&part.pose.path) {
             Arc::clone(mesh)
         } else {
-            let m = generate(&part.mesh, config)?;
-            generated = Some(m.clone());
+            let m = generate_for_path(&part.mesh, config, &part.pose.path)?;
+            generated.insert(part.pose.path.clone(), m.clone());
             m
         };
         part.mesh = mesh;
@@ -714,99 +753,130 @@ mod tests {
         let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
             return;
         };
-        let file = Path::new(&root).join(PATH);
-        let bytes = std::fs::read(&file).unwrap();
-        let mesh = Mesh::load(&file).unwrap();
-        let volume = solid(&mesh).unwrap().volume();
-        for (case, text) in [("single", "收纳 A8"), ("double", "收纳\nA8")] {
-            for style in [Style::Raised, Style::Engraved, Style::Flat] {
-                let config = Config {
+        for path in [PATH, SUSTAINER_PATH] {
+            let file = Path::new(&root).join(path);
+            let bytes = std::fs::read(&file).unwrap();
+            let mesh = Mesh::load(&file).unwrap();
+            assert!(Arc::ptr_eq(
+                &mesh,
+                &generate_for_path(&mesh, &Config::default(), path).unwrap()
+            ));
+            if path == SUSTAINER_PATH {
+                let wide = Config {
                     enabled: true,
-                    text: text.into(),
-                    style,
+                    text: "MMMM".into(),
+                    font: Font::ArialBold,
+                    offset: [10., 0.],
                     ..Default::default()
                 };
-                let result = generate(&mesh, &config).unwrap();
-                let v = solid(&result).unwrap().volume();
-                let regions = color_regions(&result, &config, [0., 0.], mesh.max.y as f64).unwrap();
-                let a = solid(&regions[0]).unwrap();
-                let b = solid(&regions[1]).unwrap();
+                assert!(text_polygons(&wide).is_ok());
                 assert!(
-                    (a.volume() + b.volume() - v).abs() < 0.05,
-                    "volume a={} b={} original={v} style={style:?}",
-                    a.volume(),
-                    b.volume()
+                    generate_for_path(&mesh, &wide, path)
+                        .is_err_and(|error| error.contains("32 × 12"))
                 );
-                assert!(a.intersection(&b).volume().abs() < 0.001);
-                let whole = solid(&result).unwrap();
-                let combined = a.union(&b);
-                assert!(whole.difference(&combined).volume().abs() < 0.05);
-                assert!(combined.difference(&whole).volume().abs() < 0.05);
-                if style == Style::Engraved {
-                    assert!(regions[1].max.y <= mesh.max.y - config.depth + 0.001);
-                }
+            }
+            let volume = solid(&mesh).unwrap().volume();
+            for (case, text) in [("single", "收纳 A8"), ("double", "收纳\nA8")] {
+                for style in [Style::Raised, Style::Engraved, Style::Flat] {
+                    let config = Config {
+                        enabled: true,
+                        text: text.into(),
+                        style,
+                        ..Default::default()
+                    };
+                    let result = generate_for_path(&mesh, &config, path).unwrap();
+                    let v = solid(&result).unwrap().volume();
+                    let regions =
+                        color_regions(&result, &config, [0., 0.], mesh.max.y as f64).unwrap();
+                    let a = solid(&regions[0]).unwrap();
+                    let b = solid(&regions[1]).unwrap();
+                    assert!(
+                        (a.volume() + b.volume() - v).abs() < 0.05,
+                        "volume a={} b={} original={v} style={style:?}",
+                        a.volume(),
+                        b.volume()
+                    );
+                    assert!(a.intersection(&b).volume().abs() < 0.001);
+                    let whole = solid(&result).unwrap();
+                    let combined = a.union(&b);
+                    assert!(whole.difference(&combined).volume().abs() < 0.05);
+                    assert!(combined.difference(&whole).volume().abs() < 0.05);
+                    if style == Style::Engraved {
+                        assert!(regions[1].max.y <= mesh.max.y - config.depth + 0.001);
+                    }
 
-                assert!(match style {
-                    Style::Raised => v > volume,
-                    Style::Engraved => v < volume,
-                    Style::Flat => (v - volume).abs() < 0.001,
-                });
-                assert!((result.min.y - mesh.min.y).abs() < 0.001);
-                assert!((result.size.x - mesh.size.x).abs() < 0.001);
-                let out = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("output")
-                    .join(format!("label-{case}-{style:?}.stl"));
-                write_stl(&result, &out).unwrap();
-                let bom = vec![crate::catalog::Bom {
-                    path: PATH.into(),
-                    qty: 2,
-                    enabled: true,
-                    group: "Mechanism".into(),
-                }];
-                let target = out.with_extension("3mf");
-                crate::export::run_with_label(
-                    Path::new(&root),
-                    &bom,
-                    &target,
-                    crate::export::Format::ThreeMf,
-                    &config,
-                )
-                .unwrap();
-                let temp = tempfile::tempdir().unwrap();
-                let stls = temp.path().join("label");
-                crate::export::run_with_label(
-                    Path::new(&root),
-                    &bom,
-                    &stls,
-                    crate::export::Format::Stl,
-                    &config,
-                )
-                .unwrap();
-                for file in std::fs::read_dir(&stls).unwrap() {
-                    let exported = Mesh::load(&file.unwrap().path()).unwrap();
-                    assert!((solid(&exported).unwrap().volume() - v).abs() < 0.01);
+                    assert!(match style {
+                        Style::Raised => v > volume,
+                        Style::Engraved => v < volume,
+                        Style::Flat => (v - volume).abs() < 0.001,
+                    });
+                    assert!((result.min.y - mesh.min.y).abs() < 0.001);
+                    assert!((result.size.x - mesh.size.x).abs() < 0.001);
+                    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("output")
+                        .join(format!(
+                            "label-{}-{case}-{style:?}.stl",
+                            if path == PATH { "drawer" } else { "sustainer" }
+                        ));
+                    write_stl(&result, &out).unwrap();
+                    let bom = vec![crate::catalog::Bom {
+                        path: path.into(),
+                        qty: 2,
+                        enabled: true,
+                        group: "Mechanism".into(),
+                    }];
+                    let target = out.with_extension("3mf");
+                    crate::export::run_with_label(
+                        Path::new(&root),
+                        &bom,
+                        &target,
+                        crate::export::Format::ThreeMf,
+                        &config,
+                    )
+                    .unwrap();
+                    let temp =
+                        tempfile::tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("output"))
+                            .unwrap();
+                    let stls = temp.path().join("label");
+                    crate::export::run_with_label(
+                        Path::new(&root),
+                        &bom,
+                        &stls,
+                        crate::export::Format::Stl,
+                        &config,
+                    )
+                    .unwrap();
+                    for file in std::fs::read_dir(&stls).unwrap() {
+                        let exported = Mesh::load(&file.unwrap().path()).unwrap();
+                        assert!((solid(&exported).unwrap().volume() - v).abs() < 0.01);
+                    }
                 }
             }
+            assert_eq!(bytes, std::fs::read(file).unwrap());
+            let c = crate::catalog::Catalog::scan(Path::new(&root).into()).unwrap();
+            let bom = if path == PATH {
+                c.bom(&Default::default())
+            } else {
+                c.sustainer_bom(&Default::default(), Default::default())
+                    .unwrap()
+            };
+            let scene = Scene::load(&c.root, &bom, "label".into(), true).unwrap();
+            let p = scene.parts.iter().find(|p| p.pose.path == path).unwrap();
+            assert!(p.pose.matrix(0.).transform_vector3(-Vec3::X).x > 0.99);
+            assert!(p.pose.matrix(0.).transform_vector3(Vec3::Z).y > 0.99);
+            let mut changed = scene.clone();
+            apply(
+                &mut changed,
+                &Config {
+                    enabled: true,
+                    text: "Label".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let q = changed.parts.iter().find(|p| p.pose.path == path).unwrap();
+            assert_eq!(p.pose.position, q.pose.position);
+            assert_eq!(p.pose.rotation, q.pose.rotation);
         }
-        assert_eq!(bytes, std::fs::read(file).unwrap());
-        let c = crate::catalog::Catalog::scan(root.into()).unwrap();
-        let scene =
-            Scene::load(&c.root, &c.bom(&Default::default()), "label".into(), true).unwrap();
-        let p = scene.parts.iter().find(|p| p.pose.path == PATH).unwrap();
-        assert!(p.pose.matrix(0.).transform_vector3(-Vec3::X).x > 0.99);
-        assert!(p.pose.matrix(0.).transform_vector3(Vec3::Z).y > 0.99);
-        let mut changed = scene.clone();
-        apply(
-            &mut changed,
-            &Config {
-                enabled: true,
-                text: "Label".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let q = changed.parts.iter().find(|p| p.pose.path == PATH).unwrap();
-        assert_eq!(p.pose.position, q.pose.position);
-        assert_eq!(p.pose.rotation, q.pose.rotation);
     }
 }

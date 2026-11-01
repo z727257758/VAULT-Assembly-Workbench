@@ -205,8 +205,12 @@ pub fn run_configured(
         for (i, (item, source)) in inputs.iter().enumerate() {
             let generated = if let Some(mesh) = generated.get(&item.path) {
                 Some(mesh.clone())
-            } else if item.path == crate::label::PATH && label.active() {
-                Some(crate::label::generate(&Mesh::load(source)?, label)?)
+            } else if crate::label::is_label(&item.path) && label.active() {
+                Some(crate::label::generate_for_path(
+                    &Mesh::load(source)?,
+                    label,
+                    &item.path,
+                )?)
             } else {
                 None
             };
@@ -271,14 +275,14 @@ fn write_3mf(
         } else {
             Mesh::load(source).map_err(|e| format!("{}: {e}", item.name()))?
         };
-        let mesh = if item.path == crate::label::PATH {
-            crate::label::generate(&mesh, label)?
+        let mesh = if crate::label::is_label(&item.path) {
+            crate::label::generate_for_path(&mesh, label, &item.path)?
         } else {
             mesh
         };
         let base_slot = plate.slot(&item.path);
         let text_slot = plate.text_slot(&item.path);
-        let text_spec = if item.path == crate::label::PATH && label.active() {
+        let text_spec = if crate::label::is_label(&item.path) && label.active() {
             let top = if label.style == crate::label::Style::Raised {
                 mesh.max.y - label.depth
             } else {
@@ -306,7 +310,7 @@ fn write_3mf(
         } else {
             None
         };
-        let standalone_label = item.path == crate::label::PATH
+        let standalone_label = crate::label::is_label(&item.path)
             || gridfinity.is_some_and(|(layout, _)| {
                 layout
                     .bins
@@ -1306,86 +1310,96 @@ endsolid t";
         };
         let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/export-smoke");
         std::fs::create_dir_all(&out).unwrap();
-        let mut options = Options::default();
-        options.plate.center = true;
-        options
-            .plate
-            .text_filaments
-            .insert(crate::label::PATH.into(), 2);
-        options.plate.palette[0] = [240, 240, 240];
-        options.plate.palette[1] = [20, 20, 20];
-        let item = Bom {
-            path: crate::label::PATH.into(),
-            qty: 2,
-            enabled: true,
-            group: "Label".into(),
-        };
-        for style in [
-            crate::label::Style::Raised,
-            crate::label::Style::Engraved,
-            crate::label::Style::Flat,
-        ] {
-            let label = crate::label::Config {
+        for path in [crate::label::PATH, crate::label::SUSTAINER_PATH] {
+            let mut options = Options::default();
+            options.plate.center = true;
+            options.plate.text_filaments.insert(path.into(), 2);
+            options.plate.palette[0] = [240, 240, 240];
+            options.plate.palette[1] = [20, 20, 20];
+            let item = Bom {
+                path: path.into(),
+                qty: 2,
                 enabled: true,
-                text: "收纳\nA8".into(),
-                style,
-                ..Default::default()
+                group: "Label".into(),
             };
-            let dest = out.join(format!("VAULT-text-{style:?}.3mf"));
-            run_configured(
-                Path::new(&root),
-                std::slice::from_ref(&item),
-                &dest,
-                &options,
-                &label,
-                None,
-            )
-            .unwrap();
-            let mut z = zip::ZipArchive::new(File::open(dest).unwrap()).unwrap();
-            let mut settings = String::new();
-            z.by_name("Metadata/model_settings.config")
-                .unwrap()
-                .read_to_string(&mut settings)
-                .unwrap();
-            assert_eq!(settings.matches("<plate>").count(), 1);
-            assert_eq!(settings.matches("<part ").count(), 4);
-            assert_eq!(settings.matches(r#"key="extruder" value="2""#).count(), 2);
-            let mut model = String::new();
-            z.by_name("3D/3dmodel.model")
-                .unwrap()
-                .read_to_string(&mut model)
-                .unwrap();
-            assert_eq!(model.matches("<component ").count(), 4);
-            assert_eq!(model.matches("<item ").count(), 2);
-            for item in model.split("<item ").skip(1) {
-                let t: Vec<f32> = item
-                    .split("transform=\"")
-                    .nth(1)
-                    .unwrap()
-                    .split('"')
-                    .next()
-                    .unwrap()
-                    .split_whitespace()
-                    .map(|v| v.parse().unwrap())
-                    .collect();
-                assert_eq!(
-                    t[8],
-                    if style == crate::label::Style::Flat {
-                        -1.
+            for style in [
+                crate::label::Style::Raised,
+                crate::label::Style::Engraved,
+                crate::label::Style::Flat,
+            ] {
+                let label = crate::label::Config {
+                    enabled: true,
+                    text: "收纳\nA8".into(),
+                    style,
+                    ..Default::default()
+                };
+                let dest = out.join(format!(
+                    "VAULT-text-{}-{style:?}.3mf",
+                    if path == crate::label::PATH {
+                        "drawer"
                     } else {
-                        1.
+                        "sustainer"
                     }
-                );
-                assert!(
-                    (t[11]
-                        - if style == crate::label::Style::Flat {
-                            2.00004
+                ));
+                run_configured(
+                    Path::new(&root),
+                    std::slice::from_ref(&item),
+                    &dest,
+                    &options,
+                    &label,
+                    None,
+                )
+                .unwrap();
+                let mut z = zip::ZipArchive::new(File::open(dest).unwrap()).unwrap();
+                let mut settings = String::new();
+                z.by_name("Metadata/model_settings.config")
+                    .unwrap()
+                    .read_to_string(&mut settings)
+                    .unwrap();
+                assert_eq!(settings.matches("<plate>").count(), 1);
+                assert_eq!(settings.matches("<part ").count(), 4);
+                assert_eq!(settings.matches(r#"key="extruder" value="2""#).count(), 2);
+                let mut model = String::new();
+                z.by_name("3D/3dmodel.model")
+                    .unwrap()
+                    .read_to_string(&mut model)
+                    .unwrap();
+                assert_eq!(model.matches("<component ").count(), 4);
+                assert_eq!(model.matches("<item ").count(), 2);
+                for item in model.split("<item ").skip(1) {
+                    let t: Vec<f32> = item
+                        .split("transform=\"")
+                        .nth(1)
+                        .unwrap()
+                        .split('"')
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .map(|v| v.parse().unwrap())
+                        .collect();
+                    assert_eq!(
+                        t[8],
+                        if style == crate::label::Style::Flat {
+                            -1.
                         } else {
-                            0.
-                        })
-                    .abs()
-                        < 0.001
-                );
+                            1.
+                        }
+                    );
+                    assert!(
+                        (t[11]
+                            - if style == crate::label::Style::Flat {
+                                if path == crate::label::PATH {
+                                    2.00004
+                                } else {
+                                    2.03
+                                }
+                            } else {
+                                0.
+                            })
+                        .abs()
+                            < 0.001
+                    );
+                }
             }
         }
     }
