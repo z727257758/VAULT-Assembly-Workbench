@@ -874,29 +874,33 @@ impl App {
             return;
         }
         let matrix = self.camera.matrix(rect.aspect_ratio());
-        let mut bounds = egui::Rect::NOTHING;
-        for i in 0..8 {
+        // Project the eight world-space corners and connect the twelve box edges.
+        // Keeping their depth in the projection makes the frame follow the model
+        // when the camera rotates instead of enclosing it in a screen rectangle.
+        let corners: [Option<egui::Pos2>; 8] = std::array::from_fn(|i| {
             let p = glam::Vec3::new(
                 if i & 1 == 0 { lo.x } else { hi.x },
                 if i & 2 == 0 { lo.y } else { hi.y },
                 if i & 4 == 0 { lo.z } else { hi.z },
             );
             let v = matrix.project_point3(p);
-            if v.is_finite() && (0. ..=1.).contains(&v.z) {
-                bounds.extend_with(egui::pos2(
+            (v.is_finite() && (0. ..=1.).contains(&v.z)).then(|| {
+                egui::pos2(
                     rect.center().x + v.x * rect.width() * 0.5,
                     rect.center().y - v.y * rect.height() * 0.5,
-                ));
+                )
+            })
+        });
+        let painter = ui.painter().with_clip_rect(rect);
+        let stroke = egui::Stroke::new(1.5, Color32::LIGHT_BLUE);
+        for i in 0..8 {
+            for axis in [1, 2, 4] {
+                if i & axis == 0
+                    && let (Some(a), Some(b)) = (corners[i], corners[i | axis])
+                {
+                    painter.line_segment([a, b], stroke);
+                }
             }
-        }
-        if bounds.is_finite() && bounds.intersects(rect) {
-            let painter = ui.painter().with_clip_rect(rect);
-            painter.rect_stroke(
-                bounds.expand(5.),
-                5.,
-                egui::Stroke::new(1.5, Color32::LIGHT_BLUE),
-                egui::StrokeKind::Outside,
-            );
         }
     }
 }
