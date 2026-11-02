@@ -261,6 +261,8 @@ impl App {
     pub(super) fn open_global_colors(&mut self) {
         self.commit_member();
         self.global_colors_draft = Some(self.global_colors.clone());
+        self.global_color_preview
+            .request(&self.catalog, &self.home, self.assembly_kind);
     }
     pub(super) fn member_color_follow_ui(&mut self, ui: &mut egui::Ui) {
         let z = self.zh;
@@ -292,34 +294,113 @@ impl App {
             return;
         };
         let z = self.zh;
+        let mut rows = BTreeMap::<String, String>::new();
+        for item in self
+            .global_color_preview
+            .bom
+            .iter()
+            .chain(self.members.iter().flat_map(|m| &m.preset.bom))
+            .filter(|b| b.enabled)
+        {
+            rows.entry(crate::catalog::colors::component(&item.path))
+                .or_insert_with(|| item.path.clone());
+        }
+        for member in &self.members {
+            if let Ok(extra) = self.catalog.exterior_components(
+                &member.preset.selection,
+                &member.exterior,
+                member.preset.assembly_kind == AssemblyKind::Sustainer,
+            ) {
+                for item in extra {
+                    rows.entry(crate::catalog::colors::component(&item.bom.path))
+                        .or_insert(item.bom.path);
+                }
+            }
+        }
         let mut apply = false;
         let mut cancel = false;
-        let response = egui::Modal::new(egui::Id::new("overall-colors")).show(ctx,|ui| {
-            ui.set_width(470.);
-            ui.heading(t(z,"整体配色","Overall colors"));
-            ui.label(t(z,"按用途跨规格同步；仅更新跟随整体的成员，新成员自动继承。","Shared by role across sizes. Updates following members; new members inherit."));
-            egui::Grid::new("overall-palette").num_columns(2).show(ui,|ui| {
-                for i in 0..6 { ui.label(format!("Bambu PETG Basic {}", i+1)); ui.color_edit_button_srgb(&mut draft.palette[i]); ui.end_row(); }
+        let width = (ctx.content_rect().width() - 64.).clamp(360., 1100.);
+        let height = (ctx.content_rect().height() - 180.).clamp(240., 680.);
+        let response = egui::Modal::new(egui::Id::new("overall-colors")).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.heading(t(z, "整体配色", "Overall colors"));
+            ui.label(t(z, "逐零件设置，跨规格同步同类零件；仅应用于跟随整体的成员。", "Edit each component across sizes; apply only to members following overall colors."));
+            ui.horizontal_top(|ui| {
+                let left = width * 0.46;
+                ui.allocate_ui_with_layout(egui::vec2(left, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    self.global_color_preview.ui(ui, &self.catalog, &self.home, &self.renderer.state, &draft, z);
+                });
+                ui.add_space(12.);
+                ui.allocate_ui_with_layout(egui::vec2((width - left - 24.).max(160.), height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.strong(t(z, "所选零件", "Selected part"));
+                    if let Some(path) = self.global_color_preview.selected.clone() {
+                        ui.label(color_component_name(&path, z)).on_hover_text(&path);
+                        ui.push_id("selected-color-properties", |ui| {
+                            component_color_ui(ui, &mut draft, &path, false, z);
+                            if crate::label::is_label(&path) || path.starts_with(crate::gridfinity::PREFIX) {
+                                component_color_ui(ui, &mut draft, &path, true, z);
+                            }
+                        });
+                        ui.small(t(z, "同类零件共用配色；蓝色线框标出示例中的对应零件。", "Matching components share colors; blue boxes mark them in the sample."));
+                    } else {
+                        ui.label(t(z, "点击左侧零件开始配色，可先点击“爆炸”展开模型。", "Click a part in the preview to color it. Explode the model to reach internal parts."));
+                    }
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt("overall-color-settings").max_height(ui.available_height().max(60.)).show(ui, |ui| {
+                        ui.strong(t(z, "耗材颜色", "Filament colors"));
+                        egui::Grid::new("overall-palette").num_columns(3).show(ui, |ui| {
+                            for i in 0..6 {
+                                ui.label(format!("Bambu PETG Basic {}", i + 1));
+                                ui.color_edit_button_srgb(&mut draft.palette[i]);
+                                let [r,g,b] = draft.palette[i];
+                                ui.monospace(format!("#{r:02X}{g:02X}{b:02X}"));
+                                ui.end_row();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(t(z, "默认颜色", "Default color"));
+                            slot_picker(ui, "global-default", &mut draft.filament, &draft.palette, false, z);
+                        });
+                        ui.collapsing(t(z, "按用途批量配色", "Colors by role"), |ui| {
+                            for (key, cn, en) in crate::catalog::colors::ROLES {
+                                ui.horizontal(|ui| {
+                                    ui.label(t(z,cn,en));
+                                    let mut slot = draft.roles.get(key).copied().unwrap_or(0);
+                                    slot_picker(ui, key, &mut slot, &draft.palette, true, z);
+                                    if slot == 0 { draft.roles.remove(key); } else { draft.roles.insert(key.into(), slot); }
+                                });
+                            }
+                        });
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.strong(t(z, "零件与文字", "Components and text"));
+                            if ui.button(t(z, "恢复用途配色", "Reset component colors")).clicked() {
+                                draft.components.clear();
+                                draft.component_text.clear();
+                            }
+                        });
+                        ui.collapsing(t(z, "全部零件列表", "All components"), |ui| {
+                            ui.small(t(z, "也可从列表选择；包含当前组合中未出现在示例里的配件。", "You can also select here, including assembly accessories absent from the sample."));
+                            let selected = self.global_color_preview.selected.as_deref().map(crate::catalog::colors::component);
+                            for (key, path) in &rows {
+                                ui.push_id(key, |ui| {
+                                    if ui.selectable_label(selected.as_ref() == Some(key), color_component_name(path, z)).on_hover_text(path).clicked() {
+                                        self.global_color_preview.selected = Some(path.clone());
+                                        self.global_color_preview.isolate = false;
+                                    }
+                                });
+                            }
+                        });
+
+                    });
+                });
             });
-            let following=self.members.iter().filter(|m|m.preset.print_config.as_ref().is_some_and(|c|c.follow_global_colors)).count();
-            ui.label(format!("{} {} / {}",t(z,"跟随整体的成员","Following members"),following,self.members.len()));
             ui.separator();
-            egui::Grid::new("overall-role-colors").num_columns(2).show(ui,|ui| {
-                ui.label(t(z,"默认颜色","Default color"));
-                slot_picker(ui,"global-default", &mut draft.filament,&draft.palette,false,z);
-                ui.end_row();
-                for (key,cn,en) in crate::catalog::colors::ROLES {
-                    ui.label(t(z,cn,en));
-                    let mut slot = draft.roles.get(key).copied().unwrap_or(0);
-                    slot_picker(ui,key,&mut slot,&draft.palette,true,z);
-                    if slot == 0 { draft.roles.remove(key); } else { draft.roles.insert(key.into(),slot); }
-                    ui.end_row();
-                }
-            });
-            ui.small(t(z,"成员的标签文字、内部布局、份数和打印参数保持各自配置。自定义成员可在属性中恢复跟随。","Labels, layouts, quantities and print settings remain independent. Custom members can resume following in Properties."));
+            let following = self.members.iter().filter(|m| m.preset.print_config.as_ref().is_some_and(|c| c.follow_global_colors)).count();
             ui.horizontal(|ui| {
-                apply = ui.add_enabled(self.export_rx.is_none(),egui::Button::new(t(z,"应用整体配色","Apply overall colors"))).clicked();
-                cancel = ui.button(t(z,"取消","Cancel")).clicked();
+                apply = ui.add_enabled(self.export_rx.is_none(), egui::Button::new(t(z, "应用整体配色", "Apply overall colors"))).clicked();
+                cancel = ui.button(t(z, "取消", "Cancel")).clicked();
+                ui.label(format!("{} {following}/{}", t(z, "跟随整体", "Following"), self.members.len()));
             });
         });
         if cancel || response.should_close() {
@@ -455,9 +536,98 @@ fn copy_member_colors(source: &Config, target: &mut Config) {
     target.palette = source.palette;
     target.filament = source.filament;
     target.role_filaments = source.role_filaments.clone();
+    target.component_filaments = source.component_filaments.clone();
+    target.component_text_filaments = source.component_text_filaments.clone();
     target.part_filaments = source.part_filaments.clone();
     target.text_filaments = source.text_filaments.clone();
     target.preview_colors = true;
+}
+
+fn color_component_name(path: &str, z: bool) -> String {
+    match crate::print_plate::color_key(path) {
+        crate::print_plate::BIN_COLOR_KEY => t(
+            z,
+            "Gridfinity 小盒（同类型）",
+            "Gridfinity bins (shared type)",
+        )
+        .into(),
+        crate::print_plate::LABEL_COLOR_KEY => t(
+            z,
+            "Cullenect 可拆标牌（同类型）",
+            "Cullenect labels (shared type)",
+        )
+        .into(),
+        _ => crate::accessories::info(path, z).map_or_else(
+            || {
+                path.rsplit('/')
+                    .next()
+                    .unwrap_or(path)
+                    .trim_end_matches(".stl")
+                    .to_owned()
+            },
+            |m| m.name,
+        ),
+    }
+}
+fn component_color_ui(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, text: bool, z: bool) {
+    let key = crate::catalog::colors::component(path);
+    let mut config = Config::default();
+    theme.apply(&mut config);
+    let current = if text {
+        config.text_slot(path)
+    } else {
+        config.slot(path)
+    };
+    let map = if text {
+        &mut theme.component_text
+    } else {
+        &mut theme.components
+    };
+    let mut slot = map.get(&key).copied().unwrap_or(0);
+    ui.label(if text {
+        t(z, "文字颜色", "Text color")
+    } else {
+        t(z, "零件颜色", "Part color")
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut slot, 0, t(z, "跟随用途配色", "Use role color"));
+        for value in 1..=6 {
+            let [r, g, b] = theme.palette[(value - 1) as usize];
+            let ink = if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            };
+            let button = egui::Button::new(RichText::new(format!(" {value} ")).color(ink))
+                .fill(Color32::from_rgb(r, g, b))
+                .stroke(egui::Stroke::new(
+                    if slot == value { 3. } else { 1. },
+                    if slot == value {
+                        Color32::LIGHT_BLUE
+                    } else {
+                        Color32::GRAY
+                    },
+                ));
+            if ui
+                .add(button)
+                .on_hover_text(config.color_hex(value))
+                .clicked()
+            {
+                slot = value;
+            }
+        }
+    });
+    ui.small(format!(
+        "{} {current} · {}",
+        t(z, "当前颜色槽", "Current slot"),
+        config.color_hex(current)
+    ));
+
+    if slot == 0 {
+        map.remove(&key);
+    } else {
+        map.insert(key, slot);
+    }
 }
 
 #[cfg(test)]
@@ -529,6 +699,14 @@ mod tests {
     fn theme_roundtrip_preserves_custom_members_and_independent_contents() {
         let mut state = snapshot();
         state.colors.roles.insert("label".into(), 3);
+        state
+            .colors
+            .components
+            .insert(crate::catalog::colors::component("part.stl"), 4);
+        state
+            .colors
+            .component_text
+            .insert(crate::catalog::colors::component(crate::label::PATH), 2);
         state.members[0]
             .preset
             .print_config
@@ -575,6 +753,33 @@ mod tests {
             5
         );
         assert_eq!(loaded.members[1].preset.label.text, "Tools");
+        assert_eq!(
+            loaded.members[0]
+                .preset
+                .print_config
+                .as_ref()
+                .unwrap()
+                .slot("part.stl"),
+            4
+        );
+        assert_eq!(
+            loaded.members[0]
+                .preset
+                .print_config
+                .as_ref()
+                .unwrap()
+                .text_slot(crate::label::PATH),
+            2
+        );
+        assert_eq!(
+            loaded.members[1]
+                .preset
+                .print_config
+                .as_ref()
+                .unwrap()
+                .text_slot(crate::label::PATH),
+            5
+        );
         let mut target = Config {
             layer: 0.12,
             gap: 9.,

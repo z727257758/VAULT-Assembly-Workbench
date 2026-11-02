@@ -1,3 +1,4 @@
+mod color_preview;
 mod combination;
 mod exterior_smoke;
 mod large_stl_smoke;
@@ -151,6 +152,7 @@ pub struct App {
     member_edit_baseline: Option<workflow::Snapshot>,
     global_colors: crate::print_plate::ColorTheme,
     global_colors_draft: Option<crate::print_plate::ColorTheme>,
+    global_color_preview: color_preview::Preview,
     member_selection: std::collections::BTreeSet<usize>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     sustainer_divider_editor: crate::sustainer_divider_editor::Editor,
@@ -295,6 +297,7 @@ impl App {
                 .map(|s| crate::print_plate::ColorTheme::from_config(&s.export.plate))
                 .unwrap_or_default(),
             global_colors_draft: None,
+            global_color_preview: Default::default(),
             member_selection: Default::default(),
             assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
                 AssemblyKind::Sustainer
@@ -2749,6 +2752,8 @@ impl App {
                             self.export_options.plate.part_filaments.clear();
                             self.export_options.plate.text_filaments.clear();
                             self.export_options.plate.role_filaments.clear();
+                            self.export_options.plate.component_filaments.clear();
+                            self.export_options.plate.component_text_filaments.clear();
                             self.export_options.plate.follow_global_colors = false;
                         }
                         self.selection = p.selection;
@@ -3093,7 +3098,7 @@ impl App {
                     egui::ComboBox::from_id_salt("default-filament").selected_text(format!("{} · {}",c.filament,c.color_hex(c.filament))).show_ui(ui,|ui| {
                         for slot in 1..=6 {let name=format!("{slot} · {}",c.color_hex(slot));if ui.selectable_value(&mut c.filament,slot,name).changed(){changed=true;c.preview_colors=true;}}
                     });
-                    if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();c.role_filaments.clear();changed=true;}
+                    if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();c.role_filaments.clear();c.component_filaments.clear();c.component_text_filaments.clear();changed=true;}
                 });
                 ui.separator();
                 let mut color_rows=std::collections::BTreeSet::new();

@@ -49,6 +49,8 @@ fn set_assignment(map: &mut std::collections::BTreeMap<String, u32>, path: &str,
 pub struct Config {
     pub follow_global_colors: bool,
     pub role_filaments: std::collections::BTreeMap<String, u32>,
+    pub component_filaments: std::collections::BTreeMap<String, u32>,
+    pub component_text_filaments: std::collections::BTreeMap<String, u32>,
     pub margin: f32,
     pub brim: f32,
     pub gap: f32,
@@ -73,6 +75,8 @@ impl Default for Config {
         Self {
             follow_global_colors: false,
             role_filaments: Default::default(),
+            component_filaments: Default::default(),
+            component_text_filaments: Default::default(),
             margin: 0.5,
             brim: 0.,
             gap: 6.,
@@ -138,6 +142,8 @@ impl Config {
                 .values()
                 .chain(self.text_filaments.values())
                 .chain(self.role_filaments.values())
+                .chain(self.component_filaments.values())
+                .chain(self.component_text_filaments.values())
                 .any(|slot| !(1..=6).contains(slot))
         {
             return Err("无效的 P1S 打印或摆盘参数".into());
@@ -159,6 +165,11 @@ impl Config {
     pub fn slot(&self, path: &str) -> u32 {
         assignment(&self.part_filaments, path)
             .or_else(|| {
+                self.component_filaments
+                    .get(&crate::catalog::colors::component(path))
+                    .copied()
+            })
+            .or_else(|| {
                 self.role_filaments
                     .get(crate::catalog::colors::role(path))
                     .copied()
@@ -168,6 +179,11 @@ impl Config {
     }
     pub fn text_slot(&self, path: &str) -> u32 {
         assignment(&self.text_filaments, path)
+            .or_else(|| {
+                self.component_text_filaments
+                    .get(&crate::catalog::colors::component(path))
+                    .copied()
+            })
             .or_else(|| self.role_filaments.get("text").copied())
             .unwrap_or_else(|| self.slot(path))
             .clamp(1, 6)
@@ -235,6 +251,8 @@ pub struct ColorTheme {
     pub palette: [[u8; 3]; 6],
     pub filament: u32,
     pub roles: std::collections::BTreeMap<String, u32>,
+    pub components: std::collections::BTreeMap<String, u32>,
+    pub component_text: std::collections::BTreeMap<String, u32>,
 }
 impl Default for ColorTheme {
     fn default() -> Self {
@@ -247,10 +265,17 @@ impl ColorTheme {
             palette: c.palette,
             filament: c.filament,
             roles: c.role_filaments.clone(),
+            components: c.component_filaments.clone(),
+            component_text: c.component_text_filaments.clone(),
         }
     }
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=6).contains(&self.filament)
+            || self
+                .components
+                .iter()
+                .chain(self.component_text.iter())
+                .any(|(key, slot)| key.is_empty() || !(1..=6).contains(slot))
             || self.roles.iter().any(|(key, slot)| {
                 !(1..=6).contains(slot)
                     || !crate::catalog::colors::ROLES
@@ -266,6 +291,8 @@ impl ColorTheme {
         c.palette = self.palette;
         c.filament = self.filament;
         c.role_filaments = self.roles.clone();
+        c.component_filaments = self.components.clone();
+        c.component_text_filaments = self.component_text.clone();
         c.part_filaments.clear();
         c.text_filaments.clear();
         c.preview_colors = true;
@@ -1773,6 +1800,61 @@ mod tests {
 #[cfg(test)]
 mod overall_color_tests {
     use super::*;
+
+    #[test]
+    fn component_colors_persist_cross_sizes_and_allow_local_overrides() {
+        let small = "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl";
+        let large = "01. DRAWERS/03. L Families/L7/Modules/L7 Module 4F.stl";
+        let mut theme = ColorTheme::default();
+        theme.roles.insert("shell".into(), 2);
+        theme
+            .components
+            .insert(crate::catalog::colors::component(small), 3);
+        theme
+            .components
+            .insert(crate::catalog::colors::component(crate::label::PATH), 4);
+        theme
+            .component_text
+            .insert(crate::catalog::colors::component(crate::label::PATH), 6);
+        let theme: ColorTheme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
+        theme.validate().unwrap();
+        let mut config = Config {
+            layer: 0.12,
+            gap: 8.,
+            ..Default::default()
+        };
+        theme.apply(&mut config);
+        assert_eq!(config.slot(large), 3);
+        assert_eq!(config.slot(crate::label::PATH), 4);
+        assert_eq!(config.text_slot(crate::label::PATH), 6);
+        assert_eq!(
+            config.slot("02. SUSTAINERS/02. M Families/M4/Roof/M4 Roof.stl"),
+            2
+        );
+        assert_eq!((config.layer, config.gap), (0.12, 8.));
+        config.set_part_slot(large, 5);
+        config.set_text_slot(crate::label::PATH, 1);
+        let mut saved: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(saved.slot(large), 5);
+        assert_eq!(saved.slot(small), 3);
+        assert_eq!(saved.text_slot(crate::label::PATH), 1);
+        saved.set_part_slot(large, 0);
+        saved.set_text_slot(crate::label::PATH, 0);
+        assert_eq!(saved.slot(large), 3);
+        assert_eq!(saved.text_slot(crate::label::PATH), 6);
+        let old: ColorTheme = toml::from_str("filament = 2\n[roles]\nshell = 4").unwrap();
+        old.apply(&mut saved);
+        assert_eq!(saved.slot(large), 4);
+        assert!(saved.component_filaments.is_empty());
+        assert!(saved.component_text_filaments.is_empty());
+        let mut invalid = theme.clone();
+        invalid.components.insert("bad".into(), 7);
+        assert!(invalid.validate().is_err());
+        invalid = theme;
+        invalid.component_text.insert("bad".into(), 0);
+        assert!(invalid.validate().is_err());
+    }
+
     #[test]
     fn role_colors_cross_sizes_preserve_print_settings_and_allow_overrides() {
         let theme = ColorTheme {
@@ -1785,6 +1867,7 @@ mod overall_color_tests {
                 ("insert".into(), 6),
             ]
             .into(),
+            ..Default::default()
         };
         theme.validate().unwrap();
         let mut c = Config {
