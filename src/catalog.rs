@@ -632,10 +632,9 @@ mod tests {
         assert!(options.key(&s).starts_with("sustainer-s3-1f-"));
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_library_all_sizes_variants_and_print_counts() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let mut configurations = 0;
         for width in ["S", "M", "L", "XL"] {

@@ -391,10 +391,9 @@ mod tests {
         assert!(bom.is_empty());
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_divider_library_slots_and_assembly() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let mut report = String::new();
         for (s, o) in crate::catalog::sustainer_configurations()
@@ -486,10 +485,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_divider_library_surface_review() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let mut report = String::new();
         for (width, depth, height, body) in [

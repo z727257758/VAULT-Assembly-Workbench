@@ -1991,10 +1991,9 @@ mod tests {
     use super::*;
     use crate::catalog::{Catalog, Selection, SustainerBody, SustainerOptions};
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_stacking_latches_restore_and_follow_housing() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = Catalog::scan(root.into()).unwrap();
         let mut surface_reports = Vec::new();
         for (width, depth, height) in [
@@ -2058,8 +2057,14 @@ mod tests {
                 .retain(|c| c.child.path != STACKING_LATCH);
             let mut restored =
                 Scene::load(&catalog.root, &bom, "legacy stacking".into(), true).unwrap();
-            restored.apply(&legacy);
-            assert!(restored.constraint_warning.is_none());
+            restored.apply(&legacy).unwrap();
+            assert!(
+                restored
+                    .constraint_warning
+                    .as_deref()
+                    .unwrap()
+                    .contains("review required")
+            );
             assert!(!restored.calibrated);
             for (a, b) in scene.parts.iter().zip(&restored.parts) {
                 for amount in [0., 1.] {
@@ -2087,11 +2092,10 @@ mod tests {
         .unwrap();
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_explosion_follows_assembled_axes_and_restored_poses() {
         use constraints::PartId;
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = Catalog::scan(root.into()).unwrap();
         for (width, depth, height, body, split_roof) in [
             ("S", 3, "1F", SustainerBody::Flat, false),
@@ -2381,7 +2385,7 @@ mod tests {
                 }
                 let mut restored =
                     Scene::load(&catalog.root, &bom, "Restored explosion".into(), true).unwrap();
-                restored.apply(&saved);
+                restored.apply(&saved).unwrap();
                 assert!(restored.constraint_warning.is_none());
                 for (a, b) in rotated.parts.iter().zip(&restored.parts) {
                     for amount in [0., 0.5, 1.] {
@@ -2397,10 +2401,9 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_library_latch_bearing_pairing() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let bom = c
             .sustainer_bom(&Selection::default(), SustainerOptions::default())
@@ -2436,10 +2439,9 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_library_all_scene_datums() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let mut configurations = 0;
         let mut source_hole_discrepancies = 0;
@@ -2671,10 +2673,9 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_library_graph_lid_motion_and_roundtrip() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let mut surface_reports = Vec::new();
         for (width, depth, height, body, split_roof) in [
@@ -2776,7 +2777,7 @@ mod tests {
             }
             constraints::solve(&mut old_seats).unwrap();
             let mut upgraded_seats = scene.clone();
-            upgraded_seats.apply(&old_seats.definition());
+            upgraded_seats.apply(&old_seats.definition()).unwrap();
             assert!(
                 upgraded_seats
                     .parts
@@ -2787,7 +2788,7 @@ mod tests {
             // A user's confirmed calibration is never silently replaced.
             old_seats.calibrated = true;
             let mut manual = scene.clone();
-            manual.apply(&old_seats.definition());
+            manual.apply(&old_seats.definition()).unwrap();
             assert!(manual.calibrated);
             assert_eq!(lid_angle(&manual), Some(12.));
             assert!(
@@ -2900,7 +2901,7 @@ mod tests {
             let saved: crate::scene::Definition =
                 toml::from_str(&toml::to_string(&scene.definition()).unwrap()).unwrap();
             let mut restored = Scene::load(&c.root, &bom, "roundtrip".into(), true).unwrap();
-            restored.apply(&saved);
+            restored.apply(&saved).unwrap();
             assert_eq!(lid_angle(&restored), Some(75.));
             for (a, b) in restored.parts.iter().zip(&scene.parts) {
                 assert!(a.pose.matrix(0.).abs_diff_eq(b.pose.matrix(0.), 0.001));

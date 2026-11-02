@@ -83,14 +83,7 @@ pub fn label(config: &Config) -> Result<Arc<Mesh>, String> {
     if config.depth > 0.4 {
         return Err("Cullenect text depth must be at most 0.4 mm".into());
     }
-    let polygons = crate::label::text_polygons(config)?;
-    if polygons
-        .iter()
-        .flatten()
-        .any(|p| p.x.abs() > 17. || p.y.abs() > 5.)
-    {
-        return Err("Cullenect text exceeds 34 x 10 mm safe area".into());
-    }
+    let polygons = crate::label::tab_text_polygons(config)?;
     crate::label::apply_text(&source, config, &polygons, [0., 0.], 1.2)
 }
 fn cavity(offset: f64, top: f64) -> Manifold {
@@ -114,6 +107,34 @@ pub fn socket(body: &Arc<Mesh>, offset: f32, top: f32) -> Result<Arc<Mesh>, Stri
 mod tests {
     use super::*;
     #[test]
+    fn compact_two_line_labels_keep_matching_material_regions() {
+        for style in [
+            crate::label::Style::Raised,
+            crate::label::Style::Engraved,
+            crate::label::Style::Flat,
+        ] {
+            let config = crate::label::Config {
+                enabled: true,
+                text: "收纳\nA8".into(),
+                size: 5.,
+                depth: 0.3,
+                style,
+                ..Default::default()
+            };
+            let result = label(&config).unwrap();
+            let regions = crate::label::tab_color_regions(&result, &config, [0., 0.], 1.2).unwrap();
+            let total = crate::label::solid(&result).unwrap().volume();
+            let volumes: Vec<_> = regions
+                .iter()
+                .map(|m| crate::label::solid(m).unwrap())
+                .collect();
+            assert!(volumes[1].volume() > 0.);
+            assert!((volumes.iter().map(|m| m.volume()).sum::<f64>() - total).abs() < 0.01);
+            assert!(volumes[0].intersection(&volumes[1]).volume().abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn flat_lettering_preserves_shape_and_has_disjoint_flush_color_volumes() {
         let c = Config {
             enabled: true,
@@ -132,7 +153,7 @@ mod tests {
         assert!(whole.difference(&original).volume().abs() < 0.001);
         assert!(original.difference(&whole).volume().abs() < 0.001);
         assert!((m.size - Vec3::new(36., 11., 1.2)).abs().max_element() < 0.001);
-        let regions = crate::label::color_regions(&m, &c, [0., 0.], 1.2).unwrap();
+        let regions = crate::label::tab_color_regions(&m, &c, [0., 0.], 1.2).unwrap();
         let body = crate::label::solid(&regions[0]).unwrap();
         let ink = crate::label::solid(&regions[1]).unwrap();
         assert!(body.intersection(&ink).volume().abs() < 0.001);
@@ -146,7 +167,7 @@ mod tests {
             .collect();
         assert!(!shaded.is_empty());
         let mut area = 0.;
-        let polygons = crate::label::text_polygons(&c).unwrap();
+        let polygons = crate::label::tab_text_polygons(&c).unwrap();
         for tri in shaded {
             assert!(
                 tri.iter()

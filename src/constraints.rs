@@ -419,6 +419,9 @@ impl Relation {
     }
 }
 pub fn solve(scene: &mut Scene) -> Result<(), String> {
+    for part in &scene.parts {
+        part.pose.validate()?;
+    }
     let count = scene.parts.len();
     let ids: Vec<_> = scene.parts.iter().map(PartId::of).collect();
     let mut incoming = vec![None; count];
@@ -454,6 +457,9 @@ pub fn solve(scene: &mut Scene) -> Result<(), String> {
         if solved.len() == before {
             return Err("Assembly constraint cycle detected".into());
         }
+    }
+    if poses.iter().any(|pose| !pose.is_finite()) {
+        return Err("Assembly transform overflow".into());
     }
     // Transactional: validate the entire graph before changing a single pose.
     for (i, p) in scene.parts.iter_mut().enumerate() {

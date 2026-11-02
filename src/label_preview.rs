@@ -22,11 +22,11 @@ fn glyphs(config: &Config) -> Result<Arc<Glyphs>, String> {
         }));
     }
     config.validate()?;
-    let polygons = crate::label::text_polygons(config)?;
+    let polygons = crate::label::tab_text_polygons(config)?;
     let fits = polygons
         .iter()
         .flatten()
-        .all(|p| p.x.abs() <= 17. && p.y.abs() <= 5.);
+        .all(|p| p.x.abs() <= 17.00001 && p.y.abs() <= 5.00001);
     let solid = Manifold::extrude(&polygons, 1., 0, 0., D2::new(1., 1.));
     if solid.status() != Error::NoError {
         return Err(format!("文字预览生成失败：{:?}", solid.status()));

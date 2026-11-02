@@ -151,10 +151,9 @@ pub fn latch(scene: &mut Scene, module: usize) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn drawer_orientation_clearance_travel_and_latch_follow() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height, depth) in [
             ("S", "1F", 3),
@@ -325,7 +324,7 @@ mod tests {
             let encoded = toml::to_string(&def).unwrap();
             let saved = toml::from_str(&encoded).unwrap();
             let mut restored = s.clone();
-            restored.apply(&saved);
+            restored.apply(&saved).unwrap();
             for &li in &latch_indices {
                 assert!(
                     restored.parts[li]

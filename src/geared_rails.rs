@@ -105,10 +105,9 @@ fn slot_stop(mesh: &crate::mesh::Mesh, y: f32, z: f32, lower: bool) -> Option<f3
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn racks_fit_drawer_channels_and_follow() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height, depth) in [
             ("S", "1F", 3),
@@ -169,7 +168,7 @@ mod tests {
                 .retain(|r| !r.child.path.contains("/Geared Rails/"));
             let saved: crate::scene::Definition =
                 toml::from_str(&toml::to_string(&legacy).unwrap()).unwrap();
-            s.apply(&saved);
+            s.apply(&saved).unwrap();
             assert!(s.constraint_warning.is_none());
             for &r in &rails {
                 assert!(

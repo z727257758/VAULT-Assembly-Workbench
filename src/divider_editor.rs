@@ -304,10 +304,9 @@ impl Editor {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn actual_pointer_clicks_match_preview_without_moving_canvas() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let s = Selection::default();
         let g = Grid::new(&s).unwrap();
@@ -404,10 +403,9 @@ mod tests {
         assert_eq!(editor.placement_at(g, [4.1, 5.]).start, [2, 5]);
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn repeated_clicks_keep_the_row_and_reject_overlap_transactionally() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let s = Selection::default();
         let g = Grid::new(&s).unwrap();
@@ -427,10 +425,9 @@ mod tests {
         assert_eq!(editor.undo.len(), history);
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn edits_are_transactional_and_history_branches() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         let s = Selection::default();
         let g = Grid::new(&s).unwrap();

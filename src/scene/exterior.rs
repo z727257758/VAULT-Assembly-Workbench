@@ -2,17 +2,16 @@ use super::*;
 use crate::catalog::exterior::{Component, Role};
 impl Scene {
     /// Called only by the background combination loader; source files remain read-only.
-    pub fn append_exterior(
+    pub(crate) fn append_exterior(
         &mut self,
-        root: &Path,
+        loader: &mut LoadCache,
         components: &[Component],
-        rules: &Rules,
     ) -> Result<Vec<(Role, usize)>, String> {
         if components.is_empty() {
             return Ok(vec![]);
         }
         let items: Vec<_> = components.iter().map(|c| c.bom.clone()).collect();
-        let extra = Self::load_with_rules(root, &items, "Exterior".into(), false, rules)?;
+        let extra = Self::load_cached(loader, &items, "Exterior".into(), false)?;
         let mut result = Vec::new();
         for part in extra.parts {
             if self.parts.iter().any(|p| {

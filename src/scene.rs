@@ -20,6 +20,24 @@ pub struct Pose {
     pub travel_frame: Option<[f32; 4]>,
 }
 impl Pose {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .position
+            .iter()
+            .chain(&self.rotation)
+            .chain(&self.travel)
+            .any(|v| !v.is_finite())
+            || self.travel_frame.is_some_and(|q| {
+                !q.iter().all(|v| v.is_finite())
+                    || (Quat::from_array(q).length_squared() - 1.).abs() > 0.002
+            })
+            || !self.matrix(0.).is_finite()
+            || !self.matrix(1.).is_finite()
+        {
+            return Err(format!("Invalid assembly pose: {}", self.path));
+        }
+        Ok(())
+    }
     pub fn matrix(&self, explosion: f32) -> Mat4 {
         let r = Vec3::from(self.rotation).map(f32::to_radians);
         let q = Quat::from_euler(glam::EulerRot::XYZ, r.x, r.y, r.z);
@@ -32,11 +50,21 @@ impl Pose {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Definition {
     pub calibrated: bool,
+    /// Versioned, deterministic geometry stamps. Legacy files remain unverified.
+    #[serde(default)]
+    pub geometry_version: u32,
+    #[serde(default)]
+    pub geometry: Vec<GeometryStamp>,
     pub poses: Vec<Pose>,
     #[serde(default)]
     pub relations: Vec<crate::constraints::Relation>,
     #[serde(default)]
     pub mating_checks: Vec<crate::constraints::MateCheck>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeometryStamp {
+    pub part: crate::constraints::PartId,
+    pub fingerprint: String,
 }
 #[derive(Clone)]
 pub struct Part {
@@ -109,6 +137,115 @@ impl Part {
         }
     }
 }
+/// One background load task owns its source/display cache and cumulative budget.
+pub(crate) struct LoadCache {
+    root: std::path::PathBuf,
+    rules: Rules,
+    sources: HashMap<String, Arc<Mesh>>,
+    bodies: HashMap<(String, bool), Vec<crate::display::Body>>,
+    remaining: usize,
+}
+impl LoadCache {
+    pub fn new(root: &Path, rules: &Rules) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            rules: rules.clone(),
+            sources: HashMap::new(),
+            bodies: HashMap::new(),
+            remaining: MAX_SCENE_TRIANGLES,
+        }
+    }
+    fn source(&mut self, path: &str) -> Result<Arc<Mesh>, String> {
+        if let Some(mesh) = self.sources.get(path) {
+            return Ok(mesh.clone());
+        }
+        let mesh = Mesh::load_with_budget(&self.root.join(path), self.remaining)
+            .map_err(|e| format!("{path}: {e}"))?;
+        self.remaining -= mesh.vertices.len() / 3;
+        self.sources.insert(path.to_owned(), mesh.clone());
+        Ok(mesh)
+    }
+    fn prepared(
+        &mut self,
+        path: &str,
+        assembly: bool,
+    ) -> Result<Vec<crate::display::Body>, String> {
+        let remove_supports = assembly
+            && path.contains("/Boxes/")
+            && path.contains(" Box ")
+            && !path.contains(" Part ");
+        let key = (path.to_owned(), remove_supports);
+        if let Some(bodies) = self.bodies.get(&key) {
+            return Ok(bodies.clone());
+        }
+        let source = self.source(path)?;
+        let mut bodies = self.rules.prepare(path, &source)?;
+        if remove_supports {
+            for body in &mut bodies {
+                body.mesh = crate::display::remove_runner_supports(&body.mesh);
+            }
+        }
+        self.bodies.insert(key, bodies.clone());
+        Ok(bodies)
+    }
+}
+/// Deduplicate completed member geometry immediately, before loading another member.
+pub(crate) struct MeshPool {
+    limit: usize,
+    triangles: usize,
+    shared: HashMap<u64, Vec<Arc<Mesh>>>,
+    seen: std::collections::HashSet<usize>,
+}
+impl Default for MeshPool {
+    fn default() -> Self {
+        Self {
+            limit: MAX_SCENE_TRIANGLES,
+            triangles: 0,
+            shared: HashMap::new(),
+            seen: Default::default(),
+        }
+    }
+}
+impl MeshPool {
+    pub fn share(&mut self, scene: &mut Scene) -> Result<(), String> {
+        for part in &mut scene.parts {
+            let pointer = Arc::as_ptr(&part.mesh) as usize;
+            if self.seen.contains(&pointer) {
+                continue;
+            }
+            use std::hash::{Hash, Hasher};
+            let bytes = bytemuck::cast_slice::<_, u8>(&part.mesh.vertices);
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hash);
+            for value in part
+                .mesh
+                .min
+                .to_array()
+                .into_iter()
+                .chain(part.mesh.max.to_array())
+            {
+                value.to_bits().hash(&mut hash);
+            }
+            let bucket = self.shared.entry(hash.finish()).or_default();
+            if let Some(mesh) = bucket.iter().find(|m| {
+                m.min == part.mesh.min
+                    && m.max == part.mesh.max
+                    && bytemuck::cast_slice::<_, u8>(&m.vertices) == bytes
+            }) {
+                part.mesh = mesh.clone();
+            } else {
+                let count = part.mesh.vertices.len() / 3;
+                if self.triangles + count > self.limit {
+                    return Err("Combination exceeds 16 million unique triangles; remove members or inserts".into());
+                }
+                self.triangles += count;
+                bucket.push(part.mesh.clone());
+            }
+            self.seen.insert(Arc::as_ptr(&part.mesh) as usize);
+        }
+        Ok(())
+    }
+}
 impl Scene {
     #[cfg(test)]
     pub fn load(root: &Path, items: &[Bom], title: String, assembly: bool) -> Result<Self, String> {
@@ -121,19 +258,18 @@ impl Scene {
         assembly: bool,
         rules: &Rules,
     ) -> Result<Self, String> {
+        Self::load_cached(&mut LoadCache::new(root, rules), items, title, assembly)
+    }
+    pub(crate) fn load_cached(
+        loader: &mut LoadCache,
+        items: &[Bom],
+        title: String,
+        assembly: bool,
+    ) -> Result<Self, String> {
         let mut cache: HashMap<String, Arc<Mesh>> = HashMap::new();
-        let mut tris = 0;
         for item in items.iter().filter(|i| i.enabled) {
             if !cache.contains_key(&item.path) {
-                let mesh = Mesh::load(&root.join(&item.path))
-                    .map_err(|e| format!("{}: {e}", item.name()))?;
-                tris += mesh.vertices.len() / 3;
-                if tris > MAX_SCENE_TRIANGLES {
-                    return Err(
-                        "Scene exceeds 16 million unique triangles; select fewer files".into(),
-                    );
-                }
-                cache.insert(item.path.clone(), mesh);
+                cache.insert(item.path.clone(), loader.source(&item.path)?);
             }
         }
         let module = items
@@ -145,7 +281,7 @@ impl Scene {
         let mut parts = Vec::new();
         for item in items.iter().filter(|i| i.enabled) {
             let mesh = cache.get(&item.path).unwrap();
-            let bodies = rules.prepare(&item.path, mesh)?;
+            let bodies = loader.prepared(&item.path, assembly)?;
             for copy in 0..item.qty.min(100) {
                 for (body_index, body) in bodies.iter().enumerate() {
                     let display_index = copy as usize * bodies.len() + body_index;
@@ -282,23 +418,29 @@ impl Scene {
                 crate::sustainer::apply(&mut scene)?;
                 return Ok(scene);
             }
-            for part in &mut scene.parts {
-                if part.pose.path.contains("/Boxes/")
-                    && part.pose.path.contains(" Box ")
-                    && !part.pose.path.contains(" Part ")
-                {
-                    part.mesh = crate::display::remove_runner_supports(&part.mesh);
-                }
-            }
             let _ = crate::constraints::basic_relations(&mut scene);
         }
         Ok(scene)
     }
-    pub fn apply(&mut self, definition: &Definition) {
+    pub fn apply(&mut self, definition: &Definition) -> Result<(), String> {
+        let mut ids = std::collections::HashSet::new();
+        for pose in &definition.poses {
+            pose.validate()?;
+            if !ids.insert((&pose.path, pose.instance, pose.body)) {
+                return Err("Duplicate saved assembly pose".into());
+            }
+        }
+        for relation in &definition.relations {
+            if !relation.joint.transform()?.is_finite() {
+                return Err("Invalid saved joint transform".into());
+            }
+        }
+        let geometry_matches = !definition.calibrated
+            || (definition.geometry_version == 1 && definition.geometry == self.geometry_stamps());
         // Reconcile saved instances with the current BOM. A shared cap may now
         // belong to another key; absent parts must not invalidate the whole graph.
         let mut old = Scene {
-            calibrated: definition.calibrated,
+            calibrated: definition.calibrated && geometry_matches,
             relations: definition.relations.clone(),
             ..Default::default()
         };
@@ -311,7 +453,17 @@ impl Scene {
                 old.parts.push(part);
             }
         }
-        self.retain_assembly_state(&old);
+        let mut candidate = self.clone();
+        candidate.retain_assembly_state(&old);
+        if let Some(error) = &candidate.constraint_warning {
+            return Err(error.clone());
+        }
+        if definition.calibrated && !geometry_matches {
+            candidate.calibrated = false;
+            candidate.constraint_warning = Some("源几何已改变或旧校准缺少几何指纹，请重新人工核对 / Geometry changed or legacy calibration has no fingerprint; review required".into());
+        }
+        *self = candidate;
+        Ok(())
     }
     /// Keep edits for surviving parts while retaining default mates for new parts.
     pub fn retain_assembly_state(&mut self, old: &Scene) {
@@ -430,15 +582,59 @@ impl Scene {
             self.constraint_warning = crate::sustainer::reset_explosion(self).err();
         }
         self.calibrated = old.calibrated
+            && self.geometry_stamps() == old.geometry_stamps()
             && !layout_changed
             && self.constraint_warning.is_none()
             && ids
                 .iter()
                 .all(|id| old.parts.iter().any(|p| PartId::of(p) == *id));
     }
+    fn geometry_stamps(&self) -> Vec<GeometryStamp> {
+        let mut meshes = HashMap::new();
+        let mut stamps: Vec<_> = self
+            .parts
+            .iter()
+            .map(|part| {
+                let hash = *meshes.entry(part.mesh_key()).or_insert_with(|| {
+                    // FNV-style word hash, fixed algorithm/version across builds.
+                    // Appearance (normals/shading/colors) is deliberately excluded.
+                    part.mesh
+                        .vertices
+                        .iter()
+                        .flat_map(|v| v.position)
+                        .chain(part.mesh.min.to_array())
+                        .chain(part.mesh.max.to_array())
+                        .fold(0xcbf29ce484222325_u64, |h, v| {
+                            (h ^ u64::from(v.to_bits())).wrapping_mul(0x100000001b3)
+                        })
+                });
+                let hash = part.source_size.to_array().into_iter().fold(hash, |h, v| {
+                    (h ^ u64::from(v.to_bits())).wrapping_mul(0x100000001b3)
+                });
+                GeometryStamp {
+                    part: crate::constraints::PartId::of(part),
+                    fingerprint: format!("{hash:016x}:{}", part.source_bodies),
+                }
+            })
+            .collect();
+        stamps.sort_by(|a, b| {
+            (&a.part.path, a.part.instance, a.part.body).cmp(&(
+                &b.part.path,
+                b.part.instance,
+                b.part.body,
+            ))
+        });
+        stamps
+    }
     pub fn definition(&self) -> Definition {
         Definition {
             calibrated: self.calibrated,
+            geometry_version: 1,
+            geometry: if self.calibrated {
+                self.geometry_stamps()
+            } else {
+                Vec::new()
+            },
             relations: self.relations.clone(),
             poses: self.parts.iter().map(|p| p.pose.clone()).collect(),
             mating_checks: self.mating_checks.clone(),
@@ -537,6 +733,161 @@ fn ray_box(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tiny_scene() -> Scene {
+        let mesh = Arc::new(
+            Mesh::parse(b"solid x\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid").unwrap(),
+        );
+        Scene {
+            assembly: true,
+            parts: vec![Part {
+                source_size: mesh.size,
+                mesh,
+                pose: Pose {
+                    path: "synthetic.stl".into(),
+                    instance: 0,
+                    body: None,
+                    position: [0.; 3],
+                    rotation: [0.; 3],
+                    travel: [0.; 3],
+                    travel_frame: None,
+                },
+                color: [1.; 4],
+                visible: true,
+                source_bodies: 1,
+            }],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn saved_invalid_poses_and_graphs_leave_the_scene_unchanged() {
+        let mut scene = tiny_scene();
+        scene.calibrated = true;
+        let before = toml::to_string(&scene.definition()).unwrap();
+        let mut invalid = Vec::new();
+        for field in 0..3 {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut definition = scene.definition();
+                match field {
+                    0 => definition.poses[0].position[0] = value,
+                    1 => definition.poses[0].rotation[0] = value,
+                    _ => definition.poses[0].travel[0] = value,
+                }
+                invalid.push(definition);
+            }
+        }
+        for frame in [[0.; 4], [0., 0., 0., 2.], [f32::NAN, 0., 0., 1.]] {
+            let mut definition = scene.definition();
+            definition.poses[0].travel_frame = Some(frame);
+            invalid.push(definition);
+        }
+        let mut duplicate = scene.definition();
+        duplicate.poses.push(duplicate.poses[0].clone());
+        invalid.push(duplicate);
+        let mut cycle = scene.definition();
+        let id = crate::constraints::PartId::of(&scene.parts[0]);
+        cycle.relations.push(crate::constraints::Relation {
+            parent: id.clone(),
+            child: id,
+            joint: crate::constraints::Joint::Fixed {
+                position: [0.; 3],
+                rotation: [0., 0., 0., 1.],
+            },
+            label: "bad self-cycle".into(),
+        });
+        invalid.push(cycle);
+        for definition in invalid {
+            let parsed: Definition =
+                toml::from_str(&toml::to_string(&definition).unwrap()).unwrap();
+            assert!(scene.apply(&parsed).is_err());
+            assert_eq!(toml::to_string(&scene.definition()).unwrap(), before);
+            assert!(scene.parts[0].pose.matrix(1.).is_finite());
+        }
+        let mut invalid_root = scene.clone();
+        invalid_root.parts[0].pose.position[0] = f32::NAN;
+        assert!(crate::constraints::solve(&mut invalid_root).is_err());
+    }
+    #[test]
+    fn verification_is_bound_to_geometry_and_legacy_saves_need_review() {
+        let mut source = tiny_scene();
+        source.calibrated = true;
+        let saved: Definition =
+            toml::from_str(&toml::to_string(&source.definition()).unwrap()).unwrap();
+        let mut same = tiny_scene();
+        same.apply(&saved).unwrap();
+        assert!(same.calibrated);
+        let mut changed = tiny_scene();
+        changed.parts[0].mesh = Arc::new(
+            Mesh::parse(b"solid x\nvertex 0 0 0\nvertex 30 0 0\nvertex 0 1 0\nendsolid").unwrap(),
+        );
+        changed.parts[0].source_size = changed.parts[0].mesh.size;
+        changed.apply(&saved).unwrap();
+        assert!(!changed.calibrated);
+        assert!(
+            changed
+                .constraint_warning
+                .as_ref()
+                .unwrap()
+                .contains("review required")
+        );
+        changed.retain_assembly_state(&source);
+        assert!(!changed.calibrated);
+        let mut legacy = saved.clone();
+        legacy.geometry.clear();
+        legacy.geometry_version = 0;
+        same.apply(&legacy).unwrap();
+        assert!(!same.calibrated);
+        let mut appearance = tiny_scene();
+        Arc::make_mut(&mut appearance.parts[0].mesh).vertices[0].shade = 0.5;
+        appearance.apply(&saved).unwrap();
+        assert!(appearance.calibrated);
+    }
+    #[test]
+    fn shared_load_cache_reuses_geometry_and_stops_before_next_source() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/test-fixtures");
+        std::fs::create_dir_all(&fixture_root).unwrap();
+        let dir = tempfile::tempdir_in(fixture_root).unwrap();
+        let file = dir.path().join("one.stl");
+        std::fs::write(
+            &file,
+            b"solid x\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid",
+        )
+        .unwrap();
+        let item = Bom {
+            path: "one.stl".into(),
+            qty: 1,
+            group: "test".into(),
+            enabled: true,
+        };
+        let mut cache = LoadCache::new(dir.path(), &Rules::default());
+        cache.remaining = 1;
+        let first =
+            Scene::load_cached(&mut cache, std::slice::from_ref(&item), "one".into(), false)
+                .unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let second = Scene::load_cached(&mut cache, &[item], "two".into(), false).unwrap();
+        assert!(Arc::ptr_eq(&first.parts[0].mesh, &second.parts[0].mesh));
+        assert_eq!(cache.remaining, 0);
+        assert!(
+            cache
+                .source("not-present.stl")
+                .err()
+                .unwrap()
+                .contains("budget exhausted before reading")
+        );
+        let mut pool = MeshPool {
+            limit: 1,
+            ..Default::default()
+        };
+        let mut one = tiny_scene();
+        let mut equal = tiny_scene();
+        pool.share(&mut one).unwrap();
+        pool.share(&mut equal).unwrap();
+        assert!(Arc::ptr_eq(&one.parts[0].mesh, &equal.parts[0].mesh));
+        let mut different = tiny_scene();
+        Arc::make_mut(&mut different.parts[0].mesh).vertices[0].position[0] += 1.;
+        assert!(pool.share(&mut different).is_err());
+        assert_eq!(pool.triangles, 1);
+    }
     #[test]
     fn ray_parallel_outside_misses() {
         assert!(!ray_box(
@@ -645,50 +996,13 @@ impl Scene {
         let mut slots = std::collections::HashSet::new();
         let mut bounds = Vec::new();
         let mut widths = std::collections::BTreeMap::<u32, f32>::new();
-        let mut triangles = 0usize;
-        let mut shared = HashMap::<u64, Vec<Arc<Mesh>>>::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut pool = MeshPool::default();
         for (scene, placement, _) in &mut members {
             placement.validate()?;
             if !slots.insert((placement.column, placement.level)) {
                 return Err("同一列和层只能放置一个成员 / Duplicate column and level".into());
             }
-            // Share identical display geometry across members, including repeated source copies.
-            // Labels and generated inserts only share when every vertex (including material shading) matches.
-            for part in &mut scene.parts {
-                let pointer = Arc::as_ptr(&part.mesh) as usize;
-                if seen.contains(&pointer) {
-                    continue;
-                }
-                use std::hash::{Hash, Hasher};
-                let bytes = bytemuck::cast_slice::<_, u8>(&part.mesh.vertices);
-                let mut hash = std::collections::hash_map::DefaultHasher::new();
-                bytes.hash(&mut hash);
-                for value in part
-                    .mesh
-                    .min
-                    .to_array()
-                    .into_iter()
-                    .chain(part.mesh.max.to_array())
-                {
-                    value.to_bits().hash(&mut hash);
-                }
-                let bucket = shared.entry(hash.finish()).or_default();
-                if let Some(mesh) = bucket.iter().find(|m| {
-                    m.min == part.mesh.min
-                        && m.max == part.mesh.max
-                        && bytemuck::cast_slice::<_, u8>(&m.vertices) == bytes
-                }) {
-                    part.mesh = mesh.clone();
-                } else {
-                    triangles += part.mesh.vertices.len() / 3;
-                    if triangles > MAX_SCENE_TRIANGLES {
-                        return Err("Combination exceeds 16 million unique triangles; remove members or inserts".into());
-                    }
-                    bucket.push(part.mesh.clone());
-                }
-                seen.insert(Arc::as_ptr(&part.mesh) as usize);
-            }
+            pool.share(scene)?;
             if crate::sustainer::lid_angle(scene).is_some() {
                 crate::sustainer::set_lid_angle(scene, 0.)?;
             }

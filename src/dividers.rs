@@ -388,10 +388,8 @@ pub fn apply(scene: &mut Scene, layout: &Layout, s: &Selection) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn root() -> Option<Catalog> {
-        std::env::var("VAULT_MODEL_ROOT")
-            .ok()
-            .map(|s| Catalog::scan(s.into()).unwrap())
+    fn root() -> Catalog {
+        Catalog::scan(crate::test_support::required_env("VAULT_MODEL_ROOT").into()).unwrap()
     }
     fn plate(c: &Catalog, s: &Selection, n: i32, h: &str) -> String {
         c.accessories(s)
@@ -401,10 +399,9 @@ mod tests {
             .path
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn removal_and_baseplate_exclusion_work_in_both_directions() {
-        let Some(c) = root() else {
-            return;
-        };
+        let c = root();
         let s = Selection::default();
         let divider = plate(&c, &s, 10, "20MM");
         let base = c
@@ -465,10 +462,9 @@ mod tests {
         assert!(!bom.iter().any(|b| b.path == base && b.enabled));
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn rejects_crossings_bounds_and_incompatible_presets() {
-        let Some(c) = root() else {
-            return;
-        };
+        let c = root();
         let s = Selection::default();
         let g = Grid::new(&s).unwrap();
         let p = Placement {
@@ -516,10 +512,9 @@ mod tests {
         assert!(!bom.iter().any(|b| b.group == GROUP));
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn real_divider_layout_fits_follows_and_survives_refresh() {
-        let Some(c) = root() else {
-            return;
-        };
+        let c = root();
         for (width, depth, height_name, tall, vertical) in [
             ("S", 3, "1F", "20MM", false),
             ("S", 4, "1F", "34.5MM", true),
@@ -646,7 +641,7 @@ mod tests {
             let def = refreshed.definition();
             let mut saved = Scene::load(&c.root, &bom, "saved".into(), true).unwrap();
             apply(&mut saved, &moved, &s).unwrap();
-            saved.apply(&def);
+            saved.apply(&def).unwrap();
             assert!(
                 saved.parts[i]
                     .pose

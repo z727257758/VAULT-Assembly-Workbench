@@ -1009,6 +1009,9 @@ impl App {
                         "Ready: drag to orbit, right drag to pan, scroll to zoom, click to select",
                     )
                     .into();
+                    if let Some(warning) = &self.scene.constraint_warning {
+                        self.status = warning.clone();
+                    }
                     if !finished {
                         self.status = "简化预览：精确盒体正在后台并行生成，完成后自动替换。".into();
                     }
@@ -4126,8 +4129,7 @@ fn load_scene_definition(scene: &mut Scene, home: &Path, key: &str) -> Result<()
     };
     let definition: Definition =
         toml::from_str(&text).map_err(|e| format!("Assembly definition: {e}"))?;
-    scene.apply(&definition);
-    Ok(())
+    scene.apply(&definition)
 }
 fn ui_height(ctx: &egui::Context) -> f32 {
     ctx.content_rect().height()

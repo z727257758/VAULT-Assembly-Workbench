@@ -29,6 +29,8 @@ mod scene;
 mod sustainer;
 mod sustainer_divider_editor;
 mod sustainer_dividers;
+#[cfg(test)]
+mod test_support;
 pub const APP_NAME: &str = "VAULT 装配工作台";
 pub const APP_NAME_EN: &str = "VAULT Assembly Workbench";
 pub fn app_name(zh: bool) -> &'static str {
@@ -82,10 +84,9 @@ fn main() -> eframe::Result {
 mod library_tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn supplied_library_variants_and_assembly_roundtrip() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = catalog::Catalog::scan(root.into()).unwrap();
         assert!(catalog.stl_count() > 100);
         let mut combinations = 0;
@@ -131,7 +132,7 @@ mod library_tests {
         assert!(scene.parts.len() > 10);
         let snapshot = toml::to_string_pretty(&scene.definition()).unwrap();
         let decoded: scene::Definition = toml::from_str(&snapshot).unwrap();
-        scene.apply(&decoded);
+        scene.apply(&decoded).unwrap();
         assert!(!scene.calibrated);
         let (center, radius) = scene.bounds(1.);
         assert!(center.is_finite() && radius.is_finite() && radius > 100.);
@@ -170,10 +171,9 @@ mod library_tests {
 mod display_integration_tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn springs_file_yields_two_bodies_not_two_copies_of_a_pair() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let root = std::path::PathBuf::from(root);
         let path = "01. DRAWERS/07. Universal/Springs.stl";
         let bytes_before = std::fs::read(root.join(path)).unwrap();
@@ -207,6 +207,8 @@ mod display_integration_tests {
         assert!(scene.parts[0].pose.position[0] < 0. && scene.parts[1].pose.position[0] > 0.);
         let old_position = scene.parts[0].pose.position;
         let legacy = scene::Definition {
+            geometry_version: 0,
+            geometry: vec![],
             calibrated: true,
             mating_checks: vec![],
             relations: vec![],
@@ -220,7 +222,7 @@ mod display_integration_tests {
                 travel_frame: None,
             }],
         };
-        scene.apply(&legacy);
+        scene.apply(&legacy).unwrap();
         assert_eq!(scene.parts[0].pose.position, old_position);
         assert!(
             !scene.calibrated,
@@ -231,7 +233,7 @@ mod display_integration_tests {
         saved.poses[1].position = [4., 5., 6.];
         let restored: scene::Definition =
             toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
-        scene.apply(&restored);
+        scene.apply(&restored).unwrap();
         assert_eq!(scene.parts[0].pose.position, [1., 2., 3.]);
         assert_eq!(scene.parts[1].pose.position, [4., 5., 6.]);
         let standalone = scene::Scene::load(
@@ -270,10 +272,9 @@ mod display_integration_tests {
 mod constraint_integration_tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn standard_drawer_constraints_follow_and_reduce_facade_crossings() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = catalog::Catalog::scan(root.into()).unwrap();
         let bom = catalog.bom(&catalog::Selection::default());
         let mut s = scene::Scene::load(&catalog.root, &bom, "S3".into(), true).unwrap();
@@ -322,7 +323,7 @@ mod constraint_integration_tests {
         let encoded = toml::to_string_pretty(&s.definition()).unwrap();
         let decoded: scene::Definition = toml::from_str(&encoded).unwrap();
         let mut restored = scene::Scene::load(&catalog.root, &bom, "S3".into(), true).unwrap();
-        restored.apply(&decoded);
+        restored.apply(&decoded).unwrap();
         assert_eq!(restored.relations.len(), s.relations.len());
         assert!(
             (restored.parts[facade].pose.position[2] - s.parts[facade].pose.position[2]).abs()

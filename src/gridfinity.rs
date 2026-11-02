@@ -514,7 +514,7 @@ fn preview_mesh(home: &Path, b: &Bin, s: &Selection) -> Result<Arc<Mesh>, String
     let (key, dir, prefix) = if b.tab && b.label.active() {
         (
             format!(
-                "rust-lettering-v1\n{}\n{}",
+                "rust-lettering-v2\n{}\n{}",
                 body,
                 toml::to_string(&b.label).map_err(|e| e.to_string())?
             ),
@@ -693,14 +693,7 @@ fn generate_cancel(
     // Validate text before potentially starting an expensive new body render.
     let polygons = if b.tab && b.label.active() {
         b.label.validate()?;
-        let polygons = crate::label::text_polygons(&b.label)?;
-        if polygons
-            .iter()
-            .flatten()
-            .any(|p| p.x.abs() > 17. || p.y.abs() > 5.)
-        {
-            return Err("盒子标签文字超出 34 × 10 mm 安全区，请缩小字号".into());
-        }
+        let polygons = crate::label::tab_text_polygons(&b.label)?;
         Some(polygons)
     } else {
         None
@@ -709,7 +702,7 @@ fn generate_cancel(
         return generate_body_cancel(home, b, s, cancel);
     };
     let key = format!(
-        "rust-lettering-v1\n{}\n{}",
+        "rust-lettering-v2\n{}\n{}",
         script(home, b, s)?,
         toml::to_string(&b.label).map_err(|e| e.to_string())?
     );
@@ -1146,13 +1139,10 @@ depth=0.2
         );
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST, VAULT_MODEL_ROOT"]
     fn four_unit_bins_fit_real_one_floor_drawers() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
         for width in ["S", "M", "L"] {
@@ -1232,10 +1222,9 @@ depth=0.2
         }
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST"]
     fn detachable_real_geometry_and_export() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let selection = Selection::default();
         let bin = Bin {
@@ -1423,10 +1412,9 @@ depth=0.2
         assert!(find_executable(&home, None, vec![]).is_none());
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_BENCH"]
     fn real_parallel_generation_cancellation_and_cache() {
-        if std::env::var_os("VAULT_GRIDFINITY_BENCH").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_BENCH");
         fn copy_tree(src: &Path, dst: &Path) {
             std::fs::create_dir_all(dst).unwrap();
             for item in std::fs::read_dir(src).unwrap() {
@@ -1567,10 +1555,9 @@ depth=0.2
         assert!(bom.is_empty());
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST"]
     fn lettering_reuses_body_without_generator_and_preserves_geometry() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let real = Path::new(env!("CARGO_MANIFEST_DIR"));
         let selection = Selection::default();
         let mut bin = Bin::default();
@@ -1716,10 +1703,9 @@ depth=0.2
         assert_eq!(front.max, rear.max);
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST"]
     fn real_scoop_is_at_front_and_preserves_rear_shelf() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let selection = Selection::default();
         let bins: Vec<_> = [([1, 1], true), ([1, 2], true), ([1, 1], false)]
@@ -1781,10 +1767,9 @@ depth=0.2
         }
     }
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST"]
     fn scoop_geometry_keeps_mounting_bounds_and_adds_material() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let selection = Selection::default();
         let mut bin = Bin {
@@ -1808,10 +1793,9 @@ depth=0.2
     }
 
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn actual_socket_centers_all_standard_variants() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
         for width in ["S", "M", "L"] {
             for depth in 3..=7 {
@@ -1837,13 +1821,10 @@ depth=0.2
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT, VAULT_GRIDFINITY_TEST"]
     fn rebuilt_geometry_export_and_mates() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
         let selection = Selection::default();
@@ -1853,7 +1834,7 @@ depth=0.2
                 label: crate::label::Config {
                     enabled: true,
                     text: "收纳\nA8".into(),
-                    size: 4.,
+                    size: 5.,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1877,7 +1858,11 @@ depth=0.2
             layout.bins[0].label.style = style;
             let mesh = generate(home, &layout.bins[0], &selection).unwrap();
             assert!((mesh.size.x - 41.5).abs() < 0.05);
-            assert!(mesh.size.z > 24. && mesh.size.z < 25.5);
+            assert!(
+                (mesh.size.z - (units(&layout.bins[0], &selection).unwrap() as f32 * 7. + 3.55))
+                    .abs()
+                    < 0.05
+            );
             let originals: Vec<_> = bom
                 .iter()
                 .filter(|b| !b.path.starts_with(PREFIX))
@@ -1938,7 +1923,7 @@ depth=0.2
             .unwrap();
             let top = mesh.min.y + units(&layout.bins[0], &selection).unwrap() as f32 * 7. - 1.2;
             let tab_y = -(layout.bins[0].span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.;
-            let regions = crate::label::color_regions(
+            let regions = crate::label::tab_color_regions(
                 &mesh,
                 &layout.bins[0].label,
                 [0., tab_y as f64],
@@ -1990,7 +1975,7 @@ depth=0.2
                     label: crate::label::Config {
                         enabled: span == [1, 1],
                         text: "收纳\nA8".into(),
-                        size: 4.,
+                        size: 5.,
                         ..Default::default()
                     },
                     ..Default::default()

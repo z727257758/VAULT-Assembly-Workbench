@@ -918,6 +918,8 @@ pub(super) fn load(
         None
     };
     let rules = crate::display::Rules::load(&home.join("config/display-rules.toml"))?;
+    let mut loader = crate::scene::LoadCache::new(root, &rules);
+    let mut geometry = crate::scene::MeshPool::default();
     let mut scenes = Vec::new();
     for member in members {
         crate::preview::check(Some(cancel))?;
@@ -948,7 +950,7 @@ pub(super) fn load(
             .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
             .cloned()
             .collect();
-        let mut scene = Scene::load_with_rules(root, &originals, member.name.clone(), true, &rules)
+        let mut scene = Scene::load_cached(&mut loader, &originals, member.name.clone(), true)
             .map_err(|e| format!("{}: {e}", member.name))?;
         if p.assembly_kind == AssemblyKind::Sustainer {
             crate::sustainer_dividers::apply(
@@ -980,6 +982,7 @@ pub(super) fn load(
             )
         };
         load_scene_definition(&mut scene, home, &key)?;
+        geometry.share(&mut scene)?;
         scenes.push((scene, member.placement, p.sustainer_angle));
     }
     crate::preview::check(Some(cancel))?;
@@ -1001,7 +1004,7 @@ pub(super) fn load(
             )?;
             let d = crate::constraints::stacking::datum(&closed[i])?;
             let tower_height = d.top + shifts[i].y;
-            let parts = closed[i].append_exterior(root, &components, &rules)?;
+            let parts = closed[i].append_exterior(&mut loader, &components)?;
             crate::constraints::exterior::attach(
                 &mut closed[i],
                 &member.preset.selection,
@@ -1022,6 +1025,7 @@ pub(super) fn load(
             } else if member.exterior.base != crate::catalog::exterior::Base::None {
                 lift[i] = (d.bottom - closed[i].closed_extent()?.0.y).max(0.);
             }
+            geometry.share(&mut closed[i])?;
             shifts[i].y += lift[i];
             scenes[i].0 = closed[i].clone();
         }

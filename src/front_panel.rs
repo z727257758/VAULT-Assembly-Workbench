@@ -282,10 +282,9 @@ pub fn apply(scene: &mut Scene, facade: usize) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn all_standard_facade_caps_have_distinct_seats_and_follow_panel() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
         for width in ["S", "M", "L"] {
             for height in ["1F", "2F", "4F"] {
@@ -348,10 +347,9 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn hidden_key_seating_and_switching() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height) in [("S", "1F"), ("S", "2F"), ("M", "1F"), ("L", "1F")] {
             let ordinary = crate::catalog::Selection {
@@ -422,7 +420,7 @@ mod tests {
             }
             let mut from_saved =
                 Scene::load(&c.root, &c.bom(&hidden), "saved switch".into(), true).unwrap();
-            from_saved.apply(&old.definition());
+            from_saved.apply(&old.definition()).unwrap();
             assert!(from_saved.constraint_warning.is_none());
             assert!(
                 from_saved.parts[cap]
@@ -445,7 +443,7 @@ mod tests {
             );
             let def = s.definition();
             let mut restored = s.clone();
-            restored.apply(&def);
+            restored.apply(&def).unwrap();
             assert!(
                 restored.parts[cap]
                     .pose
@@ -468,10 +466,9 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn whole_facade_rotation_preserves_descendants_and_saved_assembly() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height) in [("S", "1F"), ("S", "2F"), ("M", "1F"), ("L", "1F")] {
             let selection = crate::catalog::Selection {
@@ -573,7 +570,7 @@ mod tests {
                 toml::from_str(&toml::to_string(&s.definition()).unwrap()).unwrap();
             let mut restored =
                 Scene::load(&c.root, &c.bom(&selection), "restored".into(), true).unwrap();
-            restored.apply(&def);
+            restored.apply(&def).unwrap();
             for &i in &ids {
                 assert!(
                     restored.parts[i]
@@ -607,10 +604,9 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn manual_front_assembly_fits_and_cap_follows_key() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height) in [("S", "1F"), ("S", "2F"), ("M", "1F"), ("L", "1F")] {
             let selection = crate::catalog::Selection {
@@ -706,7 +702,7 @@ mod tests {
             let encoded = toml::to_string(&s.definition()).unwrap();
             let saved: crate::scene::Definition = toml::from_str(&encoded).unwrap();
             let mut restored = s.clone();
-            restored.apply(&saved);
+            restored.apply(&saved).unwrap();
             assert!(
                 restored.parts[cap]
                     .pose

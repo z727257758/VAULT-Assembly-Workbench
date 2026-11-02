@@ -70,10 +70,9 @@ pub fn apply(scene: &mut Scene, drawer: usize) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn insert_variants_face_up_fit_and_follow() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (w, h, d) in [
             ("S", "1F", 3),
@@ -217,7 +216,7 @@ mod tests {
                 let def: crate::scene::Definition =
                     toml::from_str(&toml::to_string(&s.definition()).unwrap()).unwrap();
                 let mut restored = s.clone();
-                restored.apply(&def);
+                restored.apply(&def).unwrap();
                 assert!(
                     restored.parts[i]
                         .pose

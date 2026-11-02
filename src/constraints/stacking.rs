@@ -348,10 +348,9 @@ mod tests {
         plan(&modules, 0.)
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn library_seating_datums_and_orientation() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let root = std::path::PathBuf::from(root);
         let catalog = crate::catalog::Catalog::scan(root.clone()).unwrap();
         let mut failures = Vec::new();

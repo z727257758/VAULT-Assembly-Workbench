@@ -26,15 +26,30 @@ pub struct Mesh {
 }
 impl Mesh {
     pub fn load(path: &Path) -> Result<Arc<Self>, String> {
+        Self::load_with_budget(path, MAX_TRIANGLES)
+    }
+    pub(crate) fn load_with_budget(path: &Path, remaining: usize) -> Result<Arc<Self>, String> {
+        let limit = remaining.min(MAX_TRIANGLES);
+        if limit == 0 {
+            return Err("Scene triangle budget exhausted before reading next source".into());
+        }
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let length = file.metadata().map_err(|e| e.to_string())?.len();
-        Self::read(BufReader::with_capacity(1024 * 1024, file), length).map(Arc::new)
+        Self::read_limited(BufReader::with_capacity(1024 * 1024, file), length, limit).map(Arc::new)
     }
     #[cfg(test)]
     pub fn parse(data: &[u8]) -> Result<Self, String> {
         Self::read(Cursor::new(data), data.len() as u64)
     }
-    fn read(mut reader: impl BufRead + Seek, length: u64) -> Result<Self, String> {
+    #[cfg(test)]
+    fn read(reader: impl BufRead + Seek, length: u64) -> Result<Self, String> {
+        Self::read_limited(reader, length, MAX_TRIANGLES)
+    }
+    fn read_limited(
+        mut reader: impl BufRead + Seek,
+        length: u64,
+        limit: usize,
+    ) -> Result<Self, String> {
         let mut header = [0u8; 84];
         let count = if length >= 84 {
             reader.read_exact(&mut header).map_err(|e| e.to_string())?;
@@ -49,12 +64,12 @@ impl Mesh {
             if !p.is_finite() {
                 return Err("Non-finite STL coordinate".into());
             }
-            if vertices.len() >= MAX_TRIANGLES * 3 {
-                return Err(format!("STL exceeds {MAX_TRIANGLES} triangles"));
+            if vertices.len() >= limit * 3 {
+                return Err(format!("STL exceeds {limit} triangles"));
             }
             if vertices.len() == vertices.capacity() {
                 vertices
-                    .try_reserve_exact((MAX_TRIANGLES * 3 - vertices.len()).min(65536))
+                    .try_reserve_exact((limit * 3 - vertices.len()).min(65536))
                     .map_err(|e| format!("STL vertex allocation: {e}"))?;
             }
             min = min.min(p);
@@ -67,8 +82,8 @@ impl Mesh {
             Ok(())
         };
         if binary {
-            if count > MAX_TRIANGLES {
-                return Err(format!("STL exceeds {MAX_TRIANGLES} triangles ({count})"));
+            if count > limit {
+                return Err(format!("STL exceeds {limit} triangles ({count})"));
             }
             vertices
                 .try_reserve_exact(count * 3)
@@ -173,6 +188,22 @@ fn read_float(bytes: &[u8], offset: usize) -> f32 {
 mod tests {
     use super::*;
     #[test]
+    fn remaining_scene_budget_limits_binary_reservation_and_ascii_streaming() {
+        let mut header = [0u8; 84];
+        header[80..84].copy_from_slice(&3u32.to_le_bytes());
+        let error = Mesh::read_limited(Cursor::new(header), 234, 2)
+            .err()
+            .unwrap();
+        assert!(error.contains("exceeds 2 triangles"), "{error}");
+        let ascii = b"solid x\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nvertex 0 0 1\nvertex 1 0 1\nvertex 0 1 1\nendsolid";
+        assert!(
+            Mesh::read_limited(Cursor::new(ascii), ascii.len() as u64, 1)
+                .err()
+                .unwrap()
+                .contains("exceeds 1 triangles")
+        );
+    }
+    #[test]
     fn rejects_truncated_binary_and_bounds_ascii_record_memory() {
         let mut bytes = vec![0u8; 134];
         bytes[80..84].copy_from_slice(&2u32.to_le_bytes());
@@ -194,10 +225,9 @@ mod tests {
         assert!(error.contains("triangles"));
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn large_xl_drawer_library_regression() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let root = std::path::PathBuf::from(root);
         let catalog = crate::catalog::Catalog::scan(root.clone()).unwrap();
         let selection = crate::catalog::Selection {

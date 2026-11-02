@@ -173,10 +173,9 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn local_library_module_clip_coverage() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = crate::catalog::Catalog::scan(root.into()).unwrap();
         let mut count = 0;
         for entry in &catalog.entries {

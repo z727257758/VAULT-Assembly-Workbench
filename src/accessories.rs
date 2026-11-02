@@ -376,10 +376,9 @@ mod tests {
     use super::*;
     use crate::catalog::{Bom, Catalog, Selection};
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn drawer_options_only_and_required_racks_survive_old_presets() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = Catalog::scan(root.into()).unwrap();
         for width in ["S", "M", "L", "XL"] {
             let selection = Selection {

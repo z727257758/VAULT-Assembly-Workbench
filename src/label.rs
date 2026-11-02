@@ -191,7 +191,18 @@ impl ttf_parser::OutlineBuilder for Outline {
 pub(crate) fn text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
     text_polygons_with_width(config, 19.)
 }
+/// Compact labels use the same outlines for preview, geometry and material regions.
+pub(crate) fn tab_text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String> {
+    text_polygons_in_area(config, 17., 5.)
+}
 fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<D2>>, String> {
+    text_polygons_in_area(config, half_width, 6.)
+}
+fn text_polygons_in_area(
+    config: &Config,
+    half_width: f64,
+    half_height: f64,
+) -> Result<Vec<Vec<D2>>, String> {
     let file = match config.font {
         Font::Chinese => "msyh.ttc",
         Font::Arial => "arial.ttf",
@@ -206,6 +217,7 @@ fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<
         scale: config.size as f64 / face.units_per_em() as f64,
         origin: D2::new(0., 0.),
     };
+    let mut rows = Vec::new();
     for (row, line) in config.text.lines().enumerate() {
         out.origin = D2::new(0., -(row as f64) * config.size as f64 * 1.35);
         let first = out.paths.len();
@@ -220,6 +232,7 @@ fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<
             }
             out.origin.x += face.glyph_hor_advance(id).unwrap_or(0) as f64 * out.scale;
         }
+        rows.push(first..out.paths.len());
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         for p in out.paths[first..].iter().flatten() {
@@ -230,6 +243,26 @@ fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<
             for p in out.paths[first..].iter_mut().flatten() {
                 p.x -= (lo + hi) * 0.5;
             }
+        }
+    }
+    // Keep the font size and glyph proportions. Only reduce baseline spacing
+    // when a compact label needs it, retaining at least 0.3 mm between outlines.
+    if half_height == 5. && rows.len() == 2 && rows.iter().all(|r| !r.is_empty()) {
+        let bounds = |range: std::ops::Range<usize>| {
+            out.paths[range]
+                .iter()
+                .flatten()
+                .fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], p| {
+                    [lo.min(p.y), hi.max(p.y)]
+                })
+        };
+        let upper = bounds(rows[0].clone());
+        let lower = bounds(rows[1].clone());
+        let gap = upper[0] - lower[1];
+        let excess = upper[1] - lower[0] - half_height * 2.;
+        let shift = excess.max(0.).min((gap - 0.3).max(0.));
+        for p in out.paths[rows[1].clone()].iter_mut().flatten() {
+            p.y += shift;
         }
     }
     out.paths.retain(|p| p.len() >= 3);
@@ -254,10 +287,11 @@ fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<
         p.y -= (lo.y + hi.y) * 0.5;
         p.x += config.offset[0] as f64;
         p.y += config.offset[1] as f64;
-        if p.x.abs() > half_width || p.y.abs() > 6. {
+        if p.x.abs() > half_width + 1e-7 || p.y.abs() > half_height + 1e-7 {
             return Err(format!(
-                "文字超出 {} × 12 mm 安全区域，请缩小字号或减少偏移",
-                half_width * 2.
+                "文字超出 {} × {} mm 安全区域，请减少行数、偏移或在允许范围内调整字号",
+                half_width * 2.,
+                half_height * 2.
             ));
         }
         // The complete facade is installed with its raw XY axes rotated 180 degrees.
@@ -512,8 +546,24 @@ pub(crate) fn color_regions(
     offset: [f64; 2],
     top: f64,
 ) -> Result<Vec<Arc<Mesh>>, String> {
+    color_regions_with_polygons(mesh, config, offset, top, text_polygons(config)?)
+}
+pub(crate) fn tab_color_regions(
+    mesh: &Arc<Mesh>,
+    config: &Config,
+    offset: [f64; 2],
+    top: f64,
+) -> Result<Vec<Arc<Mesh>>, String> {
+    color_regions_with_polygons(mesh, config, offset, top, tab_text_polygons(config)?)
+}
+fn color_regions_with_polygons(
+    mesh: &Arc<Mesh>,
+    config: &Config,
+    offset: [f64; 2],
+    top: f64,
+    polygons: Vec<Vec<D2>>,
+) -> Result<Vec<Arc<Mesh>>, String> {
     config.validate()?;
-    let polygons = text_polygons(config)?;
     let (bottom, height) = match config.style {
         Style::Raised => (top - 0.4, config.depth as f64 + 0.5),
         Style::Engraved => (top - config.depth as f64 - 0.4, 0.40001),
@@ -687,6 +737,59 @@ mod tests {
         );
     }
     #[test]
+    fn compact_chinese_lines_fit_without_shrinking_glyphs() {
+        for font in [Font::Chinese, Font::ChineseBold] {
+            for text in ["收纳\nA8", "收纳\n电池"] {
+                let config = Config {
+                    enabled: true,
+                    text: text.into(),
+                    size: 5.,
+                    font,
+                    ..Default::default()
+                };
+                config.validate().unwrap();
+                let normal = text_polygons(&config).unwrap();
+                let compact =
+                    tab_text_polygons(&config).unwrap_or_else(|e| panic!("{font:?} {text:?}: {e}"));
+                assert!(
+                    compact
+                        .iter()
+                        .flatten()
+                        .all(|p| p.x.abs() <= 17.00001 && p.y.abs() <= 5.00001)
+                );
+                let bounds = |p: &[Vec<D2>]| {
+                    p.iter()
+                        .flatten()
+                        .fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], p| {
+                            [lo.min(p.x), hi.max(p.x)]
+                        })
+                };
+                assert_eq!(
+                    bounds(&normal),
+                    bounds(&compact),
+                    "glyph width must not be scaled"
+                );
+                let mut rows = [Vec::new(), Vec::new()];
+                for polygon in &compact {
+                    assert!(polygon.iter().all(|p| p.y > 0.) || polygon.iter().all(|p| p.y < 0.));
+                    rows[usize::from(polygon[0].y > 0.)].extend(polygon.iter().map(|p| p.y));
+                }
+                assert!(
+                    rows[1].iter().copied().fold(f64::INFINITY, f64::min)
+                        - rows[0].iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                        >= 0.29999
+                );
+                assert!(
+                    tab_text_polygons(&Config {
+                        size: 12.,
+                        ..config
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
+    #[test]
     fn two_line_layout_spacing_centering_and_limits() {
         let config = Config {
             enabled: true,
@@ -749,10 +852,9 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn real_label_boolean_and_original_pose() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         for path in [PATH, SUSTAINER_PATH] {
             let file = Path::new(&root).join(path);
             let bytes = std::fs::read(&file).unwrap();

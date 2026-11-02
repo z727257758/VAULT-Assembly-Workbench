@@ -1397,10 +1397,9 @@ mod tests {
     }
     /// Optional external regression fixture: dimensions only, no model library copy.
     #[test]
+    #[ignore = "requires VAULT_PACKING_FIXTURE"]
     fn repack_external_plate_fixture() {
-        let Ok(path) = std::env::var("VAULT_PACKING_FIXTURE") else {
-            return;
-        };
+        let path = crate::test_support::required_env("VAULT_PACKING_FIXTURE");
         #[derive(Deserialize)]
         struct Fixture {
             config: Config,

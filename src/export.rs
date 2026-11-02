@@ -327,7 +327,11 @@ fn write_3mf(
         let meshes = if text_slot != base_slot
             && let Some((config, offset, top)) = text_spec
         {
-            crate::label::color_regions(&mesh, &config, offset, top)?
+            if crate::label::is_label(&item.path) {
+                crate::label::color_regions(&mesh, &config, offset, top)?
+            } else {
+                crate::label::tab_color_regions(&mesh, &config, offset, top)?
+            }
         } else {
             vec![mesh.clone()]
         };
@@ -556,10 +560,9 @@ endloop
 endfacet
 endsolid t";
     #[test]
+    #[ignore = "requires VAULT_GRIDFINITY_TEST"]
     fn face_down_keeps_integral_bin_upright() {
-        if std::env::var_os("VAULT_GRIDFINITY_TEST").is_none() {
-            return;
-        }
+        let _ = crate::test_support::required_env("VAULT_GRIDFINITY_TEST");
         let home = Path::new(env!("CARGO_MANIFEST_DIR"));
         let out = home.join("output/face-down");
         std::fs::create_dir_all(&out).unwrap();
@@ -985,10 +988,9 @@ endsolid t";
         );
     }
     #[test]
+    #[ignore = "requires VAULT_EXPORT_TEST_ROOT"]
     fn local_module_support_sample() {
-        let Ok(root) = std::env::var("VAULT_EXPORT_TEST_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_EXPORT_TEST_ROOT");
         let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/custom-supports");
         std::fs::create_dir_all(&out).unwrap();
         let item = Bom {
@@ -1304,10 +1306,9 @@ endsolid t";
         );
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn real_text_multimaterial_export() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/export-smoke");
         std::fs::create_dir_all(&out).unwrap();
         for path in [crate::label::PATH, crate::label::SUSTAINER_PATH] {
@@ -1404,10 +1405,9 @@ endsolid t";
         }
     }
     #[test]
+    #[ignore = "requires VAULT_EXPORT_TEST_ROOT"]
     fn real_library_3mf() {
-        let Ok(root) = std::env::var("VAULT_EXPORT_TEST_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_EXPORT_TEST_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/export-smoke");
         std::fs::create_dir_all(&out).unwrap();

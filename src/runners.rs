@@ -91,10 +91,9 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn rails_fit_and_follow_the_correct_parent() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         for (width, height, depth) in [
             ("S", "1F", 3),
@@ -202,7 +201,7 @@ mod tests {
             let saved = s.definition();
             let decoded = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
             let mut restored = s.clone();
-            restored.apply(&decoded);
+            restored.apply(&decoded).unwrap();
             for &i in &indices {
                 assert!(
                     restored.parts[i]
@@ -214,10 +213,9 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn support_removal_is_display_only() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let c = crate::catalog::Catalog::scan(root.into()).unwrap();
         let bom = c.bom(&Default::default());
         let item = bom.iter().find(|b| b.path.contains("/Boxes/")).unwrap();

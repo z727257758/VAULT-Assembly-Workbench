@@ -149,10 +149,9 @@ mod tests {
     };
     use glam::{Mat4, Quat};
     #[test]
+    #[ignore = "requires VAULT_MODEL_ROOT"]
     fn assembled_axes_hierarchy_rotation_and_roundtrip() {
-        let Ok(root) = std::env::var("VAULT_MODEL_ROOT") else {
-            return;
-        };
+        let root = crate::test_support::required_env("VAULT_MODEL_ROOT");
         let catalog = Catalog::scan(root.into()).unwrap();
         for width in ["S", "L"] {
             let selection = Selection {
@@ -262,7 +261,7 @@ mod tests {
             let def: Definition =
                 toml::from_str(&toml::to_string(&s.definition()).unwrap()).unwrap();
             let mut restored = before.clone();
-            restored.apply(&def);
+            restored.apply(&def).unwrap();
             for (a, b) in s.parts.iter().zip(&restored.parts) {
                 assert!(a.pose.matrix(1.).abs_diff_eq(b.pose.matrix(1.), 0.003));
             }
