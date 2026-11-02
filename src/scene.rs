@@ -497,6 +497,20 @@ impl Scene {
                 .relations
                 .iter()
                 .any(|r| r.label == crate::sustainer::LOCK_INNER);
+        let upgraded_stoppers: Vec<_> = self
+            .relations
+            .iter()
+            .filter(|r| r.label == crate::runners::STOPPER_SEAT)
+            .filter(|r| {
+                !old.calibrated
+                    && old.relations.iter().any(|previous| {
+                        previous.child == r.child
+                            && previous.parent == r.parent
+                            && previous.label == "Manual step 11: stopper / housing side port"
+                    })
+            })
+            .map(|r| r.child.clone())
+            .collect();
         let layout_changed = self
             .relations
             .iter()
@@ -542,7 +556,8 @@ impl Scene {
                         && (r.label.starts_with("Divider layout:")
                             || r.label.starts_with("Gridfinity bin /"))
                 });
-                let source_owned = legacy_hidden
+                let source_owned = upgraded_stoppers.contains(&id)
+                    || legacy_hidden
                     || layout_owned
                     || old_sustainer_estimates
                     || old_sustainer_seats
@@ -554,7 +569,8 @@ impl Scene {
             }
         }
         for relation in &old.relations {
-            if !(old_sustainer_estimates
+            if !(upgraded_stoppers.contains(&relation.child)
+                || old_sustainer_estimates
                 || old_sustainer_seats
                 || old_latch_defaults && relation.child.path.contains("/Locks/"))
                 && ids.contains(&relation.parent)

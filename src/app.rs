@@ -2,6 +2,7 @@ mod color_preview;
 mod combination;
 mod exterior_smoke;
 mod large_stl_smoke;
+mod stopper_smoke;
 mod workflow;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
@@ -382,6 +383,9 @@ impl App {
             collision_report: None,
             collision_tolerance: 0.01,
         };
+        if smoke && std::env::args().any(|a| a == "--smoke-stopper") {
+            app.selection.depth = 7;
+        }
         if smoke && app.assembly_kind == AssemblyKind::Sustainer {
             app.export_options.plate.preview_colors = false;
         }
@@ -3383,6 +3387,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-stopper") {
+            self.stopper_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
             self.exterior_smoke(ctx);

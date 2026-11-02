@@ -229,6 +229,8 @@ cargo build --release
 cargo run --release -- --smoke-test
 # 检查混合规格并排、堆叠、独立标签、开盖及成员编辑后的整体预览
 cargo run --release -- --smoke-test --smoke-combination
+# S7 两侧限位卡扣与实际孔位（安装 / 隐藏卡扣对照）
+cargo run --release -- --smoke-test --smoke-stopper
 # 只运行箱子闭盖、开盖、爆炸、密封箱和分体盖的截图检查
 cargo run --release -- --smoke-test --smoke-sustainer
 # 离线核对全部 126 组箱子，写入 state 坐标和 output/sustainer-calibration/report.*
