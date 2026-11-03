@@ -493,16 +493,25 @@ impl Catalog {
         );
         let xl = if s.width == "XL" { " XL" } else { "" };
         let folder = if s.width == "XL" { "/XL Runners" } else { "" };
+        let runner_qty = if s.width == "XL" {
+            2
+        } else {
+            match s.height.as_str() {
+                "2F" => 4,
+                "4F" => 8,
+                _ => 2,
+            }
+        };
         for kind in ["Guide", "Slide"] {
             add(
                 format!("{uni}/Runners{folder}/x{} Runner {kind}{xl}.stl", s.depth),
-                2,
+                runner_qty,
                 "Runners",
                 true,
             );
         }
         for (name, qty) in [
-            ("Runners/Runner Stopper.stl", 2),
+            ("Runners/Runner Stopper.stl", runner_qty),
             ("Latch.stl", if s.width == "L" { 2 } else { 1 }),
             ("Springs.stl", 1),
             ("Key Cap.stl", 1),
@@ -536,7 +545,10 @@ impl Catalog {
         let mut result = self.bom(s);
         for item in &mut result {
             if let Some(saved) = old.iter().find(|b| b.path == item.path) {
-                if item.group != "Geared rails" && !item.path.ends_with("/Facade Cap.stl") {
+                if item.group != "Geared rails"
+                    && !item.path.ends_with("/Facade Cap.stl")
+                    && !item.path.contains("/Runners/")
+                {
                     item.qty = saved.qty;
                 }
                 if item.group != "Geared rails" {
@@ -774,6 +786,45 @@ mod tests {
                 .qty,
             2
         );
+    }
+    #[test]
+    fn runner_quantities_follow_height_and_replace_legacy_counts() {
+        let c = Catalog::default();
+        for width in ["S", "M", "L", "XL"] {
+            let mut old = Vec::new();
+            for (height, qty) in [("1F", 2), ("2F", 4), ("4F", 8), ("2F", 4), ("1F", 2)] {
+                if width == "XL" && height != "1F" {
+                    continue;
+                }
+                for depth in 3..=7 {
+                    let selection = Selection {
+                        width: width.into(),
+                        height: height.into(),
+                        depth,
+                        ..Default::default()
+                    };
+                    let bom = c.reconfigure(&selection, &old);
+                    let runners: Vec<_> = bom
+                        .iter()
+                        .filter(|b| b.path.contains("/Runners/"))
+                        .collect();
+                    assert_eq!(runners.len(), 3);
+                    assert!(runners.iter().all(|b| b.qty == qty));
+                    old = bom;
+                    for b in old.iter_mut().filter(|b| b.path.contains("/Runners/")) {
+                        b.qty = 2;
+                        b.enabled = false;
+                    }
+                    let restored = c.reconfigure(&selection, &old);
+                    assert!(
+                        restored
+                            .iter()
+                            .filter(|b| b.path.contains("/Runners/"))
+                            .all(|b| b.qty == qty && !b.enabled)
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn facade_cap_quantity_tracks_width_height_and_migrates_old_presets() {

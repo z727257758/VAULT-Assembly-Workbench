@@ -74,12 +74,11 @@ fn stopper_port(
     }
 }
 
-pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), String> {
-    let box_part = &scene.parts[drawer];
+fn track_centers(box_part: &crate::scene::Part) -> Result<Vec<f32>, String> {
     let half_width = box_part.source_size.x * 0.5;
-    // Side-slot floor: x = outer side - 2.2 mm. Lowest track is used for
-    // tall boxes; a single source BOM pair corresponds to the lower runner pair.
-    let mut slot_min = f32::INFINITY;
+    // Recover every separate dovetail floor on the source side wall.
+    // Instances 0/1 occupy the lowest track, 2/3 the next, and so on.
+    let mut spans = Vec::new();
     for tri in box_part.mesh.vertices.chunks_exact(3) {
         let a = Vec3::from(tri[0].position);
         let b = Vec3::from(tri[1].position);
@@ -87,13 +86,31 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
         let n = (b - a).cross(c - a);
         let x = (a.x + b.x + c.x) / 3.;
         if (x - (half_width - 2.2)).abs() < 0.02 && n.x.abs() > n.length() * 0.999 {
-            slot_min = slot_min.min(a.y).min(b.y).min(c.y);
+            spans.push((a.y.min(b.y).min(c.y), a.y.max(b.y).max(c.y)));
         }
     }
-    if !slot_min.is_finite() {
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut slots: Vec<(f32, f32)> = Vec::new();
+    for (lo, hi) in spans {
+        if let Some(last) = slots.last_mut()
+            && lo <= last.1 + 0.02
+        {
+            last.1 = last.1.max(hi);
+        } else {
+            slots.push((lo, hi));
+        }
+    }
+    if slots.is_empty() || slots.iter().any(|(lo, hi)| (hi - lo - 12.4914).abs() > 0.1) {
         return Err("Runner side-slot datum not recognized".into());
     }
-    let track_y = box_part.pose.position[1] + slot_min + 6.2457;
+    Ok(slots.into_iter().map(|(lo, hi)| (lo + hi) * 0.5).collect())
+}
+
+pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), String> {
+    let box_part = &scene.parts[drawer];
+    let half_width = box_part.source_size.x * 0.5;
+    let tracks = track_centers(box_part)?;
+    let box_y = box_part.pose.position[1];
     let (_, box_hi) = constraints::world_bounds(box_part);
     let (_, housing_hi) = constraints::world_bounds(&scene.parts[module]);
     let items: Vec<_> = scene
@@ -106,10 +123,15 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
     for i in items {
         let p = &scene.parts[i];
         let name = p.pose.path.rsplit('/').next().unwrap_or("");
-        if p.pose.instance > 1 {
-            continue;
-        }
-        let side = if p.pose.instance == 0 { -1. } else { 1. };
+        let track_y = box_y
+            + tracks
+                .get(p.pose.instance as usize / 2)
+                .ok_or("Runner instance exceeds measured side slots")?;
+        let side = if p.pose.instance.is_multiple_of(2) {
+            -1.
+        } else {
+            1.
+        };
         let (parent, x, z, label) = if name.contains("Runner Guide") {
             (
                 module,
@@ -220,6 +242,9 @@ mod tests {
         for (width, height, depth) in [
             ("S", "1F", 3),
             ("S", "2F", 3),
+            ("S", "4F", 3),
+            ("M", "4F", 4),
+            ("L", "2F", 7),
             ("M", "1F", 3),
             ("L", "1F", 3),
             ("S", "1F", 4),
@@ -260,7 +285,31 @@ mod tests {
                 .filter(|(_, p)| p.pose.path.contains("/Runners/"))
                 .map(|(i, _)| i)
                 .collect();
-            assert_eq!(indices.len(), 6);
+            let levels = match height {
+                "2F" => 2,
+                "4F" => 4,
+                _ => 1,
+            };
+            assert_eq!(indices.len(), levels * 6);
+            let tracks = track_centers(&s.parts[b]).unwrap();
+            assert_eq!(tracks.len(), levels);
+            for pair in tracks.windows(2) {
+                assert!((pair[1] - pair[0] - 48.).abs() < 0.03);
+            }
+            for &i in &indices {
+                let p = &s.parts[i];
+                let level = p.pose.instance as usize / 2;
+                assert!(
+                    (p.pose.position[1] - s.parts[b].pose.position[1] - tracks[level]).abs()
+                        < 0.002
+                );
+                let side = if p.pose.instance.is_multiple_of(2) {
+                    -1.
+                } else {
+                    1.
+                };
+                assert!(p.pose.position[0] * side > 0.);
+            }
             let before: Vec<_> = s.parts.iter().map(|p| p.pose.position).collect();
             for &i in &indices {
                 let parent = if s.parts[i].pose.path.contains("Runner Slide") {
@@ -279,20 +328,24 @@ mod tests {
             for &i in &indices {
                 if s.parts[i].pose.path.ends_with("Stopper.stl") {
                     let p = &s.parts[i];
-                    assert!(
-                        (p.pose.position[2] - 28.5).abs() < 0.03,
-                        "{width}{depth}/{height}: {:?}",
-                        p.pose.position
-                    );
+                    // The lowest opening is centered at 28.5 mm; upper source
+                    // openings can differ slightly and are checked by rays below.
+                    if p.pose.instance < 2 {
+                        assert!((p.pose.position[2] - 28.5).abs() < 0.03);
+                    }
                     let (lo, hi) = constraints::world_bounds(p);
                     let (ml, mh) = constraints::world_bounds(&s.parts[m]);
-                    let lip = if p.pose.instance == 0 {
+                    let lip = if p.pose.instance.is_multiple_of(2) {
                         ml.x - lo.x
                     } else {
                         hi.x - mh.x
                     };
                     assert!((lip - 1.2).abs() < 0.25);
-                    let side = if p.pose.instance == 0 { -1. } else { 1. };
+                    let side = if p.pose.instance.is_multiple_of(2) {
+                        -1.
+                    } else {
+                        1.
+                    };
                     let outer = if side < 0. { ml.x } else { mh.x };
                     let housing = Scene {
                         parts: vec![s.parts[m].clone()],
@@ -366,6 +419,32 @@ mod tests {
                         0.
                     };
                     assert!((s.parts[i].pose.position[2] - before[i][2] - delta).abs() < 0.002);
+                }
+            }
+            // Legacy tall assemblies only saved the lowest pair. New upper
+            // tracks keep their generated mates and invalidate whole-scene calibration.
+            if levels > 1 {
+                let mut legacy_pair = s.clone();
+                legacy_pair
+                    .parts
+                    .retain(|p| !p.pose.path.contains("/Runners/") || p.pose.instance < 2);
+                legacy_pair
+                    .relations
+                    .retain(|r| !r.child.path.contains("/Runners/") || r.child.instance < 2);
+                for calibrated in [false, true] {
+                    legacy_pair.calibrated = calibrated;
+                    let mut upgraded = s.clone();
+                    upgraded.apply(&legacy_pair.definition()).unwrap();
+                    assert!(!upgraded.calibrated);
+                    assert_eq!(upgraded.parts.len(), s.parts.len());
+                    for &i in &indices {
+                        assert!(
+                            upgraded.parts[i]
+                                .pose
+                                .matrix(0.)
+                                .abs_diff_eq(s.parts[i].pose.matrix(0.), 0.002)
+                        );
+                    }
                 }
             }
             // Old uncalibrated projects must not restore the wrong fixed datum.

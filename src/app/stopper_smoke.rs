@@ -4,7 +4,7 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(100));
         let folder = self.home.join("output/stopper-validation");
         let _ = std::fs::create_dir_all(&folder);
-        if self.smoke_start.elapsed() > Duration::from_secs(90) {
+        if self.smoke_start.elapsed() > Duration::from_secs(180) {
             let _ = std::fs::write(folder.join("smoke-error.txt"), &self.status);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -14,14 +14,14 @@ impl App {
         }
         self.smoke_frame += 1;
         if self.smoke_frame == 5 {
-            let instance = if self.smoke_stage < 2 { 1 } else { 0 };
+            let instance = if self.smoke_stage % 4 < 2 { 1 } else { 0 };
             self.export_options.plate.preview_colors = false;
             self.explosion = 0.;
             self.ghost = false;
             self.selected = None;
             for p in &mut self.scene.parts {
                 let stopper =
-                    p.pose.path.ends_with("/Runner Stopper.stl") && p.pose.instance == instance;
+                    p.pose.path.ends_with("/Runner Stopper.stl") && p.pose.instance % 2 == instance;
                 p.visible = p.pose.path.contains("/Modules/")
                     || (stopper && self.smoke_stage.is_multiple_of(2));
                 p.color = if stopper {
@@ -33,10 +33,12 @@ impl App {
             self.camera.fit(&self.scene, 0.);
             self.camera.yaw = if instance == 1 { 1.4 } else { -1.4 };
             self.camera.pitch = 0.15;
-            self.camera.zoom = 4.;
-            if let Some(p) = self.scene.parts.iter().find(|p| {
-                p.pose.path.ends_with("/Runner Stopper.stl") && p.pose.instance == instance
-            }) {
+            self.camera.zoom = if self.smoke_stage < 4 { 4. } else { 1.4 };
+            if self.smoke_stage < 4
+                && let Some(p) = self.scene.parts.iter().find(|p| {
+                    p.pose.path.ends_with("/Runner Stopper.stl") && p.pose.instance % 2 == instance
+                })
+            {
                 self.camera.center = p.pose.position.into();
             }
         }
@@ -69,29 +71,53 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if self.smoke_stage == 3 {
+        if self.smoke_stage % 4 == 3 {
+            let count = match self.selection.height.as_str() {
+                "2F" => 4,
+                "4F" => 8,
+                _ => 2,
+            };
             let valid = self.selection.depth == 7
+                && self.scene.constraint_warning.is_none()
                 && self
                     .scene
                     .relations
                     .iter()
                     .filter(|r| r.label == crate::runners::STOPPER_SEAT)
                     .count()
-                    == 2;
-            let file = if valid {
-                "smoke-result.txt"
+                    == count
+                && self
+                    .scene
+                    .parts
+                    .iter()
+                    .filter(|p| p.pose.path.contains("/Runners/"))
+                    .count()
+                    == count * 3;
+            if !valid {
+                let _ = std::fs::write(
+                    folder.join("smoke-error.txt"),
+                    format!(
+                        "{}: incorrect runner count or constraint warning: {:?}",
+                        self.selection.height, self.scene.constraint_warning
+                    ),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            if self.smoke_stage == 11 {
+                let _ = std::fs::write(
+                    folder.join("smoke-result.txt"),
+                    "PASS: S7 / 1F, 2F, 4F; 1/2/4 runner pairs; measured stopper seats on both sides; installed and uncovered port screenshots.",
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
-                "smoke-error.txt"
-            };
-            let _ = std::fs::write(
-                folder.join(file),
-                if valid {
-                    "PASS: S7 / 1F; both measured stopper seats; installed and uncovered port screenshots."
-                } else {
-                    "Missing measured stopper relations"
-                },
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.smoke_stage += 1;
+                self.smoke_frame = 0;
+                self.screenshot_requested = false;
+                self.selection.height = if self.smoke_stage == 4 { "2F" } else { "4F" }.into();
+                self.bom = self.catalog.reconfigure(&self.selection, &self.bom);
+                self.assembly(ctx);
+            }
         } else {
             self.smoke_stage += 1;
             self.smoke_frame = 0;
