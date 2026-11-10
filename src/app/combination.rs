@@ -26,6 +26,8 @@ pub(super) struct Member {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct CombinationPreset {
+    #[serde(default = "super::tower::default_name")]
+    pub project_name: String,
     #[serde(default)]
     pub colors: crate::print_plate::ColorTheme,
     #[serde(flatten)]
@@ -48,7 +50,7 @@ fn modules(members: &[Member]) -> Vec<crate::constraints::stacking::Module<'_>> 
         })
         .collect()
 }
-fn validate_layout(members: &[Member], gap: f32) -> Result<(), String> {
+pub(super) fn validate_layout(members: &[Member], gap: f32) -> Result<(), String> {
     let descriptors = modules(members);
     let layout = crate::constraints::stacking::plan(&descriptors, gap)?;
     crate::constraints::exterior::validate_layout(
@@ -61,7 +63,7 @@ fn validate_layout(members: &[Member], gap: f32) -> Result<(), String> {
     )
 }
 impl Preset {
-    fn validate_member(&self, catalog: &Catalog) -> Result<(), String> {
+    pub(super) fn validate_member(&self, catalog: &Catalog) -> Result<(), String> {
         if !["S", "M", "L", "XL"].contains(&self.selection.width.as_str())
             || !(3..=7).contains(&self.selection.depth)
             || !["1F", "2F", "4F"].contains(&self.selection.height.as_str())
@@ -88,6 +90,31 @@ impl Preset {
                 && !self.sustainer_dividers.items.is_empty()
         {
             return Err("成员内部配置不兼容 / Incompatible member inserts".into());
+        }
+        if !self.drawers.is_empty() {
+            crate::constraints::tower::drawer_heights(
+                &self.selection.height,
+                &self
+                    .drawers
+                    .iter()
+                    .map(|p| p.selection.height.as_str())
+                    .collect::<Vec<_>>(),
+            )?;
+            if self.assembly_kind != AssemblyKind::Drawer {
+                return Err(
+                    "多抽屉仅适用于抽屉模块 / Drawer stacks require a drawer module".into(),
+                );
+            }
+            for child in &self.drawers {
+                if !child.drawers.is_empty()
+                    || child.assembly_kind != AssemblyKind::Drawer
+                    || child.selection.width != self.selection.width
+                    || child.selection.depth != self.selection.depth
+                {
+                    return Err("层内抽屉规格不一致 / Invalid drawer stack".into());
+                }
+                child.validate_member(catalog)?;
+            }
         }
         self.label.validate()?;
         self.gridfinity.validate(&self.selection)?;
@@ -140,6 +167,14 @@ impl CombinationPreset {
 impl App {
     pub(super) fn member_snapshot(&self) -> Preset {
         Preset {
+            drawers: if self.active_drawer.is_some() {
+                vec![]
+            } else {
+                self.members
+                    .get(self.active_member)
+                    .map(|m| m.preset.drawers.clone())
+                    .unwrap_or_default()
+            },
             sustainer_dividers: if self.assembly_kind == AssemblyKind::Sustainer {
                 self.sustainer_dividers.clone()
             } else {
@@ -166,7 +201,11 @@ impl App {
     }
     pub(super) fn commit_member(&mut self) {
         if !self.members.is_empty() {
-            self.members[self.active_member].preset = self.member_snapshot();
+            if let Some(drawer) = self.active_drawer {
+                self.members[self.active_member].preset.drawers[drawer] = self.member_snapshot();
+            } else {
+                self.members[self.active_member].preset = self.member_snapshot();
+            }
         }
     }
     fn close_member_editors(&mut self) {
@@ -187,6 +226,10 @@ impl App {
     pub(super) fn restore_member(&mut self, index: usize) {
         let p = self.members[index].preset.clone();
         self.active_member = index;
+        self.active_drawer = None;
+        self.restore_editor(p);
+    }
+    pub(super) fn restore_editor(&mut self, p: Preset) {
         self.combination_view = false;
         self.close_member_editors();
         self.selection = p.selection;
@@ -224,6 +267,7 @@ impl App {
         self.commit_member();
         self.ensure_members();
         if let Err(e) = (CombinationPreset {
+            project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
@@ -236,14 +280,20 @@ impl App {
             return;
         }
         self.finish_member_edit();
-        self.close_member_editors();
+        if self.active_drawer.is_some() {
+            self.restore_member(self.active_member);
+        } else {
+            self.close_member_editors();
+        }
         self.combination_view = true;
         self.explosion = 0.;
         self.assembly(ctx);
     }
     /// Switch the editor context while keeping the combined scene and camera in place.
     pub(super) fn select_member_in_combination(&mut self, index: usize, ctx: &egui::Context) {
-        if index >= self.members.len() || index == self.active_member {
+        if index >= self.members.len()
+            || (index == self.active_member && self.active_drawer.is_none())
+        {
             return;
         }
         self.commit_member();
@@ -260,12 +310,29 @@ impl App {
             return;
         };
         let member = (part.pose.instance / MEMBER_STRIDE) as usize;
+        let drawer = ((part.pose.instance % MEMBER_STRIDE)
+            / crate::constraints::tower::DRAWER_STRIDE)
+            .checked_sub(1)
+            .map(|d| d as usize);
         if member >= self.members.len() || self.busy || self.preview.has_pending() {
             return;
         }
-        self.select_member_in_combination(member, ctx);
+        self.commit_member();
+        let key = self.scene_key.clone();
+        let explosion = self.explosion;
+        self.restore_member(member);
+        if let Some(drawer) = drawer
+            && let Some(p) = self.members[member].preset.drawers.get(drawer).cloned()
+        {
+            self.restore_editor(p);
+            self.active_drawer = Some(drawer);
+        }
+        self.combination_view = true;
+        self.scene_key = key;
+        self.explosion = explosion;
         self.selected = Some(index);
         self.tab = 0;
+        ctx.request_repaint();
     }
     fn remember_combination_view(&mut self) {
         if self.scene_key == "combination" {
@@ -278,6 +345,14 @@ impl App {
         }
     }
     pub(super) fn focus_member(&mut self, ctx: &egui::Context) {
+        if self
+            .members
+            .get(self.active_member)
+            .is_some_and(|m| !m.preset.drawers.is_empty())
+        {
+            self.tower_edit_slot(self.active_member, self.active_drawer.or(Some(0)), ctx);
+            return;
+        }
         if self.members.is_empty() {
             return;
         }
@@ -731,7 +806,7 @@ impl App {
                         .unwrap_or_default();
                     let count: u32 = extras.iter().map(|c| c.bom.qty).sum::<u32>()
                         + m.preset
-                            .bom
+                            .printing_bom()
                             .iter()
                             .filter(|b| b.enabled)
                             .map(|b| b.qty)
@@ -741,7 +816,7 @@ impl App {
                         |ui| {
                             for b in m
                                 .preset
-                                .bom
+                                .printing_bom()
                                 .iter()
                                 .chain(extras.iter().map(|c| &c.bom))
                                 .filter(|b| b.enabled)
@@ -906,6 +981,87 @@ impl App {
 }
 use crate::scene::MEMBER_STRIDE;
 
+fn load_member_scene(
+    root: &Path,
+    home: &Path,
+    p: &Preset,
+    title: &str,
+    loader: &mut crate::scene::LoadCache,
+    cancel: &crate::preview::Cancel,
+) -> Result<Scene, String> {
+    let mut items = p.bom.clone();
+    for item in &mut items {
+        if !item.group.starts_with("Optional") {
+            item.enabled = true;
+        }
+    }
+    let catalog = Catalog {
+        root: root.to_path_buf(),
+        entries: items
+            .iter()
+            .map(|b| crate::catalog::Entry {
+                path: b.path.clone(),
+                name: b.name().into(),
+                category: 2,
+            })
+            .collect(),
+    };
+    if p.assembly_kind == AssemblyKind::Sustainer {
+        items = catalog.sustainer_bom(&p.selection, p.sustainer_options)?;
+        p.sustainer_dividers
+            .sync_bom(&mut items, &catalog, &p.selection, p.sustainer_options)?;
+    }
+    let originals: Vec<_> = items
+        .iter()
+        .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
+        .cloned()
+        .collect();
+    let mut scene = Scene::load_cached(loader, &originals, title.to_owned(), true)
+        .map_err(|e| format!("{}: {e}", title))?;
+    if p.assembly_kind == AssemblyKind::Sustainer {
+        crate::sustainer_dividers::apply(
+            &mut scene,
+            &p.sustainer_dividers,
+            &catalog,
+            &p.selection,
+            p.sustainer_options,
+        )?;
+    } else {
+        crate::dividers::apply(&mut scene, &p.divider_layout, &p.selection)?;
+    }
+    crate::label::apply(&mut scene, &p.label)?;
+    crate::gridfinity::apply_preview(
+        &mut scene,
+        home,
+        &p.gridfinity,
+        &p.selection,
+        &items,
+        false,
+        Some(cancel),
+    )?;
+    let key = if p.assembly_kind == AssemblyKind::Sustainer {
+        p.sustainer_options.key(&p.selection)
+    } else {
+        format!(
+            "{}{}-{}",
+            p.selection.width, p.selection.depth, p.selection.height
+        )
+    };
+    load_scene_definition(&mut scene, home, &key)?;
+
+    if !p.drawers.is_empty() {
+        let mut children = Vec::new();
+        for child in &p.drawers {
+            crate::preview::check(Some(cancel))?;
+            children.push((
+                load_member_scene(root, home, child, title, loader, cancel)?,
+                crate::constraints::tower::units(&child.selection.height)?,
+            ));
+        }
+        scene = crate::scene::drawers::shared_shell(scene, children)?;
+    }
+    Ok(scene)
+}
 pub(super) fn load(
     root: &Path,
     home: &Path,
@@ -928,64 +1084,7 @@ pub(super) fn load(
     for member in members {
         crate::preview::check(Some(cancel))?;
         let p = &member.preset;
-        let mut items = p.bom.clone();
-        let catalog = Catalog {
-            root: root.to_path_buf(),
-            entries: items
-                .iter()
-                .map(|b| crate::catalog::Entry {
-                    path: b.path.clone(),
-                    name: b.name().into(),
-                    category: 2,
-                })
-                .collect(),
-        };
-        if p.assembly_kind == AssemblyKind::Sustainer {
-            items = catalog.sustainer_bom(&p.selection, p.sustainer_options)?;
-            p.sustainer_dividers.sync_bom(
-                &mut items,
-                &catalog,
-                &p.selection,
-                p.sustainer_options,
-            )?;
-        }
-        let originals: Vec<_> = items
-            .iter()
-            .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
-            .cloned()
-            .collect();
-        let mut scene = Scene::load_cached(&mut loader, &originals, member.name.clone(), true)
-            .map_err(|e| format!("{}: {e}", member.name))?;
-        if p.assembly_kind == AssemblyKind::Sustainer {
-            crate::sustainer_dividers::apply(
-                &mut scene,
-                &p.sustainer_dividers,
-                &catalog,
-                &p.selection,
-                p.sustainer_options,
-            )?;
-        } else {
-            crate::dividers::apply(&mut scene, &p.divider_layout, &p.selection)?;
-        }
-        crate::label::apply(&mut scene, &p.label)?;
-        crate::gridfinity::apply_preview(
-            &mut scene,
-            home,
-            &p.gridfinity,
-            &p.selection,
-            &items,
-            false,
-            Some(cancel),
-        )?;
-        let key = if p.assembly_kind == AssemblyKind::Sustainer {
-            p.sustainer_options.key(&p.selection)
-        } else {
-            format!(
-                "{}{}-{}",
-                p.selection.width, p.selection.depth, p.selection.height
-            )
-        };
-        load_scene_definition(&mut scene, home, &key)?;
+        let mut scene = load_member_scene(root, home, p, &member.name, &mut loader, cancel)?;
         geometry.share(&mut scene)?;
         scenes.push((scene, member.placement, p.sustainer_angle));
     }
@@ -1049,6 +1148,7 @@ impl App {
     pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
         self.commit_member();
         let saved = CombinationPreset {
+            project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
@@ -1141,7 +1241,7 @@ fn export_members(
         .map(|(i, m)| {
             extras[i].iter().map(|c| c.bom.qty).sum::<u32>()
                 + m.preset
-                    .bom
+                    .printing_bom()
                     .iter()
                     .filter(|b| b.enabled)
                     .map(|b| b.qty)
@@ -1159,38 +1259,49 @@ fn export_members(
         if !included(index) {
             continue;
         }
-        let p = &member.preset;
-        let mut items = p.bom.clone();
-        items.extend(extras[index].iter().map(|c| c.bom.clone()));
-        if !items.iter().any(|b| b.enabled) {
-            continue;
-        }
-        let name = format!(
-            "{:02}-{}{}-{}",
-            index + 1,
-            p.selection.width,
-            p.selection.depth,
-            p.selection.height
-        );
-        let destination = staging
-            .path()
-            .join(if format == crate::export::Format::ThreeMf {
-                format!("{name}.3mf")
+        let jobs = member.preset.print_jobs(&member.name);
+        let multi = jobs.len() > 1;
+        for (job_index, job) in jobs.into_iter().enumerate() {
+            let mut items = job.items;
+            if job_index == 0 {
+                items.extend(extras[index].iter().map(|c| c.bom.clone()));
+            }
+            if !items.iter().any(|b| b.enabled) {
+                continue;
+            }
+            let p = &job.preset;
+            let base = format!(
+                "{:02}-{}{}-{}",
+                index + 1,
+                p.selection.width,
+                p.selection.depth,
+                p.selection.height
+            );
+            let name = if multi {
+                format!("{base}-{:02}", job_index + 1)
             } else {
-                name
-            });
-        crate::export::run_configured(
-            root,
-            &items,
-            &destination,
-            &crate::export::Options {
-                format,
-                plate: p.print_config.clone().unwrap_or_default(),
-            },
-            &p.label,
-            Some((home, &p.gridfinity, &p.selection)),
-        )
-        .map_err(|e| format!("{}: {e}", member.name))?;
+                base
+            };
+            let destination = staging
+                .path()
+                .join(if format == crate::export::Format::ThreeMf {
+                    format!("{name}.3mf")
+                } else {
+                    name
+                });
+            crate::export::run_configured(
+                root,
+                &items,
+                &destination,
+                &crate::export::Options {
+                    format,
+                    plate: p.print_config.clone().unwrap_or_default(),
+                },
+                &p.label,
+                Some((home, &p.gridfinity, &p.selection)),
+            )
+            .map_err(|e| format!("{}: {e}", job.name))?;
+        }
     }
     let manifest: Vec<_> = saved.members.iter().enumerate().filter(|(i,_)|included(*i)).map(|(i,m)|
         serde_json::json!({"member_index":i+1,"name":m.name,"specification":format!("{}{}-{}",m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height)})
@@ -1755,6 +1866,7 @@ mod tests {
     use super::*;
     fn preset() -> Preset {
         Preset {
+            drawers: vec![],
             sustainer_dividers: Default::default(),
             print_config: Some(Default::default()),
             gridfinity: Default::default(),
@@ -1869,6 +1981,7 @@ mod tests {
             .unwrap()
             .set_part_slot(crate::label::PATH, 3);
         let project = CombinationPreset {
+            project_name: super::tower::default_name(),
             colors: Default::default(),
             preset: a.clone(),
             members: vec![
@@ -1947,6 +2060,7 @@ mod tests {
         let mut q = p.clone();
         q.bom[0].qty = 3;
         let saved = CombinationPreset {
+            project_name: super::tower::default_name(),
             colors: Default::default(),
             preset: p.clone(),
             members: vec![

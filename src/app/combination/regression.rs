@@ -25,6 +25,7 @@ fn member(
             offset: [0.; 3],
         },
         preset: Preset {
+            drawers: vec![],
             selection: Selection {
                 width: width.into(),
                 depth,
@@ -55,6 +56,7 @@ fn snapshot(members: &[Member]) -> Vec<String> {
 }
 fn project(members: Vec<Member>) -> CombinationPreset {
     CombinationPreset {
+        project_name: crate::app::tower::default_name(),
         colors: Default::default(),
         preset: members[0].preset.clone(),
         members,

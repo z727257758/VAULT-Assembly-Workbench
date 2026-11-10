@@ -1,5 +1,6 @@
 pub mod exterior;
 pub mod stacking;
+pub mod tower;
 // Directed assembly constraints. One parent per child; roots remain grounded.
 // Solving is deterministic/topological, not a physics relaxation simulation.
 use crate::scene::{Part, Pose, Scene};

@@ -1,5 +1,6 @@
 pub mod colors;
 pub mod exterior;
+pub mod tower;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

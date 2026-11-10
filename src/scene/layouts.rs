@@ -135,6 +135,7 @@ pub struct Plate {
 }
 #[derive(Clone)]
 pub struct PrintPart {
+    pub drawer: Option<usize>,
     pub member: usize,
     pub plate: usize,
     pub path: String,
@@ -219,6 +220,7 @@ impl PrintLayout {
                     source_bodies: 1,
                 });
                 self.parts.push(Some(PrintPart {
+                    drawer: None,
                     member,
                     plate: base + placement.plate,
                     path: inputs[placement.input].path.clone(),

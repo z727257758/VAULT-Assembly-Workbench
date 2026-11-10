@@ -1,3 +1,4 @@
+pub mod drawers;
 mod exterior;
 pub mod layouts;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};

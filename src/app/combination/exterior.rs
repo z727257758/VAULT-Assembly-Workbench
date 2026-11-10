@@ -93,6 +93,7 @@ impl App {
             let mut next = self.members.clone();
             next[edit.index].exterior = edit.draft.clone();
             let saved = CombinationPreset {
+                project_name: self.tower.name.clone(),
                 colors: self.global_colors.clone(),
                 preset: self.member_snapshot(),
                 members: next.clone(),

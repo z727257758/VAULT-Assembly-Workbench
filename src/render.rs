@@ -108,6 +108,7 @@ pub struct ViewOptions {
 pub struct Renderer {
     pub print_colors: Option<crate::print_plate::Config>,
     pub member_colors: Vec<crate::print_plate::Config>,
+    pub drawer_colors: Vec<Vec<crate::print_plate::Config>>,
     pub state: egui_wgpu::RenderState,
     pipeline: wgpu::RenderPipeline,
     ghost_pipeline: wgpu::RenderPipeline,
@@ -211,6 +212,7 @@ impl Renderer {
         Self {
             print_colors: None,
             member_colors: Vec::new(),
+            drawer_colors: Vec::new(),
             state,
             pipeline,
             ghost_pipeline,
@@ -359,8 +361,18 @@ impl Renderer {
         );
         for (i, p) in scene.parts.iter().enumerate() {
             let print_colors = self.print_colors.as_ref().map(|default| {
-                self.member_colors
-                    .get((p.pose.instance / crate::scene::MEMBER_STRIDE) as usize)
+                let member = (p.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
+                let drawer = ((p.pose.instance % crate::scene::MEMBER_STRIDE)
+                    / crate::constraints::tower::DRAWER_STRIDE)
+                    as usize;
+                drawer
+                    .checked_sub(1)
+                    .and_then(|d| {
+                        self.drawer_colors
+                            .get(member)
+                            .and_then(|colors| colors.get(d))
+                    })
+                    .or_else(|| self.member_colors.get(member))
                     .unwrap_or(default)
             });
             let mut color = print_colors.map_or(p.color, |c| c.color(&p.pose.path));

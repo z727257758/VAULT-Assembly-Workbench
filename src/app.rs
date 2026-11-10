@@ -4,6 +4,7 @@ mod exterior_smoke;
 mod large_stl_smoke;
 mod preview_modes;
 mod stopper_smoke;
+mod tower;
 mod workflow;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
@@ -46,6 +47,8 @@ impl AssemblyKind {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Preset {
+    #[serde(default)]
+    drawers: Vec<Preset>,
     #[serde(default)]
     sustainer_dividers: crate::sustainer_dividers::Layout,
     #[serde(default)]
@@ -95,6 +98,7 @@ impl Settings {
 }
 
 enum Loaded {
+    Preset(Box<Result<CombinationPreset, String>>),
     Catalog(Result<Catalog, String>),
     Scene {
         revision: u64,
@@ -142,6 +146,8 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    tower: tower::State,
+    active_drawer: Option<usize>,
     preview_modes: preview_modes::State,
     members: Vec<Member>,
     active_member: usize,
@@ -285,6 +291,8 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            tower: Default::default(),
+            active_drawer: None,
             preview_modes: Default::default(),
             members: Vec::new(),
             active_member: 0,
@@ -412,6 +420,7 @@ impl App {
             )
             .into();
         }
+        app.tower_load(&cc.egui_ctx);
         app
     }
     fn scan(&mut self, root: PathBuf, ctx: &egui::Context) {
@@ -803,19 +812,23 @@ impl App {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.rx.try_recv() {
-            self.busy = matches!(
-                &result,
-                Loaded::Scene {
-                    finished: false,
-                    ..
-                }
-            );
+            if !matches!(&result, Loaded::Preset(_)) {
+                self.busy = matches!(
+                    &result,
+                    Loaded::Scene {
+                        finished: false,
+                        ..
+                    }
+                );
+            }
             match result {
+                Loaded::Preset(result) => self.apply_loaded_project(*result, ctx),
                 Loaded::Catalog(Ok(c)) => {
                     self.preview_modes = Default::default();
                     self.last_model_root = c.root.clone();
                     self.catalog = c;
                     self.members.clear();
+                    self.active_drawer = None;
                     self.combination_move_source = None;
                     self.workflow_history.clear();
                     self.member_edit_baseline = None;
@@ -863,6 +876,9 @@ impl App {
                             ctx,
                         );
                         continue;
+                    }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-tower") {
+                        self.setup_tower_smoke(ctx);
                     }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
@@ -1253,12 +1269,6 @@ impl App {
                             self.scan(root, ctx);
                         }
                     }
-                    if ui.button(t(z, "保存方案", "Save preset")).clicked() {
-                        self.save_preset();
-                    }
-                    if ui.button(t(z, "载入方案", "Load preset")).clicked() {
-                        self.load_preset(ctx);
-                    }
                     if ui
                         .add_enabled(
                             !self.bom.is_empty(),
@@ -1314,7 +1324,7 @@ impl App {
                     ui.strong(t(z, "1 整体装配", "1 Overall assembly"));
                     ui.label(t(
                         z,
-                        "→ 2 配置盒子 / 抽屉 → 3 检查并导出 3MF",
+                        "→ 2 配置层内抽屉与标牌 → 3 打印清单与导出",
                         "→ 2 Configure member → 3 Review and export 3MF",
                     ));
                 } else {
@@ -1340,10 +1350,11 @@ impl App {
     fn left(&mut self, ctx: &egui::Context) {
         let z = self.zh;
         egui::SidePanel::left("library")
-            .default_width(290.)
-            .width_range(235. ..=470.)
+            .default_width(390.)
+            .width_range(320. ..=560.)
             .resizable(true)
             .show(ctx, |ui| {
+                if self.combination_view && self.tab==0 {self.tower_panel(ui,ctx);return;}
                 egui::ScrollArea::vertical().id_salt("configuration-panel-scroll").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, 0, t(z, "装配配置", "Assembly"));
@@ -1732,6 +1743,10 @@ impl App {
         .into();
     }
     fn bottom(&mut self, ctx: &egui::Context) {
+        if self.combination_view && (!self.smoke || std::env::args().any(|a| a == "--smoke-tower"))
+        {
+            return;
+        }
         let z = self.zh;
         egui::TopBottomPanel::bottom("bottom").resizable(true)
             .default_height(240.).height_range(180. ..=400.).show(ctx, |ui| {
@@ -2376,8 +2391,9 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let spatial_input =
-                        self.explosion == 0. && self.combination_viewport_actions(ctx, rect);
+                    let spatial_input = self.explosion == 0.
+                        && !self.tower_regular()
+                        && self.combination_viewport_actions(ctx, rect);
                     if !spatial_input && response.dragged_by(egui::PointerButton::Primary) {
                         let delta = ctx.input(|i| i.pointer.delta());
                         self.camera.yaw -= delta.x * 0.008;
@@ -2605,6 +2621,7 @@ impl App {
     fn save_preset(&mut self) {
         self.commit_member();
         if let Err(e) = (CombinationPreset {
+            project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
             members: self.members.clone(),
@@ -2632,6 +2649,7 @@ impl App {
                 .check_destination(&path)
                 .and_then(|_| {
                     toml::to_string_pretty(&CombinationPreset {
+                        project_name: self.tower.name.clone(),
                         colors: self.global_colors.clone(),
                         preset: self.member_snapshot(),
                         members: self.members.clone(),
@@ -2648,6 +2666,7 @@ impl App {
         }
     }
     fn load_preset(&mut self, ctx: &egui::Context) {
+        self.tower_capture();
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 t(
@@ -2659,178 +2678,192 @@ impl App {
             )
             .pick_file()
         {
-            let result = std::fs::read_to_string(path)
-                .map_err(|e| e.to_string())
-                .and_then(|s| toml::from_str::<CombinationPreset>(&s).map_err(|e| e.to_string()));
-            match result {
-                Ok(saved) => {
-                    if let Err(e) = saved.validate(&self.catalog) {
-                        self.status = e;
-                        return;
-                    }
-                    let CombinationPreset {
-                        preset,
-                        members,
-                        active_member,
-                        combination_gap,
-                        colors,
-                    } = saved;
-                    let p = members
-                        .get(active_member)
-                        .map(|m| m.preset.clone())
-                        .unwrap_or(preset);
-                    if !p.sustainer_angle.is_finite()
-                        || !(0. ..=110.).contains(&p.sustainer_angle)
-                        || p.assembly_kind == AssemblyKind::Sustainer
-                            && (!p.gridfinity.bins.is_empty()
-                                || p.divider_layout.enabled
-                                || !p.divider_layout.items.is_empty())
-                    {
-                        self.status = t(
-                            self.zh,
-                            "箱子方案含无效开盖角度或不兼容的抽屉内部配置。",
-                            "Invalid lid angle or incompatible drawer inserts in box preset.",
-                        )
-                        .into();
-                        return;
-                    }
-                    if p.assembly_kind == AssemblyKind::Drawer
-                        && !p.sustainer_dividers.items.is_empty()
-                    {
-                        self.status = "抽屉方案不能包含箱子隔板".into();
-                        return;
-                    }
-                    if let Err(e) = p.sustainer_dividers.validate(
-                        &self.catalog,
-                        &p.selection,
-                        p.sustainer_options,
-                    ) {
-                        self.status = e;
-                        return;
-                    }
-                    if let Some(config) = &p.print_config
-                        && let Err(e) = config.validate()
-                    {
-                        self.status = e;
-                        return;
-                    }
-                    if let Err(e) = p.gridfinity.validate(&p.selection) {
-                        self.status = e;
-                        return;
-                    }
-                    if let Err(e) = p.label.validate() {
-                        self.status = e;
-                        return;
-                    }
-                    if let Err(e) = p.divider_layout.validate(&self.catalog, &p.selection) {
-                        self.status = format!("布局无效：{e}");
-                        return;
-                    }
-                    if !["S", "M", "L", "XL"].contains(&p.selection.width.as_str())
-                        || !(3..=7).contains(&p.selection.depth)
-                        || !["1F", "2F", "4F"].contains(&p.selection.height.as_str())
-                        || p.selection.width == "XL" && p.selection.height != "1F"
-                        || p.bom.iter().any(|b| {
-                            (!b.path.starts_with(crate::gridfinity::PREFIX)
-                                && self.catalog.resolve(&b.path).is_none())
-                                || b.qty == 0
-                                || b.qty > 100
-                        })
-                    {
-                        self.status = t(
-                            self.zh,
-                            "方案包含当前模型库中不存在或无效的组件",
-                            "Preset has invalid or unavailable components",
-                        )
-                        .into();
-                    } else {
-                        let next = match if p.assembly_kind == AssemblyKind::Sustainer {
-                            self.catalog.reconfigure_sustainer(
-                                &p.selection,
-                                p.sustainer_options,
-                                &p.bom,
-                            )
-                        } else {
-                            Ok(self.catalog.reconfigure(&p.selection, &p.bom))
-                        } {
-                            Ok(bom) => bom,
-                            Err(e) => {
-                                self.status = e;
-                                return;
-                            }
-                        };
-                        if let Some(config) = p.print_config {
-                            self.export_options.plate = config;
-                        } else {
-                            self.export_options.plate.part_filaments.clear();
-                            self.export_options.plate.text_filaments.clear();
-                            self.export_options.plate.role_filaments.clear();
-                            self.export_options.plate.component_filaments.clear();
-                            self.export_options.plate.component_text_filaments.clear();
-                            self.export_options.plate.follow_global_colors = false;
-                        }
-                        self.selection = p.selection;
-                        if self.assembly_kind != p.assembly_kind {
-                            std::mem::swap(&mut self.label, &mut self.other_label);
-                        }
-                        self.assembly_kind = p.assembly_kind;
-                        self.sustainer_options = p.sustainer_options.normalized(&self.selection);
-                        self.sustainer_angle = p.sustainer_angle;
-                        self.label = p.label;
-                        self.gridfinity = p.gridfinity;
-                        self.sustainer_dividers = p.sustainer_dividers;
-                        self.sustainer_dividers.specification = crate::sustainer_dividers::spec(
-                            &self.selection,
-                            self.sustainer_options,
-                        );
-                        self.sustainer_layout_cache
-                            .remove(&self.sustainer_dividers.specification);
-                        self.sustainer_divider_editor = Default::default();
-                        self.divider_editor.open = false;
-                        self.divider_layout = p.divider_layout;
-                        self.divider_layout.specification = crate::dividers::spec(&self.selection);
-                        self.layout_cache.remove(&self.divider_layout.specification);
-                        self.divider_editor.reset();
-                        let excluded = p
-                            .bom
-                            .iter()
-                            .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
-                            .count();
-                        self.bom = next;
-                        self.global_colors = colors;
-                        self.members = members;
-                        self.combination_move_source = None;
-                        self.workflow_history.clear();
-                        self.member_edit_baseline = None;
-                        self.member_selection.clear();
-                        self.combination_view_state = None;
-                        self.active_member = active_member;
-                        self.combination_gap = combination_gap;
-                        self.ensure_members();
-                        self.sync_global_colors();
-                        self.combination_view = true;
-                        self.scene_key.clear();
-                        self.assembly_view = None;
-                        self.drawer_state = None;
-                        self.box_state = None;
-                        self.layout_cache.clear();
-                        self.sustainer_layout_cache.clear();
-                        self.gridfinity_open = false;
-                        self.label_open = false;
-                        self.selected = None;
-                        self.assembly(ctx);
-                        self.status = format!(
-                            "{} {excluded}",
-                            t(
-                                self.zh,
-                                "方案已载入；已移除不匹配的文件：",
-                                "Preset loaded. Incompatible files removed:"
-                            )
-                        );
-                    }
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = std::fs::read_to_string(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        toml::from_str::<CombinationPreset>(&s).map_err(|e| e.to_string())
+                    });
+                let _ = tx.send(Loaded::Preset(Box::new(result)));
+                ctx.request_repaint();
+            });
+        }
+    }
+    fn apply_loaded_project(
+        &mut self,
+        result: Result<CombinationPreset, String>,
+        ctx: &egui::Context,
+    ) {
+        match result {
+            Ok(saved) => {
+                if let Err(e) = saved.validate(&self.catalog) {
+                    self.status = e;
+                    return;
                 }
-                Err(e) => self.status = e,
+                let CombinationPreset {
+                    project_name,
+                    preset,
+                    members,
+                    active_member,
+                    combination_gap,
+                    colors,
+                } = saved;
+
+                self.active_drawer = None;
+                let p = members
+                    .get(active_member)
+                    .map(|m| m.preset.clone())
+                    .unwrap_or(preset);
+                if !p.sustainer_angle.is_finite()
+                    || !(0. ..=110.).contains(&p.sustainer_angle)
+                    || p.assembly_kind == AssemblyKind::Sustainer
+                        && (!p.gridfinity.bins.is_empty()
+                            || p.divider_layout.enabled
+                            || !p.divider_layout.items.is_empty())
+                {
+                    self.status = t(
+                        self.zh,
+                        "箱子方案含无效开盖角度或不兼容的抽屉内部配置。",
+                        "Invalid lid angle or incompatible drawer inserts in box preset.",
+                    )
+                    .into();
+                    return;
+                }
+                if p.assembly_kind == AssemblyKind::Drawer && !p.sustainer_dividers.items.is_empty()
+                {
+                    self.status = "抽屉方案不能包含箱子隔板".into();
+                    return;
+                }
+                if let Err(e) =
+                    p.sustainer_dividers
+                        .validate(&self.catalog, &p.selection, p.sustainer_options)
+                {
+                    self.status = e;
+                    return;
+                }
+                if let Some(config) = &p.print_config
+                    && let Err(e) = config.validate()
+                {
+                    self.status = e;
+                    return;
+                }
+                if let Err(e) = p.gridfinity.validate(&p.selection) {
+                    self.status = e;
+                    return;
+                }
+                if let Err(e) = p.label.validate() {
+                    self.status = e;
+                    return;
+                }
+                if let Err(e) = p.divider_layout.validate(&self.catalog, &p.selection) {
+                    self.status = format!("布局无效：{e}");
+                    return;
+                }
+                if !["S", "M", "L", "XL"].contains(&p.selection.width.as_str())
+                    || !(3..=7).contains(&p.selection.depth)
+                    || !["1F", "2F", "4F"].contains(&p.selection.height.as_str())
+                    || p.selection.width == "XL" && p.selection.height != "1F"
+                    || p.bom.iter().any(|b| {
+                        (!b.path.starts_with(crate::gridfinity::PREFIX)
+                            && self.catalog.resolve(&b.path).is_none())
+                            || b.qty == 0
+                            || b.qty > 100
+                    })
+                {
+                    self.status = t(
+                        self.zh,
+                        "方案包含当前模型库中不存在或无效的组件",
+                        "Preset has invalid or unavailable components",
+                    )
+                    .into();
+                } else {
+                    let next = match if p.assembly_kind == AssemblyKind::Sustainer {
+                        self.catalog.reconfigure_sustainer(
+                            &p.selection,
+                            p.sustainer_options,
+                            &p.bom,
+                        )
+                    } else {
+                        Ok(self.catalog.reconfigure(&p.selection, &p.bom))
+                    } {
+                        Ok(bom) => bom,
+                        Err(e) => {
+                            self.status = e;
+                            return;
+                        }
+                    };
+                    if let Some(config) = p.print_config {
+                        self.export_options.plate = config;
+                    } else {
+                        self.export_options.plate.part_filaments.clear();
+                        self.export_options.plate.text_filaments.clear();
+                        self.export_options.plate.role_filaments.clear();
+                        self.export_options.plate.component_filaments.clear();
+                        self.export_options.plate.component_text_filaments.clear();
+                        self.export_options.plate.follow_global_colors = false;
+                    }
+                    self.selection = p.selection;
+                    if self.assembly_kind != p.assembly_kind {
+                        std::mem::swap(&mut self.label, &mut self.other_label);
+                    }
+                    self.assembly_kind = p.assembly_kind;
+                    self.sustainer_options = p.sustainer_options.normalized(&self.selection);
+                    self.sustainer_angle = p.sustainer_angle;
+                    self.label = p.label;
+                    self.gridfinity = p.gridfinity;
+                    self.sustainer_dividers = p.sustainer_dividers;
+                    self.sustainer_dividers.specification =
+                        crate::sustainer_dividers::spec(&self.selection, self.sustainer_options);
+                    self.sustainer_layout_cache
+                        .remove(&self.sustainer_dividers.specification);
+                    self.sustainer_divider_editor = Default::default();
+                    self.divider_editor.open = false;
+                    self.divider_layout = p.divider_layout;
+                    self.divider_layout.specification = crate::dividers::spec(&self.selection);
+                    self.layout_cache.remove(&self.divider_layout.specification);
+                    self.divider_editor.reset();
+                    let excluded = p
+                        .bom
+                        .iter()
+                        .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
+                        .count();
+                    self.bom = next;
+                    self.global_colors = colors;
+                    self.tower_imported_project(project_name);
+                    self.members = members;
+                    self.combination_move_source = None;
+                    self.workflow_history.clear();
+                    self.member_edit_baseline = None;
+                    self.member_selection.clear();
+                    self.combination_view_state = None;
+                    self.active_member = active_member;
+                    self.combination_gap = combination_gap;
+                    self.ensure_members();
+                    self.sync_global_colors();
+                    self.combination_view = true;
+                    self.scene_key.clear();
+                    self.assembly_view = None;
+                    self.drawer_state = None;
+                    self.box_state = None;
+                    self.layout_cache.clear();
+                    self.sustainer_layout_cache.clear();
+                    self.gridfinity_open = false;
+                    self.label_open = false;
+                    self.selected = None;
+                    self.assembly(ctx);
+                    self.status = format!(
+                        "{} {excluded}",
+                        t(
+                            self.zh,
+                            "方案已载入；已移除不匹配的文件：",
+                            "Preset loaded. Incompatible files removed:"
+                        )
+                    );
+                }
             }
+            Err(e) => self.status = e,
         }
     }
     fn check_destination(&self, path: &Path) -> Result<(), String> {
@@ -3231,7 +3264,11 @@ impl App {
         }
     }
     fn start_export(&mut self, ctx: &egui::Context) {
-        if self.export_scope != workflow::ExportScope::Current && !self.members.is_empty() {
+        if !self.members.is_empty()
+            && (self.export_scope != workflow::ExportScope::Current
+                || self.combination_view
+                    && !self.members[self.active_member].preset.drawers.is_empty())
+        {
             self.export_combination(ctx);
             return;
         }
@@ -3279,8 +3316,16 @@ impl App {
             self.status = e;
             return;
         }
-        let mut items = self.bom.clone();
-        if let Some(m) = self.members.get(self.active_member) {
+        let mut items = if self.active_drawer.is_some() {
+            crate::catalog::tower::drawer_items(&self.bom)
+        } else {
+            self.bom.clone()
+        };
+        if let Some(m) = self
+            .members
+            .get(self.active_member)
+            .filter(|_| self.active_drawer.is_none())
+        {
             match self.catalog.exterior_components(
                 &self.selection,
                 &m.exterior,
@@ -3323,13 +3368,23 @@ impl App {
     }
 }
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        self.tower_flush();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.tower_tick(ctx);
         self.toolbar(ctx);
         self.bottom(ctx);
         self.left(ctx);
         self.divider_view(ctx);
-        self.right(ctx);
+        if !self.combination_view
+            || self.tower.show_parts
+            || self.preview_modes.mode == preview_modes::Mode::Plates
+        {
+            self.right(ctx);
+        }
         self.color_window(ctx);
         self.global_colors_window(ctx);
         self.renderer.print_colors = self
@@ -3344,6 +3399,20 @@ impl eframe::App for App {
             self.members
                 .iter()
                 .map(|m| m.preset.print_config.clone().unwrap_or_default())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.renderer.drawer_colors = if self.scene_key == "combination" {
+            self.members
+                .iter()
+                .map(|m| {
+                    m.preset
+                        .drawers
+                        .iter()
+                        .map(|d| d.print_config.clone().unwrap_or_default())
+                        .collect()
+                })
                 .collect()
         } else {
             Vec::new()
@@ -3396,6 +3465,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-tower") {
+            self.tower_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-stopper") {
             self.stopper_smoke(ctx);
@@ -4523,6 +4596,7 @@ mod accessory_export_tests {
         color_config.part_filaments.insert(item.path.clone(), 2);
         color_config.palette[1] = [20, 120, 220];
         let preset = Preset {
+            drawers: vec![],
             sustainer_dividers: Default::default(),
             print_config: Some(color_config),
             gridfinity: Default::default(),

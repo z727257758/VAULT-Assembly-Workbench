@@ -112,19 +112,26 @@ impl App {
             .show(ui, |ui| {
                 for i in indices {
                     let m = &self.members[i];
-                    let mut items = if i == self.active_member {
-                        self.bom.clone()
+                    let leaf = i == self.active_member
+                        && self.active_drawer.is_some()
+                        && self.export_scope == ExportScope::Current;
+                    let mut items = if leaf {
+                        crate::catalog::tower::drawer_items(&self.bom)
+                    } else if i == self.active_member && self.active_drawer.is_none() {
+                        self.member_snapshot().printing_bom()
                     } else {
-                        m.preset.bom.clone()
+                        m.preset.printing_bom()
                     };
-                    match self.catalog.exterior_components(
-                        &m.preset.selection,
-                        &m.exterior,
-                        m.preset.assembly_kind == AssemblyKind::Sustainer,
-                    ) {
-                        Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
-                        Err(e) => {
-                            ui.colored_label(Color32::LIGHT_RED, e);
+                    if !leaf {
+                        match self.catalog.exterior_components(
+                            &m.preset.selection,
+                            &m.exterior,
+                            m.preset.assembly_kind == AssemblyKind::Sustainer,
+                        ) {
+                            Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
+                            Err(e) => {
+                                ui.colored_label(Color32::LIGHT_RED, e);
+                            }
                         }
                     }
                     let count: u32 = items.iter().filter(|b| b.enabled).map(|b| b.qty).sum();
@@ -244,6 +251,13 @@ impl App {
     }
     pub(super) fn sync_global_colors(&mut self) {
         for m in &mut self.members {
+            for child in &mut m.preset.drawers {
+                if let Some(c) = &mut child.print_config
+                    && c.follow_global_colors
+                {
+                    self.global_colors.apply(c);
+                }
+            }
             if let Some(c) = &mut m.preset.print_config
                 && c.follow_global_colors
             {
@@ -635,6 +649,7 @@ mod tests {
     use super::*;
     fn snapshot() -> Snapshot {
         let preset = Preset {
+            drawers: vec![],
             selection: Default::default(),
             bom: vec![Bom {
                 path: "test.stl".into(),
@@ -726,6 +741,7 @@ mod tests {
             }
         }
         let project = CombinationPreset {
+            project_name: super::tower::default_name(),
             colors: state.colors,
             preset: state.members[0].preset.clone(),
             members: state.members,

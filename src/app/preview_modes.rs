@@ -27,7 +27,7 @@ pub(super) struct State {
     key: Vec<u8>,
     pub layout: Option<PrintLayout>,
     renderer: Option<Renderer>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
     selected: Option<usize>,
     filter: Option<usize>,
     scope: u8,
@@ -59,26 +59,41 @@ fn build(request: PrintRequest, cancel: &crate::preview::Cancel) -> Result<Print
         if !items.iter().any(|b| b.enabled) {
             continue;
         }
-        copies += items
+        copies += p
+            .printing_bom()
             .iter()
+            .chain(items.iter().skip(p.bom.len()))
             .filter(|b| b.enabled)
             .map(|b| u64::from(b.qty))
             .sum::<u64>();
         if copies > 1000 {
             return Err("平铺最多 1000 份 / Plate view supports up to 1000 copies".into());
         }
-        let config = p.print_config.clone().unwrap_or_default();
-        let (inputs, plan) = crate::export::prepare_preview(
-            &request.root,
-            &items,
-            &p.label,
-            &config,
-            Some((&request.home, &p.gridfinity, &p.selection)),
-        )
-        .map_err(|e| format!("{}: {e}", member.name))?;
-        crate::preview::check(Some(cancel))?;
-        layout.append(*index, &member.name, &inputs, plan, &config);
-        geometry.share(&mut layout.scene)?;
+        for (job_index, job) in p.print_jobs(&member.name).into_iter().enumerate() {
+            let mut job_items = job.items;
+            if job_index == 0 {
+                job_items.extend(items.iter().skip(p.bom.len()).cloned());
+            }
+            if !job_items.iter().any(|b| b.enabled) {
+                continue;
+            }
+            let config = job.preset.print_config.clone().unwrap_or_default();
+            let (inputs, plan) = crate::export::prepare_preview(
+                &request.root,
+                &job_items,
+                &job.preset.label,
+                &config,
+                Some((&request.home, &job.preset.gridfinity, &job.preset.selection)),
+            )
+            .map_err(|e| format!("{}: {e}", job.name))?;
+            crate::preview::check(Some(cancel))?;
+            let start = layout.parts.len();
+            layout.append(*index, &job.name, &inputs, plan, &config);
+            for part in layout.parts[start..].iter_mut().flatten() {
+                part.drawer = job.drawer;
+            }
+            geometry.share(&mut layout.scene)?;
+        }
     }
     if layout.plates.is_empty() {
         return Err("打印清单没有勾选零件 / No checked parts in the print list".into());
@@ -109,11 +124,18 @@ impl App {
                         .get(self.active_member)
                         .map(|m| m.name.clone())
                         .unwrap_or_else(|| self.scene.title.clone()),
-                    preset: self.member_snapshot(),
+                    preset: {
+                        let mut p = self.member_snapshot();
+                        if self.active_drawer.is_some() {
+                            p.bom = crate::catalog::tower::drawer_items(&p.bom);
+                        }
+                        p
+                    },
                     placement: Default::default(),
                     exterior: self
                         .members
                         .get(self.active_member)
+                        .filter(|_| self.active_drawer.is_none())
                         .map(|m| m.exterior.clone())
                         .unwrap_or_default(),
                 },
@@ -251,13 +273,12 @@ impl App {
         }
     }
     fn open_preview_label(&mut self, target: Option<PrintPart>, ctx: &egui::Context) {
-        if let Some(target) = &target
+        self.preview_modes.mode = Mode::Assembly;
+        if let Some(info) = &target
             && self.combination_view
         {
-            self.select_member_in_combination(target.member, ctx);
-        }
-        self.preview_modes.mode = Mode::Assembly;
-        if self.combination_view {
+            self.tower_edit_slot(info.member, info.drawer, ctx);
+        } else if self.combination_view {
             self.focus_member(ctx);
         }
         if let Some(target) = target
@@ -649,6 +670,8 @@ fn paint_plates(
             ));
         }
         if let Some(p) = point(0., -12.) {
+            let compact = filter.is_none()
+                && point(256., -12.).is_some_and(|right| (right.x - p.x).abs() < 90.);
             let title = if filter.is_some() {
                 format!(
                     "{} {} · {} / {} · {} {}{}",
@@ -664,6 +687,8 @@ fn paint_plates(
                         ""
                     }
                 )
+            } else if compact {
+                (i + 1).to_string()
             } else {
                 format!(
                     "{} {} · {} {}",
@@ -677,10 +702,10 @@ fn paint_plates(
                 p,
                 egui::Align2::LEFT_TOP,
                 title,
-                egui::FontId::proportional(12.),
+                egui::FontId::proportional(if compact { 9. } else { 12. }),
                 Color32::from_rgb(175, 207, 222),
             );
-            for (j, color) in plate.colors.iter().enumerate() {
+            for (j, color) in plate.colors.iter().enumerate().filter(|_| !compact) {
                 let c = Color32::from_rgb(
                     (color[0] * 255.) as u8,
                     (color[1] * 255.) as u8,
