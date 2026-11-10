@@ -2,6 +2,7 @@ mod color_preview;
 mod combination;
 mod exterior_smoke;
 mod large_stl_smoke;
+mod preview_modes;
 mod stopper_smoke;
 mod workflow;
 use crate::{
@@ -141,6 +142,7 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    preview_modes: preview_modes::State,
     members: Vec<Member>,
     active_member: usize,
     combination_view: bool,
@@ -283,6 +285,7 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            preview_modes: Default::default(),
             members: Vec::new(),
             active_member: 0,
             combination_view: !smoke,
@@ -809,6 +812,7 @@ impl App {
             );
             match result {
                 Loaded::Catalog(Ok(c)) => {
+                    self.preview_modes = Default::default();
                     self.last_model_root = c.root.clone();
                     self.catalog = c;
                     self.members.clear();
@@ -863,8 +867,18 @@ impl App {
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
                     }
-                    if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {
+                    if self.smoke
+                        && std::env::args()
+                            .any(|a| a == "--smoke-combination" || a == "--smoke-preview-modes")
+                    {
                         self.setup_combination_smoke();
+                        if std::env::args().any(|a| a == "--smoke-preview-modes") {
+                            for member in &mut self.members {
+                                member.preset.label.style = crate::label::Style::Flat;
+                            }
+                            self.restore_member(0);
+                            self.combination_view = true;
+                        }
                     }
                     self.status = format!(
                         "{} STL · {}",
@@ -1974,6 +1988,7 @@ impl App {
             .width_range(240. ..=450.)
             .resizable(true)
             .show(ctx, |ui| {
+                if self.preview_modes.mode == preview_modes::Mode::Plates && self.scene.assembly { self.print_preview_properties(ui,ctx); return; }
                 ui.heading(t(z, "装配与属性", "Assembly & properties"));
                 if self.scene_key == "combination" {self.combination_properties(ui);return;}
                 ui.horizontal(|ui| {
@@ -2206,18 +2221,30 @@ impl App {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(t(z, "适配画面", "Fit view")).clicked() {
-                            self.camera.fit(
-                                &if self.interior_editor_open() {
-                                    self.interior_scene()
-                                } else {
-                                    self.scene.clone()
-                                },
-                                self.explosion,
-                            );
+                            if self.preview_modes.special() {
+                                self.preview_mode_fit();
+                            } else {
+                                self.camera.fit(
+                                    &if self.interior_editor_open() {
+                                        self.interior_scene()
+                                    } else {
+                                        self.scene.clone()
+                                    },
+                                    self.explosion,
+                                );
+                            }
                         }
-                        ui.checkbox(&mut self.dimensions, t(z, "尺寸三视图", "Dimension views"));
+                        ui.add_enabled_ui(!self.preview_modes.special(), |ui| {
+                            ui.checkbox(
+                                &mut self.dimensions,
+                                t(z, "尺寸三视图", "Dimension views"),
+                            );
+                        });
                     });
                 });
+                if self.preview_modes_ui(ui, ctx) {
+                    return;
+                }
                 ui.horizontal_wrapped(|ui| {
                     for (label, yaw, pitch) in [
                         (t(z, "立体", "Orbit"), 0.65, 0.5),
@@ -2240,25 +2267,6 @@ impl App {
                     }
                     if self.scene.assembly {
                         ui.separator();
-                        if ui
-                            .selectable_label(self.explosion == 0., t(z, "合拢", "Assembled"))
-                            .clicked()
-                        {
-                            self.explosion = 0.;
-                            self.camera.fit(&self.scene, 0.);
-                        }
-                        if ui
-                            .selectable_label(self.explosion == 1., t(z, "爆炸", "Exploded"))
-                            .clicked()
-                        {
-                            self.explosion = 1.;
-                            self.camera.fit(&self.scene, 1.);
-                        }
-                        ui.add(egui::Slider::new(&mut self.explosion, 0. ..=1.).text(t(
-                            z,
-                            "展开",
-                            "Separation",
-                        )));
                         if self.debug_ui
                             && ui
                                 .small_button(t(z, "重排爆炸方向", "Reset explosion"))
@@ -2368,7 +2376,8 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let spatial_input = self.combination_viewport_actions(ctx, rect);
+                    let spatial_input =
+                        self.explosion == 0. && self.combination_viewport_actions(ctx, rect);
                     if !spatial_input && response.dragged_by(egui::PointerButton::Primary) {
                         let delta = ctx.input(|i| i.pointer.delta());
                         self.camera.yaw -= delta.x * 0.008;
@@ -2475,7 +2484,7 @@ impl App {
                         egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
                         Color32::WHITE,
                     );
-                    if self.scene_key == "combination" {
+                    if self.scene_key == "combination" && self.explosion == 0. {
                         self.paint_active_member(ui, rect);
                         self.paint_spatial_dimensions(ui, rect);
                     }
@@ -3398,6 +3407,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-large-stl") {
             self.large_stl_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-preview-modes") {
+            self.preview_modes_smoke(ctx);
             return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-combination") {

@@ -1,4 +1,5 @@
 mod exterior;
+pub mod layouts;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
 use glam::{Mat4, Quat, Vec3};
 const MAX_SCENE_TRIANGLES: usize = 16_000_000;

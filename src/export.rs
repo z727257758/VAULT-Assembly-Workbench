@@ -67,6 +67,10 @@ fn sources(root: &Path, items: &[Bom], destination: &Path) -> Result<Vec<(Bom, P
     {
         return Err("不能导出到原始模型库目录".into());
     }
+    source_files(&root, items)
+}
+fn source_files(root: &Path, items: &[Bom]) -> Result<Vec<(Bom, PathBuf)>, String> {
+    let root = root.canonicalize().map_err(err)?;
     let mut result = Vec::new();
     for b in items.iter().filter(|b| b.enabled) {
         if b.qty == 0 || b.qty > 100 {
@@ -146,52 +150,14 @@ pub fn run_configured(
     if format == Format::ThreeMf {
         options.plate.validate()?;
     }
-    label.validate()?;
+    // Validate the destination before any generated geometry is prepared.
     let originals: Vec<_> = items
         .iter()
         .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
         .cloned()
         .collect();
-    let mut inputs = sources(root, &originals, destination)?;
-    let mut generated = HashMap::new();
-    if let Some((home, layout, selection)) = gridfinity {
-        layout.validate(selection)?;
-        let mut bins = Vec::new();
-        let mut generated_items = Vec::new();
-        for item in items
-            .iter()
-            .filter(|b| b.enabled && b.path.starts_with(crate::gridfinity::PREFIX))
-        {
-            let bin = layout
-                .bins
-                .iter()
-                .find(|b| b.path() == item.path || (b.detachable() && b.label_path() == item.path))
-                .ok_or("生成盒子的配置缺失")?;
-            if item.qty != 1 {
-                return Err("盒子份数由布局管理".into());
-            }
-            if bin.detachable() && bin.label_path() == item.path {
-                generated.insert(item.path.clone(), crate::cullenect::label(&bin.label)?);
-                inputs.push((item.clone(), PathBuf::new()));
-                continue;
-            }
-            bins.push(bin);
-            generated_items.push(item);
-        }
-        let meshes = crate::gridfinity::generate_many(home, &bins, selection, None)?;
-        for (item, mesh) in generated_items.into_iter().zip(meshes) {
-            generated.insert(item.path.clone(), mesh);
-            inputs.push((item.clone(), PathBuf::new()));
-        }
-    } else if items
-        .iter()
-        .any(|b| b.enabled && b.path.starts_with(crate::gridfinity::PREFIX))
-    {
-        return Err("缺少 Gridfinity 布局".into());
-    }
-    if inputs.is_empty() {
-        return Err("打印清单中没有已选模型".into());
-    }
+    sources(root, &originals, destination)?;
+    let (inputs, generated) = prepare_inputs(root, items, label, gridfinity)?;
 
     let parent = destination.parent().ok_or("Invalid export destination")?;
     if format == Format::Stl {
@@ -239,31 +205,85 @@ pub fn run_configured(
     }
     Ok(destination.to_path_buf())
 }
-fn write_3mf(
-    file: &mut File,
+type Inputs = (Vec<(Bom, PathBuf)>, HashMap<String, std::sync::Arc<Mesh>>);
+fn prepare_inputs(
+    root: &Path,
+    items: &[Bom],
+    label: &crate::label::Config,
+    gridfinity: Option<(
+        &Path,
+        &crate::gridfinity::Layout,
+        &crate::catalog::Selection,
+    )>,
+) -> Result<Inputs, String> {
+    label.validate()?;
+    let originals: Vec<_> = items
+        .iter()
+        .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
+        .cloned()
+        .collect();
+    let mut inputs = source_files(root, &originals)?;
+    let mut generated = HashMap::new();
+    if let Some((home, layout, selection)) = gridfinity {
+        layout.validate(selection)?;
+        let mut bins = Vec::new();
+        let mut generated_items = Vec::new();
+        for item in items
+            .iter()
+            .filter(|b| b.enabled && b.path.starts_with(crate::gridfinity::PREFIX))
+        {
+            let bin = layout
+                .bins
+                .iter()
+                .find(|b| b.path() == item.path || (b.detachable() && b.label_path() == item.path))
+                .ok_or("生成盒子的配置缺失")?;
+            if item.qty != 1 {
+                return Err("盒子份数由布局管理".into());
+            }
+            if bin.detachable() && bin.label_path() == item.path {
+                generated.insert(item.path.clone(), crate::cullenect::label(&bin.label)?);
+                inputs.push((item.clone(), PathBuf::new()));
+                continue;
+            }
+            bins.push(bin);
+            generated_items.push(item);
+        }
+        let meshes = crate::gridfinity::generate_many(home, &bins, selection, None)?;
+        for (item, mesh) in generated_items.into_iter().zip(meshes) {
+            generated.insert(item.path.clone(), mesh);
+            inputs.push((item.clone(), PathBuf::new()));
+        }
+    } else if items
+        .iter()
+        .any(|b| b.enabled && b.path.starts_with(crate::gridfinity::PREFIX))
+    {
+        return Err("缺少 Gridfinity 布局".into());
+    }
+    if inputs.is_empty() {
+        return Err("打印清单中没有已选模型".into());
+    }
+
+    Ok((inputs, generated))
+}
+
+/// Shared manufacturing geometry and packing for both 3MF and the read-only plate view.
+pub(crate) struct PreparedPrint {
+    pub sizes: Vec<glam::Vec3>,
+    pub materials: Vec<Vec<u32>>,
+    pub plate_groups: Vec<crate::print_plate::PlateGroup>,
+    pub resources: Vec<(std::sync::Arc<Mesh>, glam::Vec3, String, Vec<bool>)>,
+    pub material_ids: Vec<Vec<(usize, u32)>>,
+    pub local_supports: Vec<bool>,
+    pub face_down: Vec<bool>,
+    pub placements: Vec<crate::print_plate::Placement>,
+}
+fn prepare_print(
     inputs: &[(Bom, PathBuf)],
     label: &crate::label::Config,
     generated: &HashMap<String, std::sync::Arc<Mesh>>,
     plate: &crate::print_plate::Config,
     gridfinity: Option<(&crate::gridfinity::Layout, &crate::catalog::Selection)>,
-) -> Result<(), String> {
-    let mut zip = ZipWriter::new(BufWriter::new(file));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    for (name, content) in [
-        (
-            "[Content_Types].xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/></Types>"#,
-        ),
-        (
-            "_rels/.rels",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#,
-        ),
-    ] {
-        zip.start_file(name, options).map_err(err)?;
-        zip.write_all(content.as_bytes()).map_err(err)?;
-    }
-    zip.start_file("3D/3dmodel.model", options).map_err(err)?;
-    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="BambuStudio:FdmSupportsPaintingVersion">0</metadata><metadata name="VAULT:Generator">VAULT 装配工作台 · P1S exporter</metadata><resources>"#).map_err(err)?;
+) -> Result<PreparedPrint, String> {
     let mut sizes = Vec::new();
     let mut resources = Vec::new();
     let mut material_ids = Vec::<Vec<(usize, u32)>>::new();
@@ -373,6 +393,101 @@ fn write_3mf(
         material_ids.push(ids);
         local_supports.push(painted);
     }
+    let parts: Vec<_> = inputs
+        .iter()
+        .zip(&sizes)
+        .map(|((item, _), size)| (item.name().to_string(), *size, item.qty))
+        .collect();
+    let materials: Vec<Vec<u32>> = material_ids
+        .iter()
+        .map(|ids| ids.iter().map(|(_, slot)| *slot).collect())
+        .collect();
+    let plate_groups: Vec<_> = inputs
+        .iter()
+        .map(|(item, _)| {
+            if gridfinity.is_some_and(|(layout, _)| {
+                layout
+                    .bins
+                    .iter()
+                    .any(|b| b.detachable() && b.label_path() == item.path)
+            }) {
+                crate::print_plate::PlateGroup::RemovableLabel
+            } else {
+                crate::print_plate::PlateGroup::Standard
+            }
+        })
+        .collect();
+    let placements =
+        crate::print_plate::arrange_grouped_materials(&parts, &materials, &plate_groups, plate)?;
+    Ok(PreparedPrint {
+        sizes,
+        materials,
+        plate_groups,
+        resources,
+        material_ids,
+        local_supports,
+        face_down,
+        placements,
+    })
+}
+pub(crate) fn prepare_preview(
+    root: &Path,
+    items: &[Bom],
+    label: &crate::label::Config,
+    plate: &crate::print_plate::Config,
+    gridfinity: Option<(
+        &Path,
+        &crate::gridfinity::Layout,
+        &crate::catalog::Selection,
+    )>,
+) -> Result<(Vec<Bom>, PreparedPrint), String> {
+    plate.validate()?;
+    let (inputs, generated) = prepare_inputs(root, items, label, gridfinity)?;
+    let plan = prepare_print(
+        &inputs,
+        label,
+        &generated,
+        plate,
+        gridfinity.map(|(_, l, s)| (l, s)),
+    )?;
+    Ok((inputs.into_iter().map(|(b, _)| b).collect(), plan))
+}
+
+fn write_3mf(
+    file: &mut File,
+    inputs: &[(Bom, PathBuf)],
+    label: &crate::label::Config,
+    generated: &HashMap<String, std::sync::Arc<Mesh>>,
+    plate: &crate::print_plate::Config,
+    gridfinity: Option<(&crate::gridfinity::Layout, &crate::catalog::Selection)>,
+) -> Result<(), String> {
+    let mut zip = ZipWriter::new(BufWriter::new(file));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (name, content) in [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#,
+        ),
+    ] {
+        zip.start_file(name, options).map_err(err)?;
+        zip.write_all(content.as_bytes()).map_err(err)?;
+    }
+    zip.start_file("3D/3dmodel.model", options).map_err(err)?;
+    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="BambuStudio:FdmSupportsPaintingVersion">0</metadata><metadata name="VAULT:Generator">VAULT 装配工作台 · P1S exporter</metadata><resources>"#).map_err(err)?;
+    let PreparedPrint {
+        sizes,
+        materials,
+        plate_groups,
+        resources,
+        material_ids,
+        local_supports,
+        face_down,
+        placements,
+    } = prepare_print(inputs, label, generated, plate, gridfinity)?;
     for (index, (mesh, origin, name, support_mask)) in resources.iter().enumerate() {
         // Weld by exact source coordinates, preserving triangle order and disconnected bodies.
         let mut map = HashMap::<[u32; 3], usize>::new();
@@ -416,32 +531,6 @@ fn write_3mf(
         }
         writeln!(zip, "</triangles></mesh></object>").map_err(err)?;
     }
-    let parts: Vec<_> = inputs
-        .iter()
-        .zip(&sizes)
-        .map(|((item, _), size)| (item.name().to_string(), *size, item.qty))
-        .collect();
-    let materials: Vec<Vec<u32>> = material_ids
-        .iter()
-        .map(|ids| ids.iter().map(|(_, slot)| *slot).collect())
-        .collect();
-    let plate_groups: Vec<_> = inputs
-        .iter()
-        .map(|(item, _)| {
-            if gridfinity.is_some_and(|(layout, _)| {
-                layout
-                    .bins
-                    .iter()
-                    .any(|b| b.detachable() && b.label_path() == item.path)
-            }) {
-                crate::print_plate::PlateGroup::RemovableLabel
-            } else {
-                crate::print_plate::PlateGroup::Standard
-            }
-        })
-        .collect();
-    let placements =
-        crate::print_plate::arrange_grouped_materials(&parts, &materials, &plate_groups, plate)?;
     let plate_count = placements.iter().map(|p| p.plate + 1).max().unwrap_or(0);
     let mut config = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><config>");
     // Each copy gets a wrapper object: Bambu's plate map stores one instance per object ID.
@@ -759,7 +848,32 @@ endsolid t";
                 let all = resource_points(resources);
                 let items: Vec<_> = model.split("<item ").skip(1).collect();
                 assert_eq!(items.len(), 2);
-                for item in items {
+                let plan = prepare_print(
+                    &inputs,
+                    &Default::default(),
+                    &generated,
+                    &c,
+                    Some((&layout, &Default::default())),
+                )
+                .unwrap();
+                let origins: Vec<_> = plan
+                    .resources
+                    .iter()
+                    .map(|(_, origin, _, _)| *origin)
+                    .collect();
+                let regions = plan.material_ids[0].len();
+                let mut preview = crate::scene::layouts::PrintLayout::default();
+                preview.append(
+                    0,
+                    "Labels",
+                    &inputs.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>(),
+                    plan,
+                    &c,
+                );
+                preview.finish().unwrap();
+                assert_eq!(preview.plates.len(), 1);
+                assert_eq!(preview.plates[0].copies, 2);
+                for (copy, item) in items.into_iter().enumerate() {
                     let t: Vec<f32> = item
                         .split("transform=\"")
                         .nth(1)
@@ -772,6 +886,23 @@ endsolid t";
                         .collect();
                     let rotation = glam::Mat3::from_cols_array(&t[..9].try_into().unwrap());
                     let position = glam::Vec3::new(t[9], t[10], t[11]);
+                    for (region, origin) in origins.iter().enumerate() {
+                        let part = &preview.scene.parts[copy * regions + region];
+                        for vertex in part.mesh.vertices.iter().step_by(7) {
+                            let v = glam::Vec3::from(vertex.position);
+                            let local = v - *origin;
+                            let printed =
+                                rotation * glam::Vec3::new(local.x, -local.z, local.y) + position;
+                            let viewed = part.pose.matrix(0.).transform_point3(v);
+                            assert!(
+                                viewed.abs_diff_eq(
+                                    glam::Vec3::new(printed.x, printed.z, -printed.y),
+                                    0.002
+                                ),
+                                "preview/export differ: {viewed} vs {printed}"
+                            );
+                        }
+                    }
                     let height_range = |points: &[glam::Vec3]| {
                         points
                             .iter()
