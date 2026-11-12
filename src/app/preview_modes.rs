@@ -257,6 +257,35 @@ impl App {
                             self.open_preview_label(None, ctx);
                         }
                     });
+                    if self.preview_modes.mode == Mode::Exploded {
+                        let mut amount = if before == Mode::Exploded {
+                            self.explosion
+                        } else {
+                            1.
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(t(z, "展开程度", "Spread"));
+                            ui.spacing_mut().slider_width =
+                                (ui.available_width() - 65.).clamp(64., 180.);
+                            let slider = ui
+                                .scope(|ui| {
+                                    let dark = ui.visuals().dark_mode;
+                                    ui.visuals_mut().widgets.inactive.bg_fill =
+                                        Color32::from_gray(if dark { 75 } else { 210 });
+                                    ui.visuals_mut().selection.bg_fill = appearance::BRAND;
+                                    ui.add(
+                                        egui::Slider::new(&mut amount, 0.05..=1.)
+                                            .show_value(false)
+                                            .trailing_fill(true),
+                                    )
+                                })
+                                .inner;
+                            if slider.changed() {
+                                self.explosion = amount;
+                            }
+                            ui.monospace(format!("{:.0}%", amount * 100.));
+                        });
+                    }
                 });
             });
         if before != self.preview_modes.mode {

@@ -1476,6 +1476,21 @@ impl App {
                 self.undo_workflow(ctx);
                 Ok(())
             }
+            8 => {
+                self.preview_modes.mode = super::preview_modes::Mode::Exploded;
+                self.explosion = 1.;
+                self.camera.fit(&self.scene, self.explosion);
+                Ok(())
+            }
+            9 => {
+                self.explosion = 0.45;
+                Ok(())
+            }
+            10 => {
+                self.preview_modes.mode = super::preview_modes::Mode::Assembly;
+                self.explosion = 0.;
+                Ok(())
+            }
             _ => {
                 let result = (|| -> Result<(), String> {
                     if rows(&self.members)?.len() != 3 {
@@ -1490,7 +1505,7 @@ impl App {
                         toml::from_str(&text).map_err(|e| e.to_string())?;
                     restored.validate(&self.catalog)?;
                     std::fs::write(folder.join("project.toml"), text).map_err(|e| e.to_string())?;
-                    std::fs::write(folder.join("smoke-result.txt"),"PASS: layer cards, common XL5 footprint, independent S+M cells, shared 2F housing / two 1F drawers, label editing, print list, print plates, project switching, layer duplication, undo and TOML roundtrip. All source geometry remains read-only; assembly estimates unverified.").map_err(|e|e.to_string())
+                    std::fs::write(folder.join("smoke-result.txt"),"PASS: layer cards, common XL5 footprint, independent S+M cells, shared 2F housing / two 1F drawers, label editing, print list, print plates, project switching, layer duplication, undo, full and partial combination explosion, closed-view return and TOML roundtrip. All source geometry remains read-only; assembly estimates unverified.").map_err(|e|e.to_string())
                 })();
                 if let Err(e) = result {
                     let _ = std::fs::write(folder.join("smoke-error.txt"), e);

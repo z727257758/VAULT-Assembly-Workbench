@@ -1074,6 +1074,13 @@ impl Scene {
             result.relations.extend(scene.relations);
             result.mating_checks.extend(scene.mating_checks);
         }
+        crate::explosion::space_combination(
+            &mut result,
+            &members
+                .iter()
+                .map(|(_, placement, _)| *placement)
+                .collect::<Vec<_>>(),
+        )?;
         Ok(result)
     }
 }

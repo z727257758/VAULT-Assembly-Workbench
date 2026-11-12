@@ -2,6 +2,93 @@
 use crate::{constraints::PartId, scene::Scene};
 use glam::Vec3;
 
+const MEMBER_GAP: f32 = 35.;
+
+/// Give each member's exploded display envelope its own space. This only adds a
+/// common translation to that member's existing extraction travel; closed poses,
+/// joints, meshes and manufacturing layouts remain the assembly's source data.
+pub(crate) fn space_combination(
+    scene: &mut Scene,
+    placements: &[crate::scene::Placement],
+) -> Result<(), String> {
+    if placements.len() < 2 {
+        return Ok(());
+    }
+    let mut bounds =
+        vec![(Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)); placements.len()];
+    // Use all display parts, including hidden ones, so isolation cannot rearrange
+    // the remaining members. Conservative mesh boxes are presentation envelopes,
+    // not surface-crossing diagnostics or proof of mechanical clearance.
+    for part in &scene.parts {
+        let index = (part.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
+        let (lo, hi) = bounds
+            .get_mut(index)
+            .ok_or("Invalid explosion member identity")?;
+        let matrix = part.pose.matrix(1.);
+        for x in [part.mesh.min.x, part.mesh.max.x] {
+            for y in [part.mesh.min.y, part.mesh.max.y] {
+                for z in [part.mesh.min.z, part.mesh.max.z] {
+                    let point = matrix.transform_point3(Vec3::new(x, y, z));
+                    *lo = lo.min(point);
+                    *hi = hi.max(point);
+                }
+            }
+        }
+    }
+    if bounds
+        .iter()
+        .any(|(lo, hi)| !lo.is_finite() || !hi.is_finite())
+    {
+        return Err("Invalid member explosion envelope".into());
+    }
+    let mut rows = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+    for (i, placement) in placements.iter().enumerate() {
+        rows.entry(placement.level).or_default().push(i);
+    }
+    let mut shifts = vec![Vec3::ZERO; placements.len()];
+    let mut ceiling: Option<f32> = None;
+    for members in rows.values_mut() {
+        members.sort_by_key(|&i| placements[i].column);
+        let mut right: Option<f32> = None;
+        let mut outward = 0f32;
+        for &i in members.iter() {
+            let (lo, hi) = bounds[i];
+            outward = right.map_or(0., |edge| (edge + MEMBER_GAP - lo.x).max(outward));
+            shifts[i].x = outward;
+            right = Some(hi.x + outward);
+        }
+        // Open a paired layer equally to either side of its assembled center.
+        // A spanning whole-width member above it retains its horizontal datum.
+        let center_shift = shifts[*members.last().unwrap()].x * 0.5;
+        let bottom = members
+            .iter()
+            .map(|&i| bounds[i].0.y)
+            .fold(f32::INFINITY, f32::min);
+        let top = members
+            .iter()
+            .map(|&i| bounds[i].1.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let lift = ceiling.map_or(0., |edge| (edge + MEMBER_GAP - bottom).max(0.));
+        for &i in members.iter() {
+            shifts[i].x -= center_shift;
+            shifts[i].y = lift;
+        }
+        ceiling = Some(top + lift);
+    }
+    for part in &mut scene.parts {
+        let shift = shifts[(part.pose.instance / crate::scene::MEMBER_STRIDE) as usize];
+        if shift == Vec3::ZERO {
+            continue;
+        }
+        let assembled = part.pose.matrix(0.);
+        let travel = part.pose.matrix(1.).transform_point3(Vec3::ZERO)
+            - assembled.transform_point3(Vec3::ZERO);
+        part.pose.travel = (travel + shift).to_array();
+        part.pose.travel_frame = Some(assembled.to_scale_rotation_translation().1.to_array());
+    }
+    Ok(())
+}
+
 pub fn reset(scene: &mut Scene) -> Result<(), String> {
     if scene.assembly
         && scene
@@ -148,6 +235,194 @@ mod tests {
         scene::Definition,
     };
     use glam::{Mat4, Quat};
+
+    fn display_member(name: &str, width: f32) -> Scene {
+        use crate::{
+            mesh::{Mesh, Vertex},
+            scene::{Part, Pose},
+        };
+        let mesh = std::sync::Arc::new(Mesh {
+            vertices: [
+                [-width * 0.5, -10., -15.],
+                [width * 0.5, 10., -15.],
+                [-width * 0.5, 10., 15.],
+            ]
+            .into_iter()
+            .map(|position| Vertex {
+                position,
+                normal: [0., 1., 0.],
+                shade: 1.,
+            })
+            .collect(),
+            min: Vec3::new(-width * 0.5, -10., -15.),
+            max: Vec3::new(width * 0.5, 10., 15.),
+            size: Vec3::new(width, 20., 30.),
+        });
+        let root = Part {
+            source_size: mesh.size,
+            mesh,
+            pose: Pose {
+                path: format!("test/{name}/shell.stl"),
+                instance: 0,
+                body: None,
+                position: [0.; 3],
+                rotation: [0.; 3],
+                travel: [0.; 3],
+                travel_frame: None,
+            },
+            color: [1.; 4],
+            visible: true,
+            source_bodies: 1,
+        };
+        let mut child = root.clone();
+        child.pose.path = format!("test/{name}/moving.stl");
+        child.pose.instance = 1;
+        child.pose.position = [0., 5., 10.];
+        child.pose.rotation = [25., 40., 15.];
+        child.pose.travel = [-80., 60., 180.];
+        child.pose.travel_frame = Some(Quat::from_rotation_y(-0.4).to_array());
+        Scene {
+            parts: vec![root, child],
+            assembly: true,
+            ..Default::default()
+        }
+    }
+
+    fn envelopes(scene: &Scene) -> Vec<(Vec3, Vec3)> {
+        let mut result = vec![
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            scene.member_bounds.len()
+        ];
+        for part in &scene.parts {
+            let (lo, hi) = &mut result[(part.pose.instance / crate::scene::MEMBER_STRIDE) as usize];
+            for x in [part.mesh.min.x, part.mesh.max.x] {
+                for y in [part.mesh.min.y, part.mesh.max.y] {
+                    for z in [part.mesh.min.z, part.mesh.max.z] {
+                        let point = part.pose.matrix(1.).transform_point3(Vec3::new(x, y, z));
+                        *lo = lo.min(point);
+                        *hi = hi.max(point);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn display_members() -> Vec<(Scene, crate::scene::Placement, Vec3)> {
+        use crate::scene::Placement;
+        vec![
+            (
+                display_member("left", 40.),
+                Placement::default(),
+                Vec3::new(-30., 0., 0.),
+            ),
+            (
+                display_member("right", 40.),
+                Placement {
+                    column: 1,
+                    ..Default::default()
+                },
+                Vec3::new(30., 0., 0.),
+            ),
+            (
+                display_member("bridge", 100.),
+                Placement {
+                    level: 1,
+                    ..Default::default()
+                },
+                Vec3::new(0., 25., 0.),
+            ),
+            (
+                display_member("top", 100.),
+                Placement {
+                    level: 2,
+                    ..Default::default()
+                },
+                Vec3::new(0., 50., 0.),
+            ),
+        ]
+    }
+
+    fn compose(members: &[(Scene, crate::scene::Placement, Vec3)]) -> Scene {
+        Scene::combine_positioned(
+            members
+                .iter()
+                .map(|(scene, placement, _)| (scene.clone(), *placement, 0.))
+                .collect(),
+            0.,
+            Some(members.iter().map(|(_, _, shift)| *shift).collect()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn combined_explosion_spaces_rows_and_pairs_without_changing_extraction_or_closed_poses() {
+        let members = display_members();
+        let scene = compose(&members);
+        let boxes = envelopes(&scene);
+        assert!((boxes[1].0.x - boxes[0].1.x - MEMBER_GAP).abs() < 0.001);
+        assert!((boxes[2].0.y - boxes[0].1.y.max(boxes[1].1.y) - MEMBER_GAP).abs() < 0.001);
+        assert!((boxes[3].0.y - boxes[2].1.y - MEMBER_GAP).abs() < 0.001);
+        for (i, (original, _, shift)) in members.iter().enumerate() {
+            let root_shift = scene.parts[i * 2]
+                .pose
+                .matrix(1.)
+                .transform_point3(Vec3::ZERO)
+                - original.parts[0]
+                    .pose
+                    .matrix(1.)
+                    .transform_point3(Vec3::ZERO)
+                - shift;
+            for (source, part) in original.parts.iter().zip(&scene.parts[i * 2..i * 2 + 2]) {
+                assert_eq!(source.pose.rotation, part.pose.rotation);
+                for amount in [0., 0.25, 0.7, 1.] {
+                    let expected = Mat4::from_translation(*shift + root_shift * amount)
+                        * source.pose.matrix(amount);
+                    assert!(part.pose.matrix(amount).abs_diff_eq(expected, 0.001));
+                }
+            }
+        }
+        assert!(scene.parts[0].pose.travel[0] < 0. && scene.parts[2].pose.travel[0] > 0.);
+        assert!(scene.parts[4].pose.travel[0].abs() < 0.001);
+    }
+
+    #[test]
+    fn combined_spacing_is_stable_across_visibility_and_saved_member_order() {
+        let members = display_members();
+        let scene = compose(&members);
+        let mut reordered = vec![
+            members[2].clone(),
+            members[1].clone(),
+            members[3].clone(),
+            members[0].clone(),
+        ];
+        reordered[1].0.parts[1].visible = false;
+        let other = compose(&reordered);
+        for part in &scene.parts {
+            let matching = other
+                .parts
+                .iter()
+                .find(|p| p.pose.path == part.pose.path)
+                .unwrap();
+            assert!(
+                part.pose
+                    .matrix(1.)
+                    .abs_diff_eq(matching.pose.matrix(1.), 0.001)
+            );
+        }
+    }
+
+    #[test]
+    fn single_member_keeps_its_existing_explosion_frames() {
+        let source = display_member("single", 40.);
+        let original = serde_json::to_value(&source.definition().poses).unwrap();
+        let combined = compose(&[(source, Default::default(), Vec3::ZERO)]);
+        assert_eq!(
+            original,
+            serde_json::to_value(&combined.definition().poses).unwrap()
+        );
+    }
+
     #[test]
     #[ignore = "requires VAULT_MODEL_ROOT"]
     fn assembled_axes_hierarchy_rotation_and_roundtrip() {
