@@ -137,9 +137,12 @@ pub(super) fn show(
 ) {
     let z = app.zh;
     let current = layout(&app.members).unwrap_or(Layout::Apart);
-    let title = format!(
-        "{} · {}{} · {}",
-        t(z, "顶部配置", "Top configuration"),
+    let empty = top.members.iter().all(|&i| {
+        app.members[i].preset.assembly_kind == AssemblyKind::Drawer
+            && app.members[i].exterior.roof == Roof::None
+    });
+    let summary = format!(
+        "{}{} · {}",
         top.width,
         top.depth,
         if current == Layout::Whole {
@@ -148,10 +151,18 @@ pub(super) fn show(
             t(z, "分体", "Split")
         }
     );
-    egui::CollapsingHeader::new(title)
-        .id_salt("tower-roofs")
-        .default_open(app.smoke && std::env::args().any(|a| a == "--smoke-top"))
-        .show(ui, |ui| {
+    super::layers::section(
+        ui,
+        "tower-roofs",
+        if empty {
+            t(z, "无顶盖", "No top cover")
+        } else {
+            t(z, "顶盖", "Top cover")
+        },
+        &summary,
+        empty,
+        app.smoke && std::env::args().any(|a| a == "--smoke-top"),
+        |ui| {
             ui.small(t(
                 z,
                 "顶部宽深跟随整体尺寸；组合方式独立于抽屉层。",
@@ -257,5 +268,6 @@ pub(super) fn show(
                     }
                 });
             }
-        });
+        },
+    );
 }

@@ -1,4 +1,5 @@
 use super::*;
+mod layers;
 mod roofs;
 pub(super) struct State {
     pub name: String,
@@ -901,68 +902,73 @@ impl App {
             let top = all.last().unwrap();
             roofs::show(self, ui, top, &mut action);
             ui.add_space(8.);
-            ui.horizontal(|ui| { ui.strong(t(z, "抽屉与箱子", "Drawers & boxes")); ui.label(RichText::new(format!("{} {}", all.len(), t(z,"层","layers"))).weak()); });
+            ui.horizontal(|ui| {
+                ui.strong(t(z, "层", "Layers"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(format!("{} {}",all.len(),t(z,"层","layers"))).weak()); });
+            });
             for row in all.iter().rev() {
                 let expanded = self.tower.open_layer == Some(row.level);
-                let active = self.members.get(self.active_member).is_some_and(|m| m.placement.level == row.level);
-                let frame = egui::Frame::group(ui.style()).fill(ui.visuals().panel_fill).corner_radius(12.).inner_margin(10.)
-                    .stroke(egui::Stroke::new(1., if active { ui.visuals().text_color() } else { ui.visuals().widgets.noninteractive.bg_stroke.color }));
-                let response = ui.push_id(("layer-card", row.level), |ui| frame.show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                let kind = if row.members.iter().all(|&i| self.members[i].preset.assembly_kind == AssemblyKind::Drawer) {
+                    t(z,"抽屉","Drawer")
+                } else if row.members.iter().all(|&i| self.members[i].preset.assembly_kind == AssemblyKind::Sustainer) {
+                    t(z,"箱子","Box")
+                } else { t(z,"混合","Mixed") };
+                let size = row.members.iter().map(|&i|format!("{}{}",self.members[i].preset.selection.width,row.depth)).collect::<Vec<_>>().join(" + ");
+                let card = layers::layer(ui, layers::Header {level:row.level,kind,size:&size,height:&row.height,can_delete:all.len()>1,zh:z}, expanded, |ui| {
+                    let mut height=row.height.clone();
+                    let mut split=row.members.len()==2;
                     ui.horizontal(|ui| {
-                        ui.dnd_drag_source(egui::Id::new(("tower-layer",row.level)),row.level, |ui| { ui.label(RichText::new("::").weak()); });
-                        let title = format!("{:02}  {} / {}", row.level + 1, row.members.iter().map(|i| format!("{}{}", self.members[*i].preset.selection.width, row.depth)).collect::<Vec<_>>().join(" + "), row.height);
-                        if ui.selectable_label(expanded, RichText::new(title).strong()).clicked() {
-                            self.tower.open_layer = if expanded { None } else { Some(row.level) };
-                            self.select_member_in_combination(row.members[0],ctx);
-                        }
+                        ui.label(t(z,"高度","Height"));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("···", |ui| {
-                                if ui.button(t(z,"复制这一层","Duplicate layer")).clicked() { action=Some(Action::Duplicate(row.level)); ui.close(); }
-                                if ui.add_enabled(row.level+1<all.len() as u32,egui::Button::new(t(z,"上移","Move up"))).clicked() { action=Some(Action::Move(row.level,row.level+1)); ui.close(); }
-                                if ui.add_enabled(row.level>0,egui::Button::new(t(z,"下移","Move down"))).clicked() { action=Some(Action::Move(row.level,row.level-1)); ui.close(); }
-                                let mut checked=row.members.iter().all(|i|self.member_selection.contains(i));
-                                if ui.checkbox(&mut checked,t(z,"勾选导出成员","Select members for export")).changed() {
-                                    for &i in &row.members { if checked { self.member_selection.insert(i); } else { self.member_selection.remove(&i); } }
-                                }
-                                ui.separator();
-                                if ui.add_enabled(all.len()>1,egui::Button::new(t(z,"删除这一层","Delete layer"))).clicked() { action=Some(Action::Delete(row.level)); ui.close(); }
+                            ui.allocate_ui_with_layout(egui::vec2(180_f32.min(ui.available_width()),36.),egui::Layout::left_to_right(egui::Align::Center),|ui| {
+                                if row.width != "XL" || split { appearance::size_choices(ui,&mut height,&[("1F".into(),"1F"),("2F".into(),"2F"),("4F".into(),"4F")]); }
+                                else {ui.label("1F");}
                             });
                         });
                     });
-                    if !expanded { return; }
-                    ui.separator();
-                    let mut height=row.height.clone();
-                    let mut split=row.members.len()==2;
-                    ui.small(t(z,"层高","Layer height"));
-                    if row.width != "XL" || split {
-                        appearance::size_choices(ui,&mut height,&[("1F".into(),"1F"),("2F".into(),"2F"),("4F".into(),"4F")]);
-                    } else { ui.label("1F"); }
                     if matches!(row.width.as_str(),"L"|"XL") {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(t(z,"组合方式","Arrangement"));
-                            ui.add_enabled_ui(row.width!="XL",|ui| { ui.selectable_value(&mut split,false,format!("{} {}",t(z,"整块","Whole"),row.width)); }).response.on_hover_text(t(z,"整块 XL 安装面待校准；可用 S＋M。","Full XL seating datums need calibration; use S+M."));
+                            let whole=ui.add_enabled_ui(row.width!="XL",|ui| { ui.selectable_value(&mut split,false,format!("{} {}",t(z,"整块","Whole"),row.width)); });
+                            if row.width=="XL" { whole.response.on_hover_text(t(z,"整块 XL 安装面待校准；可用 S＋M。","Full XL seating datums need calibration; use S+M.")); }
                             ui.selectable_value(&mut split,true,if row.width=="L" {"S + S"} else {"S + M"});
                         });
                     }
                     if height!=row.height || split!=(row.members.len()==2) { action=Some(Action::Row(row.level,height,split)); }
                     for (column, &index) in row.members.iter().enumerate() {
                         ui.push_id(index, |ui| {
-                            if row.members.len() > 1 {
-                                ui.small(if column == 0 { t(z,"左侧","Left") } else { t(z,"右侧","Right") });
-                            }
+                            if row.members.len() > 1 { ui.small(if column==0 {t(z,"左侧","Left")} else {t(z,"右侧","Right")}); }
                             self.tower_cell(ui,index,&mut action);
                         });
                     }
-                })).inner;
-                if let Some(from)=response.response.dnd_release_payload::<u32>() && *from!=row.level { action=Some(Action::Move(*from,row.level)); }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let checked_count=row.members.iter().filter(|i|self.member_selection.contains(i)).count();
+                        let mut checked=checked_count==row.members.len();
+                        let mixed=checked_count>0 && !checked;
+                        if ui.add(egui::Checkbox::new(&mut checked,t(z,"勾选导出","Include in export")).indeterminate(mixed)).changed() {
+                            for &i in &row.members {if checked {self.member_selection.insert(i);} else {self.member_selection.remove(&i);}}
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if layers::icon_button(ui,layers::Icon::Down,row.level>0,t(z,"下移","Move down")).clicked() && row.level>0 {action=Some(Action::Move(row.level,row.level-1));}
+                            if layers::icon_button(ui,layers::Icon::Up,row.level+1<all.len() as u32,t(z,"上移","Move up")).clicked() && row.level+1<all.len() as u32 {action=Some(Action::Move(row.level,row.level+1));}
+                        });
+                    });
+                });
+                if let Some(open) = card.open {
+                    self.tower.open_layer=if open {Some(row.level)} else {None};
+                    if open && !expanded {self.select_member_in_combination(row.members[0],ctx);}
+                }
+                if card.action.is_some() {action=card.action;}
+                if let Some(from)=card.response.dnd_release_payload::<u32>() && *from!=row.level {action=Some(Action::Move(*from,row.level));}
             }
             ui.horizontal_wrapped(|ui| {
                 if ui.button(t(z,"＋ 抽屉层","＋ Drawer layer")).clicked() { action=Some(Action::Add(AssemblyKind::Drawer)); }
                 if ui.button(t(z,"＋ 箱子层","＋ Box layer")).clicked() { action=Some(Action::Add(AssemblyKind::Sustainer)); }
             });
             ui.add_space(8.);
-            egui::CollapsingHeader::new(t(z,"底座","Base")).id_salt("tower-bases").show(ui,|ui| {
+            let base_empty=first.members.iter().all(|&i|self.members[i].exterior.base==crate::catalog::exterior::Base::None);
+            layers::section(ui,"tower-bases",if base_empty {t(z,"无底部","No base")} else {t(z,"底部配置","Base")},&format!("{}{}",first.width,first.depth),base_empty,false,|ui| {
                 ui.set_min_width(ui.available_width());
                 for (column, &i) in first.members.iter().enumerate() { ui.push_id(("tower-base",i),|ui| {
                     if first.members.len()>1 { ui.small(format!("{} · {}", if column==0 {t(z,"左侧","Left")} else {t(z,"右侧","Right")}, self.members[i].preset.selection.width)); }
@@ -986,9 +992,11 @@ impl App {
         let z = self.zh;
         let m = &self.members[index];
         let p = &m.preset;
-        egui::Frame::group(ui.style())
-            .fill(ui.visuals().extreme_bg_color)
-            .corner_radius(7.)
+        egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .inner_margin(10.)
+            .corner_radius(8.)
             .show(ui, |ui| {
                 ui.strong(format!(
                     "{}{} {}",
