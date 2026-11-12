@@ -125,6 +125,8 @@ pub fn attach(
         .ok_or("Module missing")?;
 
     let w = stacking::width(&s.width)? as f32 / 10.;
+    let roof_width = stacking::width(&config.roof_selection(s).width)? as f32 / 10.;
+    let roof_center = d.center_x + (roof_width - w) * 0.5;
     let body_top = d.bottom
         + match s.height.as_str() {
             "1F" => 47.,
@@ -151,7 +153,10 @@ pub fn attach(
         let mut parent = module;
         match role {
             Role::Base | Role::Roof => {
-                let mut q = horizontal_orientation(&scene.parts[i], w)?;
+                let mut q = horizontal_orientation(
+                    &scene.parts[i],
+                    if role == Role::Roof { roof_width } else { w },
+                )?;
                 if role == Role::Base {
                     q = Quat::from_rotation_y(std::f32::consts::PI) * q;
                 }
@@ -166,7 +171,15 @@ pub fn attach(
                     scene,
                     i,
                     q,
-                    Vec3::new(d.center_x - (lo.x + hi.x) * 0.5, y, d.rear - lo.z),
+                    Vec3::new(
+                        if role == Role::Roof {
+                            roof_center
+                        } else {
+                            d.center_x
+                        } - (lo.x + hi.x) * 0.5,
+                        y,
+                        d.rear - lo.z,
+                    ),
                 );
                 if role == Role::Base {
                     base = Some(i);
@@ -343,7 +356,7 @@ pub fn attach(
                     i,
                     q,
                     Vec3::new(
-                        d.center_x - (lo.x + hi.x) * 0.5,
+                        (rlo.x + rhi.x - lo.x - hi.x) * 0.5,
                         seat(scene, parent, true)? - lo.y,
                         (rlo.z + rhi.z - lo.z - hi.z) * 0.5,
                     ),
@@ -399,6 +412,55 @@ pub fn validate_layout(
                 modules[i].name
             ));
         }
+        if c.roof != Roof::None {
+            let roof_selection = c.roof_selection(modules[i].selection);
+            let width = stacking::width(&roof_selection.width)? as f32 / 10.;
+            let left = layout.left[i];
+            let end = left + width;
+            if roof_selection.width != modules[i].selection.width {
+                let mut covered: Vec<_> = (0..modules.len())
+                    .filter(|&j| {
+                        modules[j].placement.level == modules[i].placement.level
+                            && layout.left[j] >= left - 0.01
+                            && layout.left[j] < end - 0.01
+                    })
+                    .collect();
+                covered.sort_by(|&a, &b| layout.left[a].total_cmp(&layout.left[b]));
+                let mut expected = super::tower::columns(&roof_selection.width, true)?;
+                let mut widths: Vec<_> = covered
+                    .iter()
+                    .map(|&j| modules[j].selection.width.as_str())
+                    .collect();
+                expected.sort();
+                widths.sort();
+                let mut at = left;
+                let tiled = covered.iter().all(|&j| {
+                    let starts_here = (layout.left[j] - at).abs() < 0.01;
+                    at += stacking::width(&modules[j].selection.width).unwrap_or(0) as f32 / 10.;
+                    starts_here
+                        && !modules[j].is_box
+                        && modules[j].selection.depth == roof_selection.depth
+                        && modules[j].selection.height == modules[i].selection.height
+                        && !layout.supports.iter().any(|s| s.contains(&j))
+                });
+                if !tiled || widths != expected || (at - end).abs() > 0.01 {
+                    return Err("整体顶盖需要同深、等高且完整覆盖的抽屉顶层 / Whole roof requires a complete, level drawer footprint".into());
+                }
+            }
+            for (j, other) in configs.iter().enumerate().take(i) {
+                if other.roof == Roof::None
+                    || modules[j].placement.level != modules[i].placement.level
+                {
+                    continue;
+                }
+                let other_width =
+                    stacking::width(&other.roof_selection(modules[j].selection).width)? as f32
+                        / 10.;
+                if left < layout.left[j] + other_width - 0.01 && layout.left[j] < end - 0.01 {
+                    return Err("顶盖覆盖范围重叠，请在顶部配置中选择整块或分体 / Roof spans overlap; choose a whole or split top".into());
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -406,13 +468,65 @@ pub fn validate_layout(
 /// Pack independent towers by their closed external envelopes. Within a joined
 /// support group, keep nominal interfaces and reject conflicting lateral space.
 pub fn space_groups(
+    modules: &[stacking::Module<'_>],
     layout: &stacking::Layout,
+    configs: &[Exterior],
     scenes: &[Scene],
     shifts: &mut [Vec3],
 ) -> Result<(), String> {
     let mut groups: Vec<_> = (0..scenes.len()).collect();
     for (i, supports) in layout.supports.iter().enumerate() {
         for &j in supports {
+            let old = groups[j];
+            let new = groups[i];
+            for group in &mut groups {
+                if *group == old {
+                    *group = new;
+                }
+            }
+        }
+    }
+    // A regular layer project keeps one shared footprint even when its two
+    // columns have no wide module linking their support graphs.
+    if super::tower::rows(modules).is_ok() {
+        groups.fill(0);
+    }
+    // A whole top joins its two columns for display spacing. Keep both source
+    // seating faces level; this is still an estimated assembly, not a fit test.
+    for (i, config) in configs.iter().enumerate() {
+        if config.roof == Roof::None {
+            continue;
+        }
+        let width =
+            stacking::width(&config.roof_selection(modules[i].selection).width)? as f32 / 10.;
+        if width <= stacking::width(&modules[i].selection.width)? as f32 / 10. + 0.01 {
+            continue;
+        }
+        let mut top = None;
+        for (j, module) in modules.iter().enumerate() {
+            if module.placement.level != modules[i].placement.level
+                || layout.left[j] < layout.left[i] - 0.01
+                || layout.left[j] >= layout.left[i] + width - 0.01
+            {
+                continue;
+            }
+            let shell = Scene {
+                parts: scenes[j]
+                    .parts
+                    .iter()
+                    .filter(|p| !p.pose.path.contains("/Roofs/"))
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            let height = stacking::datum(&shell)?.top + shifts[j].y;
+            if top.is_some_and(|previous: f32| (previous - height).abs() > 0.25) {
+                return Err(
+                    "整体顶盖下方源件安装面不等高 / Whole roof seating faces differ in height"
+                        .into(),
+                );
+            }
+            top = Some(height);
             let old = groups[j];
             let new = groups[i];
             for group in &mut groups {

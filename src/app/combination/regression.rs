@@ -524,6 +524,125 @@ fn exterior_dependencies_and_roundtrip() {
     assert_eq!(restored.exterior, m.exterior);
 }
 #[test]
+fn spanning_roofs_require_level_complete_drawers_and_no_duplicate_cover() {
+    use crate::catalog::exterior::Roof;
+    let mut m = vec![
+        member("left", "S", 3, "2F", false, 0, 0),
+        member("right", "S", 3, "2F", false, 1, 0),
+    ];
+    m[0].exterior.roof = Roof::Grid;
+    m[0].exterior.roof_width = Some("L".into());
+    validate_layout(&m, 0.).unwrap();
+    m[1].exterior.roof = Roof::Table;
+    assert!(
+        validate_layout(&m, 0.)
+            .unwrap_err()
+            .contains("Roof spans overlap")
+    );
+    m[1].exterior.roof = Roof::None;
+    m[1].preset.selection.depth = 4;
+    assert!(validate_layout(&m, 0.).is_err());
+    m[1].preset.selection.depth = 3;
+    m[1].preset.selection.height = "1F".into();
+    assert!(validate_layout(&m, 0.).is_err());
+    m[1].preset.selection.height = "2F".into();
+    m[1].preset.assembly_kind = AssemblyKind::Sustainer;
+    assert!(validate_layout(&m, 0.).is_err());
+    m[1].preset.assembly_kind = AssemblyKind::Drawer;
+    m[0].exterior.roof_width = Some("XL".into());
+    assert!(validate_layout(&m, 0.).is_err());
+    m[1].preset.selection.width = "M".into();
+    validate_layout(&m, 0.).unwrap();
+    m.remove(1);
+    assert!(validate_layout(&m, 0.).is_err());
+}
+#[test]
+#[ignore = "requires read-only VAULT_MODEL_ROOT library"]
+fn library_whole_roofs_span_paired_columns_without_spacing_drift() {
+    use crate::catalog::exterior::{Role, Roof};
+    let (root, catalog, home) = library();
+    for (wide, a, b, depth) in [("L", "S", "S", 3), ("XL", "S", "M", 4), ("L", "S", "S", 5)] {
+        let mut m = vec![
+            member("left", a, depth, "2F", false, 0, 0),
+            member("right", b, depth, "2F", false, 1, 0),
+        ];
+        configure(&mut m, &catalog);
+        m[0].exterior.roof = Roof::Grid;
+        m[0].exterior.roof_width = Some(wide.into());
+        m[0].exterior.top_handle = true;
+        let extras = catalog
+            .exterior_components(&m[0].preset.selection, &m[0].exterior, false)
+            .unwrap();
+        let roof = extras.iter().find(|p| p.role == Role::Roof).unwrap();
+        assert!(
+            roof.bom
+                .path
+                .ends_with(&format!("/{wide}{depth} Grid Roof.stl"))
+        );
+        let before = std::fs::read(root.join(&roof.bom.path)).unwrap();
+        let scene = load(&root, &home, &m, 0., &Arc::new(AtomicBool::new(false))).unwrap();
+        assert_scene(&scene, 2);
+        let shells: Vec<_> = (0..2)
+            .map(|i| {
+                scene
+                    .parts
+                    .iter()
+                    .find(|p| {
+                        p.pose.instance / MEMBER_STRIDE == i && p.pose.path.contains("/Modules/")
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let center = |p: &crate::scene::Part| {
+            let (lo, hi) = crate::constraints::world_bounds(p);
+            (lo.x + hi.x) * 0.5
+        };
+        let expected_separation =
+            (stacking::width(a).unwrap() + stacking::width(b).unwrap()) as f32 / 20.;
+        assert!(
+            (center(shells[1]) - center(shells[0]) - expected_separation).abs() < 0.3,
+            "{wide}{depth}: paired columns drifted"
+        );
+        let top = scene
+            .parts
+            .iter()
+            .find(|p| p.pose.path == roof.bom.path)
+            .unwrap();
+        let (lo, hi) = crate::constraints::world_bounds(top);
+        let width = stacking::width(wide).unwrap() as f32 / 10.;
+        assert!((hi.x - lo.x - width).abs() < 0.4);
+        let expected_center =
+            center(shells[0]) + (width - stacking::width(a).unwrap() as f32 / 10.) * 0.5;
+        assert!((center(top) - expected_center).abs() < 0.3);
+        let handle = scene
+            .parts
+            .iter()
+            .find(|p| p.pose.path.ends_with("/Top Handle (Turn On Supports).stl"))
+            .unwrap();
+        assert!((center(handle) - center(top)).abs() < 0.3);
+        assert_eq!(before, std::fs::read(root.join(&roof.bom.path)).unwrap());
+        m[0].exterior.roof_width = Some(a.into());
+        m[1].exterior.roof = Roof::Grid;
+        m[1].exterior.top_handle = true;
+        let split = load(&root, &home, &m, 0., &Arc::new(AtomicBool::new(false))).unwrap();
+        let split_shells: Vec<_> = (0..2)
+            .map(|i| {
+                split
+                    .parts
+                    .iter()
+                    .find(|p| {
+                        p.pose.instance / MEMBER_STRIDE == i && p.pose.path.contains("/Modules/")
+                    })
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            (center(split_shells[1]) - center(split_shells[0]) - expected_separation).abs() < 0.3,
+            "{wide}{depth}: split top changed the shared footprint"
+        );
+    }
+}
+#[test]
 fn exterior_moves_and_roof_obstructions_are_atomic() {
     use crate::catalog::exterior::*;
     let mut m = vec![

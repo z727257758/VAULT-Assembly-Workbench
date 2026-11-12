@@ -877,6 +877,9 @@ impl App {
                     if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
                         self.setup_recipe_smoke(ctx);
                     }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-top") {
+                        self.setup_roof_smoke(ctx);
+                    }
                     if self.smoke
                         && std::env::args()
                             .any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
@@ -1242,10 +1245,111 @@ impl App {
             .show(ctx, |ui| {
                 self.workspace_header(ui, ctx);
                 if self.combination_view && self.tab==0 {self.tower_panel(ui,ctx);return;}
-                egui::ScrollArea::vertical().id_salt("configuration-panel-scroll").show(ui, |ui| {
+                if self.combination_view { self.tower_footer_panel(ui, ctx); } else { self.member_footer_panel(ui); }
+                egui::ScrollArea::vertical().id_salt(("configuration-panel-scroll", self.tab, self.tower.print_list)).auto_shrink([false, false]).show(ui, |ui| {
                 if self.tab == 0 {
-                    self.combination_controls(ui,ctx);
+                    if self.tower.print_list { self.member_print_list(ui, ctx); return; }
                     if self.combination_view {return;}
+                    if self.assembly_kind==AssemblyKind::Sustainer {
+                        ui.strong(t(z,"箱子内部配置","Box inserts"));
+                        let supported=crate::sustainer_dividers::supported(&self.selection,self.sustainer_options);
+                        if !supported {ui.small(t(z,"展开下方“结构与装配选项”，将箱体切换为隔板槽或密封分区。","Open Structure & assembly options below and choose a Dividers or Sealed body."));}
+                        ui.add_enabled_ui(supported,|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button(t(z,"配置收纳隔板…","Configure dividers…")).clicked() {self.sustainer_divider_editor.open=true;}
+                                if ui.add_enabled(!self.sustainer_dividers.items.is_empty(),egui::Button::new(t(z,"移除全部隔板","Remove all dividers"))).clicked() {
+                                    self.sustainer_dividers.items.clear();self.sustainer_divider_editor.reset();self.assembly(ctx);
+                                }
+                            });
+                            ui.label(format!("{} {}",self.sustainer_dividers.items.len(),t(z,"块收纳隔板","storage dividers")));
+                        });
+                    }
+                    if self.assembly_kind==AssemblyKind::Drawer {
+                    ui.strong(t(z, "抽屉内部配置", "Drawer inserts"));
+                    let has_dividers=self.divider_layout.enabled || self.bom.iter().any(|b|b.enabled && b.path.contains("/Grid Dividers/"));
+                    let mut mode=if has_dividers {2} else if self.bom.iter().any(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")) {1} else {0};
+                    let previous=mode;
+                    let baseplate=self.catalog.accessories(&self.selection).into_iter()
+                        .filter(|e|e.path.contains("/Gridfinity Baseplate/"))
+                        .min_by_key(|e|e.path.contains("Handle"))
+                        .map(|e|e.path.clone());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.radio_value(&mut mode,0,t(z,"无内部配置","None"));
+                        ui.add_enabled_ui(baseplate.is_some(),|ui| {ui.radio_value(&mut mode,1,t(z,"Gridfinity 收纳","Gridfinity storage"));});
+                        ui.add_enabled_ui(crate::dividers::Grid::new(&self.selection).is_ok(),|ui| {ui.radio_value(&mut mode,2,t(z,"收纳隔板","Storage dividers"));});
+                    });
+                    if mode!=previous {
+                        self.divider_layout.remove(&mut self.bom,&self.selection);
+                        for b in &mut self.bom {
+                            if b.path.contains("/Gridfinity Baseplate/") {b.enabled=false;}
+                        }
+                        self.layout_cache.remove(&crate::dividers::spec(&self.selection));
+                        self.divider_editor.open=false;
+                        self.divider_editor.reset();
+                        if mode==1 {
+                            if let Some(path)=baseplate {self.select_accessory(path,true,1);}
+                        } else if mode==2 {
+                            self.divider_layout.enabled=true;
+                        }
+                        self.assembly(ctx);
+                    }
+                    ui.label(RichText::new(t(z,"底板与隔板互斥，切换会移除当前内部配置。","Baseplates and dividers are exclusive. Switching removes the current insert.")).small().color(Color32::GRAY));
+                    if mode==2 {
+                        ui.horizontal_wrapped(|ui| {
+                            let label=if self.divider_layout.items.is_empty() {t(z,"添加收纳隔板","Add storage dividers")} else {t(z,"编辑收纳隔板","Edit storage dividers")};
+                            if ui.button(label).clicked() {self.divider_editor.open=true;}
+                            if ui.button(t(z,"移除收纳隔板","Remove storage dividers")).clicked() {self.remove_dividers(ctx);}
+                        });
+                        ui.label(format!("{} {}",self.divider_layout.items.len(),t(z,"块收纳隔板","storage dividers")));
+                    }
+                    if mode==1 {
+                        let plates: Vec<_> = self.catalog.accessories(&self.selection).into_iter()
+                            .filter(|e|e.path.contains("/Gridfinity Baseplate/")).collect();
+                        let variant_name = |path: &str| {
+                            if path.contains("2 Handles") {t(z,"双提手","Two handles")}
+                            else if path.contains("1 Handle") {t(z,"单提手","One handle")}
+                            else {t(z,"标准版","Standard")}
+                        };
+                        let current=self.bom.iter().find(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")).map(|b|b.path.clone()).unwrap_or_default();
+                        let mut chosen=current.clone();
+                        ui.label(t(z,"底板类型","Baseplate type"));
+                        egui::ComboBox::from_id_salt("gridfinity-baseplate-type")
+                            .width(ui.available_width())
+                            .selected_text(variant_name(&current))
+                            .show_ui(ui,|ui| {
+                                for plate in &plates {ui.selectable_value(&mut chosen,plate.path.clone(),variant_name(&plate.path));}
+                            });
+                        if chosen!=current {
+                            let mut candidate=self.gridfinity.clone();candidate.baseplate=chosen.clone();
+                            match candidate.validate(&self.selection) {
+                                Ok(())=>{self.select_accessory(chosen,true,1);self.assembly(ctx);self.gridfinity_error=None;}
+                                Err(e)=>{self.gridfinity_error=Some(format!("{e}；请先调整盒子布局"));}
+                            }
+                        }
+                        if let Ok(grid)=crate::gridfinity::grid_for(&self.selection,&self.gridfinity.baseplate) {
+                            ui.small(format!("{} × {} {} · {}",grid[0],grid[1],t(z,"格","cells"),t(z,"底板随抽屉规格匹配","Baseplate follows drawer size")));
+                        }
+                        if let Some(error)=&self.gridfinity_error {ui.colored_label(Color32::LIGHT_RED,error);}
+                        ui.add_space(6.);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add_enabled(crate::gridfinity::grid(&self.selection).is_ok(),egui::Button::new(t(z,"编辑 Gridfinity 盒子","Edit Gridfinity bins"))).clicked() {self.gridfinity_open=true;}
+                            if !self.gridfinity.bins.is_empty() && ui.button(t(z,"移除全部盒子","Remove all bins")).clicked(){self.gridfinity.bins.clear();self.assembly(ctx);}
+                        });
+                        ui.label(format!("{} {}",self.gridfinity.bins.len(),t(z,"个盒子","bins")));
+                        ui.small(t(z,"盒高默认随层高配置，可在编辑器中调整。","Bin heights follow the drawer by default; adjust them in the editor."));
+                    }
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.strong(t(z,"标签文字","Label text"));
+                        if ui.button(t(z,"编辑标签…","Edit label…")).clicked() {self.label_open=true;}
+                    });
+                    if self.label.active() {ui.label(self.label.text.replace(char::from(10)," / "));}
+                    else {ui.small(t(z,"原始空白标签","Original blank label"));}
+                    ui.separator();
+                    ui.add_space(8.);
+                    egui::CollapsingHeader::new(t(z,"结构与装配选项","Structure & assembly options")).show(ui, |ui| {
+                    self.combination_controls(ui,ctx);
                     let previous_selection=self.selection.clone();
                     let before = (
                         self.selection.width.clone(),
@@ -1337,103 +1441,7 @@ impl App {
                                 match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
                         }
                     }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong(t(z,"标签文字","Label text"));
-                        if ui.button(t(z,"编辑标签…","Edit label…")).clicked() {self.label_open=true;}
                     });
-                    if self.label.active() {ui.label(self.label.text.replace(char::from(10)," / "));}
-                    else {ui.small(t(z,"原始空白标签","Original blank label"));}
-                    ui.separator();
-                    if self.assembly_kind==AssemblyKind::Sustainer {
-                        ui.strong(t(z,"箱子内部配置","Box inserts"));
-                        let supported=crate::sustainer_dividers::supported(&self.selection,self.sustainer_options);
-                        if !supported {ui.small(t(z,"请将箱体类型切换为隔板槽或密封分区，以配置隔板。","Choose a Dividers or Sealed body to configure inserts."));}
-                        ui.add_enabled_ui(supported,|ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                if ui.button(t(z,"配置收纳隔板…","Configure dividers…")).clicked() {self.sustainer_divider_editor.open=true;}
-                                if ui.add_enabled(!self.sustainer_dividers.items.is_empty(),egui::Button::new(t(z,"移除全部隔板","Remove all dividers"))).clicked() {
-                                    self.sustainer_dividers.items.clear();self.sustainer_divider_editor.reset();self.assembly(ctx);
-                                }
-                            });
-                            ui.label(format!("{} {}",self.sustainer_dividers.items.len(),t(z,"块收纳隔板","storage dividers")));
-                        });
-                    }
-                    if self.assembly_kind==AssemblyKind::Drawer {
-                    ui.strong(t(z, "抽屉内部配置", "Drawer inserts"));
-                    let has_dividers=self.divider_layout.enabled || self.bom.iter().any(|b|b.enabled && b.path.contains("/Grid Dividers/"));
-                    let mut mode=if has_dividers {2} else if self.bom.iter().any(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")) {1} else {0};
-                    let previous=mode;
-                    let baseplate=self.catalog.accessories(&self.selection).into_iter()
-                        .filter(|e|e.path.contains("/Gridfinity Baseplate/"))
-                        .min_by_key(|e|e.path.contains("Handle"))
-                        .map(|e|e.path.clone());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.radio_value(&mut mode,0,t(z,"无内部配置","None"));
-                        ui.add_enabled_ui(baseplate.is_some(),|ui| {ui.radio_value(&mut mode,1,t(z,"Gridfinity 收纳","Gridfinity storage"));});
-                        ui.add_enabled_ui(crate::dividers::Grid::new(&self.selection).is_ok(),|ui| {ui.radio_value(&mut mode,2,t(z,"收纳隔板","Storage dividers"));});
-                    });
-                    if mode!=previous {
-                        self.divider_layout.remove(&mut self.bom,&self.selection);
-                        for b in &mut self.bom {
-                            if b.path.contains("/Gridfinity Baseplate/") {b.enabled=false;}
-                        }
-                        self.layout_cache.remove(&crate::dividers::spec(&self.selection));
-                        self.divider_editor.open=false;
-                        self.divider_editor.reset();
-                        if mode==1 {
-                            if let Some(path)=baseplate {self.select_accessory(path,true,1);}
-                        } else if mode==2 {
-                            self.divider_layout.enabled=true;
-                        }
-                        self.assembly(ctx);
-                    }
-                    ui.label(RichText::new(t(z,"底板与隔板互斥，切换会移除当前内部配置。","Baseplates and dividers are exclusive. Switching removes the current insert.")).small().color(Color32::GRAY));
-                    if mode==2 {
-                        ui.horizontal_wrapped(|ui| {
-                            let label=if self.divider_layout.items.is_empty() {t(z,"添加收纳隔板","Add storage dividers")} else {t(z,"编辑收纳隔板","Edit storage dividers")};
-                            if ui.button(label).clicked() {self.divider_editor.open=true;}
-                            if ui.button(t(z,"移除收纳隔板","Remove storage dividers")).clicked() {self.remove_dividers(ctx);}
-                        });
-                        ui.label(format!("{} {}",self.divider_layout.items.len(),t(z,"块收纳隔板","storage dividers")));
-                    }
-                    if mode==1 {
-                        let plates: Vec<_> = self.catalog.accessories(&self.selection).into_iter()
-                            .filter(|e|e.path.contains("/Gridfinity Baseplate/")).collect();
-                        let variant_name = |path: &str| {
-                            if path.contains("2 Handles") {t(z,"双提手","Two handles")}
-                            else if path.contains("1 Handle") {t(z,"单提手","One handle")}
-                            else {t(z,"标准版","Standard")}
-                        };
-                        let current=self.bom.iter().find(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")).map(|b|b.path.clone()).unwrap_or_default();
-                        let mut chosen=current.clone();
-                        ui.label(t(z,"底板类型","Baseplate type"));
-                        egui::ComboBox::from_id_salt("gridfinity-baseplate-type")
-                            .width(ui.available_width())
-                            .selected_text(variant_name(&current))
-                            .show_ui(ui,|ui| {
-                                for plate in &plates {ui.selectable_value(&mut chosen,plate.path.clone(),variant_name(&plate.path));}
-                            });
-                        if chosen!=current {
-                            let mut candidate=self.gridfinity.clone();candidate.baseplate=chosen.clone();
-                            match candidate.validate(&self.selection) {
-                                Ok(())=>{self.select_accessory(chosen,true,1);self.assembly(ctx);self.gridfinity_error=None;}
-                                Err(e)=>{self.gridfinity_error=Some(format!("{e}；请先调整盒子布局"));}
-                            }
-                        }
-                        if let Ok(grid)=crate::gridfinity::grid_for(&self.selection,&self.gridfinity.baseplate) {
-                            ui.small(format!("{} × {} {} · {}",grid[0],grid[1],t(z,"格","cells"),t(z,"底板随抽屉规格匹配","Baseplate follows drawer size")));
-                        }
-                        if let Some(error)=&self.gridfinity_error {ui.colored_label(Color32::LIGHT_RED,error);}
-                        ui.add_space(6.);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add_enabled(crate::gridfinity::grid(&self.selection).is_ok(),egui::Button::new(t(z,"编辑 Gridfinity 盒子","Edit Gridfinity bins"))).clicked() {self.gridfinity_open=true;}
-                            if !self.gridfinity.bins.is_empty() && ui.button(t(z,"移除全部盒子","Remove all bins")).clicked(){self.gridfinity.bins.clear();self.assembly(ctx);}
-                        });
-                        ui.label(format!("{} {}",self.gridfinity.bins.len(),t(z,"个盒子","bins")));
-                        ui.small(t(z,"盒高默认随层高配置，可在编辑器中调整。","Bin heights follow the drawer by default; adjust them in the editor."));
-                    }
-                    }
                 } else {
                     ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t(
                         z,
@@ -1623,77 +1631,125 @@ impl App {
         )
         .into();
     }
-    fn bottom(&mut self, ctx: &egui::Context) {
-        if self.combination_view
-            && (!self.smoke
-                || std::env::args().any(|a| {
-                    a == "--smoke-tower" || a == "--smoke-workspace" || a == "--smoke-presets"
-                }))
-        {
-            return;
-        }
+    fn member_print_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
-        egui::TopBottomPanel::bottom("bottom").resizable(true)
-            .default_height(240.).height_range(180. ..=400.).show(ctx, |ui| {
-            if self.combination_view {self.combination_summary(ui);return;}
-            ui.horizontal(|ui| {
-                ui.strong(t(z, "打印清单", "PRINT LIST"));
-                ui.label(format!("{} {}", self.bom.iter().filter(|i| i.enabled).count(), t(z, "个已选文件", "selected files")));
-                ui.separator();
-                ui.label(RichText::new(if self.assembly_kind==AssemblyKind::Sustainer {
-                    t(z,"份数按源 STL 统计，展示拆分不增加打印份数；打印勾选不影响完整箱子预览。","Copies count source files; display splitting does not add print copies. Print selection keeps the complete box preview.")
-                }else{t(z, "份数按原 STL 统计；Springs、Rails 每份各含 2 个实体。导出按份数保留打印支撑，并应用标签文字。", "Copies count source files; Springs and Rails each contain 2 bodies. Exports preserve supports and apply label lettering for every copy.")}).small().color(Color32::GRAY));
-            });
-            let mut preview = None;
-            let mut changed = false;
-            let mut enabled_variant = None;
-            egui::ScrollArea::vertical().id_salt("bom").auto_shrink([false,false])
-                .max_height((ui.available_height()-65.).max(90.)).show(ui, |ui| {
-                egui::Grid::new("bom-table").striped(true).num_columns(5).min_col_width(30.).show(ui, |ui| {
-                    for text in [t(z,"选用","Use"),t(z,"文件份数","File copies"),t(z,"组件 / 配件","Component / accessory"),t(z,"分组","Group"),t(z,"状态","Status")] {ui.strong(text);}
-                    ui.end_row();
-                    for item in &mut self.bom {
-                        let auto_caps=item.path.ends_with("/Facade Cap.stl");
-                        if auto_caps {item.qty=crate::catalog::facade_cap_count(&self.selection);}
-                        let required=item.path.contains("/Geared Rails/");
-                        let locked=required || item.group==crate::dividers::GROUP || item.group==crate::sustainer_dividers::GROUP || item.group==crate::gridfinity::GROUP;
-                        if required {item.enabled=true;item.qty=1;}
-                        if ui.add_enabled(!locked,egui::Checkbox::new(&mut item.enabled, "")).on_hover_text(if required {t(z,"默认必备：一份包含上下两根齿条","Required: one file contains both racks")} else {""}).changed() {
-                            changed = true;
-                            if item.enabled {enabled_variant = Some((item.path.clone(),item.qty));}
-                        }
-                        changed |= ui.add_enabled(!locked && !auto_caps,egui::DragValue::new(&mut item.qty).range(1..=100)).on_hover_text(if auto_caps {t(z,"数量按面板规格和外露螺丝孔自动配置","Quantity follows exposed facade screw recesses")}else{""}).changed();
-                        let metadata = crate::accessories::info(&item.path, z);
-                        let label = metadata.as_ref().map_or_else(||item.name().to_string(),|m|m.name.clone());
-                        let tooltip = metadata.as_ref().map_or_else(||item.path.clone(),|m|format!("{}\n{}",m.description,item.path));
-                        if ui.link(label).on_hover_text(tooltip).clicked() {preview = Some(item.path.clone());}
-                        ui.label(metadata.as_ref().map_or(group_label(z, &item.group),|m|m.group));
-                        let exists = self.catalog.resolve(&item.path).is_some() || item.path.starts_with(crate::gridfinity::PREFIX);
-                        ui.colored_label(if exists {Color32::from_rgb(117,189,157)} else {Color32::LIGHT_RED}, if exists {t(z,"可用","Ready")} else {t(z,"缺失","Missing")});
-                        ui.end_row();
-                    }
-                });
-            });
-            if let Some((path,qty)) = enabled_variant {self.select_accessory(path,true,qty);}
-            if changed {self.assembly(ctx);}
-            if let Some(path) = preview {self.single(path,ctx);}
-            ui.separator();
-            ui.horizontal(|ui| {
-                if self.busy || self.preview.has_pending() {ui.spinner();}
-                ui.label(&self.status);
-                if !self.busy && !self.preview.has_pending() && self.failed_preview.is_some()
-                    && ui.button(t(z,"重试","Retry")).clicked() {
-                    let request = self.failed_preview.take().unwrap();
-                    self.preview.schedule(request, Instant::now(), Duration::ZERO);
+        ui.strong(t(
+            z,
+            "当前抽屉 / 箱子的打印零件",
+            "Parts for the current drawer / box",
+        ));
+        ui.small(t(
+            z,
+            "勾选导出项并调整源文件份数。点击“预览”查看单件。",
+            "Choose parts and source-file copies. Preview opens an individual part.",
+        ));
+        if self.active_drawer.is_some() {
+            ui.small(t(z, "这里只列当前子抽屉；共用外壳在整体打印清单中核对。", "This list covers the current drawer; check the shared housing in the project print list."));
+        }
+        ui.add_space(8.);
+        let mut preview = None;
+        let mut changed = false;
+        let mut enabled_variant = None;
+        for item in &mut self.bom {
+            if self.active_drawer.is_some() && crate::catalog::tower::housing(&item.path) {
+                continue;
+            }
+            ui.push_id(item.path.clone(), |ui| {
+                let auto_caps = item.path.ends_with("/Facade Cap.stl");
+                if auto_caps {
+                    item.qty = crate::catalog::facade_cap_count(&self.selection);
                 }
+                let required = item.path.contains("/Geared Rails/");
+                let locked = required
+                    || item.group == crate::dividers::GROUP
+                    || item.group == crate::sustainer_dividers::GROUP
+                    || item.group == crate::gridfinity::GROUP;
+                if required {
+                    item.enabled = true;
+                    item.qty = 1;
+                }
+                let metadata = crate::accessories::info(&item.path, z);
+                let label = metadata
+                    .as_ref()
+                    .map_or_else(|| item.name().to_string(), |m| m.name.clone());
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!locked, egui::Checkbox::new(&mut item.enabled, ""))
+                        .on_hover_text(if required {
+                            t(
+                                z,
+                                "必备：一份包含上下两根齿条",
+                                "Required: one file contains both racks",
+                            )
+                        } else {
+                            ""
+                        })
+                        .changed()
+                    {
+                        changed = true;
+                        if item.enabled {
+                            enabled_variant = Some((item.path.clone(), item.qty));
+                        }
+                    }
+                    ui.add(egui::Label::new(label).wrap())
+                        .on_hover_text(&item.path);
+                });
+                ui.horizontal(|ui| {
+                    ui.small(group_label(z, &item.group));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(t(z, "预览", "Preview")).clicked() {
+                            preview = Some(item.path.clone());
+                        }
+                        changed |= ui
+                            .add_enabled(
+                                !locked && !auto_caps,
+                                egui::DragValue::new(&mut item.qty).range(1..=100),
+                            )
+                            .on_hover_text(t(z, "源 STL 文件份数", "Source STL copies"))
+                            .changed();
+                        ui.small(t(z, "份数", "Copies"));
+                    });
+                });
+                if self.catalog.resolve(&item.path).is_none()
+                    && !item.path.starts_with(crate::gridfinity::PREFIX)
+                {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        t(z, "源文件缺失", "Source file missing"),
+                    );
+                }
+                ui.separator();
             });
-            ui.label(RichText::new(if self.assembly_kind==AssemblyKind::Sustainer {
-                t(z,"箱子五金规格与数量请参照 Sustainers Assembly；螺钉未建模。","Refer to Sustainers Assembly for box hardware sizes and quantities; screws are not modeled.")
-            }else if self.selection.width=="XL" {
-                t(z,"XL 五金按专用结构核对；不直接沿用普通抽屉数量。","Check XL hardware separately; standard drawer counts may not apply.")
-            } else {
-                t(z,"五金：M4 × 14 mm，1F ×4、2F/4F ×6；顶提手选装 M6 × 50 mm ×2。","Hardware: M4 × 14 mm, 1F ×4 / 2F and 4F ×6; optional top handle M6 × 50 mm ×2.")
-            }).small().color(Color32::GRAY));
+        }
+        if let Some((path, qty)) = enabled_variant {
+            self.select_accessory(path, true, qty);
+        }
+        if changed {
+            self.assembly(ctx);
+        }
+        if let Some(path) = preview {
+            self.single(path, ctx);
+        }
+        ui.small(t(z, "份数按源 STL 统计；单份可能含多个实体。打印勾选与装配显隐分别控制。", "Copies count source STL files, which can contain several bodies. Print selection and preview visibility are independent."));
+        ui.add_space(8.);
+        ui.small(if self.assembly_kind == AssemblyKind::Sustainer {
+            t(
+                z,
+                "箱子五金规格与数量请参照 Sustainers Assembly；螺钉未建模。",
+                "Refer to Sustainers Assembly for box hardware; screws are not modeled.",
+            )
+        } else if self.selection.width == "XL" {
+            t(
+                z,
+                "XL 五金按专用结构核对。",
+                "Check XL hardware against its specific assembly.",
+            )
+        } else {
+            t(
+                z,
+                "五金：M4 × 14 mm，1F ×4、2F/4F ×6；顶提手选装 M6 × 50 mm ×2。",
+                "Hardware: M4 × 14 mm, 1F ×4 / 2F and 4F ×6; optional top handle M6 × 50 mm ×2.",
+            )
         });
     }
     fn interior_scene(&self) -> Scene {
@@ -1889,7 +1945,12 @@ impl App {
             .resizable(true)
             .show(ctx, |ui| {
                 if self.preview_modes.mode == preview_modes::Mode::Plates && self.scene.assembly { self.print_preview_properties(ui,ctx); return; }
-                ui.heading(t(z, "装配与属性", "Assembly & properties"));
+                ui.horizontal(|ui| {
+                    ui.strong(t(z, "零件与属性", "Parts & properties"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("×").on_hover_text(t(z,"收起属性栏","Close properties")).clicked() { self.tower.show_parts = false; }
+                    });
+                });
                 if self.scene_key == "combination" {self.combination_properties(ui);return;}
                 ui.horizontal(|ui| {
                     if ui.small_button(t(z, "显示全部", "Show all")).clicked() {
@@ -3173,13 +3234,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.tower_tick(ctx);
-        self.bottom(ctx);
+        self.workspace_toolbar(ctx);
         self.left(ctx);
         self.divider_view(ctx);
-        if !self.combination_view
-            || self.tower.show_parts
-            || self.preview_modes.mode == preview_modes::Mode::Plates
-        {
+        if self.tower.show_parts || self.preview_modes.mode == preview_modes::Mode::Plates {
             self.right(ctx);
         }
         self.color_window(ctx);
@@ -3265,6 +3323,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
             self.recipe_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-top") {
+            self.roof_smoke(ctx);
             return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace")

@@ -37,6 +37,10 @@ pub struct Exterior {
     pub pull_extension: f32,
     pub board: Board,
     pub roof: Roof,
+    /// Whole top source width; depth follows the assembly selection. The top
+    /// editor also keeps an explicit per-side width when an empty split is chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roof_width: Option<String>,
     pub top_handle: bool,
     pub wall_mount: bool,
 }
@@ -83,9 +87,28 @@ impl Hardware {
 }
 impl Exterior {
     pub fn is_empty(&self) -> bool {
-        self == &Self::default()
+        let mut effective = self.clone();
+        if effective.roof == Roof::None {
+            effective.roof_width = None;
+        }
+        effective == Self::default()
+    }
+    pub fn roof_selection(&self, selection: &Selection) -> Selection {
+        let mut roof = selection.clone();
+        if let Some(width) = &self.roof_width {
+            roof.width = width.clone();
+        }
+        roof
     }
     pub fn validate(&self, s: &Selection, is_box: bool) -> Result<(), String> {
+        if let Some(width) = &self.roof_width {
+            let roof_width = crate::constraints::stacking::width(width)?;
+            if roof_width < crate::constraints::stacking::width(&s.width)? {
+                return Err(
+                    "顶部规格不能小于安装成员 / Roof cannot be narrower than its owner".into(),
+                );
+            }
+        }
         if !self.pull_extension.is_finite() || !(0. ..=800.).contains(&self.pull_extension) {
             return Err("拉杆伸出量应为 0–800 mm / Invalid handle extension".into());
         }
@@ -291,6 +314,8 @@ impl Catalog {
             )?;
         }
         if config.roof != Roof::None {
+            let roof_selection = config.roof_selection(s);
+            let roof_size = format!("{}{}", roof_selection.width, roof_selection.depth);
             let kind = match config.roof {
                 Roof::Grid => "Grid",
                 Roof::Table => "Table",
@@ -300,7 +325,10 @@ impl Catalog {
             };
             add(
                 Role::Roof,
-                format!("{}/Roofs/{size} {kind} Roof.stl", Self::prefix(s)),
+                format!(
+                    "{}/Roofs/{roof_size} {kind} Roof.stl",
+                    Self::prefix(&roof_selection)
+                ),
                 1,
             )?;
         }

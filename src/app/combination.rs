@@ -358,6 +358,7 @@ impl App {
         }
         self.remember_combination_view();
         self.tab = 0;
+        self.tower.print_list = false;
         self.commit_member();
         self.restore_member(self.active_member);
         if self.member_edit_baseline.is_none() {
@@ -681,22 +682,6 @@ impl App {
     pub(super) fn combination_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         if !self.combination_view && !self.members.is_empty() {
-            ui.strong(format!(
-                "{}：{}",
-                t(z, "正在编辑", "Editing"),
-                self.members[self.active_member].name
-            ));
-            ui.small(t(
-                z,
-                "修改自动保留在组合中。",
-                "Changes are kept in the combination.",
-            ));
-            if ui
-                .button(t(z, "← 返回整体装配", "← Back to overall assembly"))
-                .clicked()
-            {
-                self.show_combination(ctx);
-            }
             self.member_color_follow_ui(ui);
             ui.separator();
             return;
@@ -785,66 +770,6 @@ impl App {
             "Stacking specifications follow the manual; physical engagement is unverified.",
         ));
         ui.separator();
-    }
-    pub(super) fn combination_summary(&mut self, ui: &mut egui::Ui) {
-        ui.strong(t(
-            self.zh,
-            "组合打印清单（按成员）",
-            "Combination print list (by member)",
-        ));
-        egui::ScrollArea::vertical()
-            .max_height(120.)
-            .show(ui, |ui| {
-                for (i, m) in self.members.iter().enumerate() {
-                    let extras = self
-                        .catalog
-                        .exterior_components(
-                            &m.preset.selection,
-                            &m.exterior,
-                            m.preset.assembly_kind == AssemblyKind::Sustainer,
-                        )
-                        .unwrap_or_default();
-                    let count: u32 = extras.iter().map(|c| c.bom.qty).sum::<u32>()
-                        + m.preset
-                            .printing_bom()
-                            .iter()
-                            .filter(|b| b.enabled)
-                            .map(|b| b.qty)
-                            .sum::<u32>();
-                    ui.collapsing(
-                        format!("{} · {} {}", m.name, count, t(self.zh, "份", "copies")),
-                        |ui| {
-                            for b in m
-                                .preset
-                                .printing_bom()
-                                .iter()
-                                .chain(extras.iter().map(|c| &c.bom))
-                                .filter(|b| b.enabled)
-                            {
-                                ui.label(format!("{} × {}", b.name(), b.qty));
-                            }
-                            for h in m.exterior.hardware(&m.preset.selection) {
-                                ui.label(h.line());
-                            }
-                        },
-                    )
-                    .header_response
-                    .on_hover_text(format!("#{}", i + 1));
-                }
-            });
-        ui.horizontal(|ui| {
-            if self.busy || self.preview.has_pending() {
-                ui.spinner();
-            }
-            ui.label(&self.status);
-            if !self.busy
-                && !self.preview.has_pending()
-                && self.failed_preview.is_some()
-                && ui.button(t(self.zh, "重试", "Retry")).clicked()
-            {
-                self.assembly(ui.ctx());
-            }
-        });
     }
     pub(super) fn combination_properties(&mut self, ui: &mut egui::Ui) {
         ui.strong(format!(
@@ -1134,7 +1059,16 @@ pub(super) fn load(
         }
     }
     if exterior_catalog.is_some() {
-        crate::constraints::exterior::space_groups(&layout, &closed, &mut shifts)?;
+        crate::constraints::exterior::space_groups(
+            &descriptors,
+            &layout,
+            &members
+                .iter()
+                .map(|m| m.exterior.clone())
+                .collect::<Vec<_>>(),
+            &closed,
+            &mut shifts,
+        )?;
     }
     for (i, (_, _, angle)) in scenes.iter_mut().enumerate() {
         if layout.supports.iter().any(|below| below.contains(&i)) {
