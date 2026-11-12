@@ -410,12 +410,9 @@ impl Renderer {
                     resolve_target: Some(&target.view),
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.055,
-                            g: 0.071,
-                            b: 0.09,
-                            a: 1.,
-                        }),
+                        // Premultiplied transparent clear lets each native view supply its
+                        // own theme background without changing mesh materials or lighting.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

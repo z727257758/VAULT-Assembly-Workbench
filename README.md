@@ -40,6 +40,15 @@ STL 采用流式读取，不再按 250 MB 文件大小拒绝正常模型；单�
 
 ## 功能与操作
 
+### 配置器界面
+
+原生界面的布局与视觉参考 [ReVault 配置器](https://revault.reventonc.com/)，继续使用本项目的 Rust、egui 与 wgpu 实现：
+
+- 左侧约 400 像素配置栏，提供项目切换、尺寸分段选择、顶盖与底座、可折叠层卡片；复制、排序、删除与勾选成员位于层卡片的“···”菜单。
+- 侧栏底部固定显示总高、STL 种类与份数、打印清单和 3MF 导出入口；配置内容独立滚动。
+- 三维视口使用灰色渐变背景，项目摘要、视图设置和整体／爆炸／分层／打印板工具浮在画布上。“视图”菜单保留标准视角、外壳透明、打印颜色、三视图与零件属性入口。
+- 顶部“配色”打开现有配色编辑器；“设置 → 外观”切换浅色／深色并保存在 `state/settings.toml`。旧设置文件默认使用浅色。
+
 ### 装配配置
 
 - 支持 S/M/L/XL 宽度、3–7 格深度、1F/2F/4F 层高查找；XL 限 1F。可选择普通抽屉或 Sustainer 箱子方案。
@@ -241,6 +250,8 @@ cargo run --release -- --smoke-test
 cargo run --release -- --smoke-test --smoke-combination
 # 层卡片、多抽屉、标牌、项目切换、复制与撤销
 cargo run --release -- --smoke-test --smoke-tower
+# 配置器界面：浅色／深色、1050×700 窄窗口、标牌窗口与固定导出栏
+cargo run --release -- --smoke-test --smoke-workspace
 # 整体、爆炸、分层、制造网格打印板、单盘俯视与标牌编辑回归
 cargo run --release -- --smoke-test --smoke-preview-modes
 # S7 两侧限位卡扣与实际孔位（安装 / 隐藏卡扣对照）

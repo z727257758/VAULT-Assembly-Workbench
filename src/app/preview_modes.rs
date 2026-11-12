@@ -211,6 +211,15 @@ impl App {
             _ => self.camera.fit(&self.scene, self.explosion),
         }
     }
+    pub(super) fn preview_set_view(&mut self, yaw: f32, pitch: f32) {
+        let camera = if self.preview_modes.special() {
+            &mut self.preview_modes.camera
+        } else {
+            &mut self.camera
+        };
+        camera.yaw = yaw;
+        camera.pitch = pitch;
+    }
     pub(super) fn preview_modes_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
         let z = self.zh;
         if !self.scene.assembly || self.interior_editor_open() {
@@ -226,21 +235,30 @@ impl App {
             };
         }
         let before = self.preview_modes.mode;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(t(z, "预览", "Preview"));
-            for (mode, label) in [
-                (Mode::Assembly, t(z, "整体", "Assembly")),
-                (Mode::Exploded, t(z, "爆炸", "Exploded")),
-                (Mode::Layers, t(z, "分层", "Layers")),
-                (Mode::Plates, t(z, "打印板平铺", "Print plates")),
-            ] {
-                ui.selectable_value(&mut self.preview_modes.mode, mode, label);
-            }
-            ui.separator();
-            if ui.button(t(z, "编辑标牌…", "Edit label…")).clicked() {
-                self.open_preview_label(None, ctx);
-            }
-        });
+        let rect = ui.max_rect();
+        egui::Area::new(egui::Id::new("stage-preview-modes"))
+            .order(egui::Order::Middle)
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(rect.center_bottom() - egui::vec2(0., 40.))
+            .show(ctx, |ui| {
+                ui.set_max_width((rect.width() - 48.).min(540.));
+                appearance::floating_frame(ui).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (mode, label) in [
+                            (Mode::Assembly, t(z, "整体", "Assembly")),
+                            (Mode::Exploded, t(z, "爆炸", "Exploded")),
+                            (Mode::Layers, t(z, "分层", "Layers")),
+                            (Mode::Plates, t(z, "打印板", "Print plates")),
+                        ] {
+                            ui.selectable_value(&mut self.preview_modes.mode, mode, label);
+                        }
+                        ui.separator();
+                        if ui.button(t(z, "标牌…", "Label…")).clicked() {
+                            self.open_preview_label(None, ctx);
+                        }
+                    });
+                });
+            });
         if before != self.preview_modes.mode {
             self.dimensions = false;
             self.combination_move_source = None;
@@ -296,6 +314,11 @@ impl App {
         }
     }
     fn layers_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.add_space(if ui.max_rect().width() < 580. {
+            145.
+        } else {
+            94.
+        });
         let z = self.zh;
         ui.small(t(
             z,
@@ -305,7 +328,7 @@ impl App {
         let names: Vec<_> = self.members.iter().map(|m| m.name.clone()).collect();
         let layout = self.scene.layered(LAYER_GAP, &names, z);
         ui.separator();
-        let size = ui.available_size().max(egui::vec2(10., 10.));
+        let size = (ui.available_size() - egui::vec2(0., 80.)).max(egui::vec2(10., 10.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         navigate(ctx, &response, rect, &mut self.preview_modes.camera);
         if response.double_clicked() {
@@ -342,7 +365,7 @@ impl App {
             let galley = painter.layout(
                 label,
                 egui::FontId::proportional(12.),
-                Color32::from_rgb(108, 205, 221),
+                ui.visuals().hyperlink_color,
                 (rect.width() * 0.4).clamp(120., 280.),
             );
             let pos = egui::pos2(rect.left() + 12., y);
@@ -352,14 +375,19 @@ impl App {
                     galley.size() + egui::vec2(8., 4.),
                 ),
                 4.,
-                Color32::from_rgba_unmultiplied(23, 29, 37, 220),
+                ui.visuals().window_fill,
             );
             y += galley.size().y + 8.;
-            painter.galley(pos, galley, Color32::from_rgb(108, 205, 221));
+            painter.galley(pos, galley, ui.visuals().hyperlink_color);
         }
         hint(ui, rect, z);
     }
     fn plates_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.add_space(if ui.max_rect().width() < 580. {
+            145.
+        } else {
+            94.
+        });
         let z = self.zh;
         ui.horizontal_wrapped(|ui| {
             if self.combination_view {
@@ -471,7 +499,7 @@ impl App {
             self.preview_modes.camera.fit(&layout.scene, 0.);
         }
         ui.separator();
-        let size = ui.available_size().max(egui::vec2(10., 10.));
+        let size = (ui.available_size() - egui::vec2(0., 80.)).max(egui::vec2(10., 10.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         navigate(ctx, &response, rect, &mut self.preview_modes.camera);
         if response.double_clicked() {

@@ -778,88 +778,164 @@ impl App {
         let z = self.zh;
         self.commit_member();
         self.tower_project_header(ui, ctx);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, 0, t(z, "配置", "Configure"));
-            ui.selectable_value(&mut self.tab, 1, t(z, "零件库", "Parts library"));
-            ui.selectable_value(&mut self.tab, 2, t(z, "说明资料", "Manuals"));
-        });
-        ui.separator();
-        let body = (ui.available_height() - 122.).max(120.);
+        ui.add_space(8.);
+        egui::TopBottomPanel::bottom("tower-summary")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin {
+                        top: 12,
+                        ..Default::default()
+                    }),
+            )
+            .show_inside(ui, |ui| {
+                ui.separator();
+                self.tower_footer(ui, ctx);
+            });
         let mut action = None;
         let reset_scroll = std::mem::take(&mut self.tower.scroll_to_top);
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),body),egui::Layout::top_down(egui::Align::Min),|ui| {
-            ui.set_min_height(body);
-            let scroll=egui::ScrollArea::vertical().id_salt("tower-config-scroll").max_height(body);
-            let scroll=if reset_scroll {scroll.vertical_scroll_offset(0.)} else {scroll};
-            scroll.show(ui,|ui| {
-                if self.members.is_empty() {ui.label(t(z,"打开模型库开始配置","Open a model library to begin"));return;}
-                if self.tower.print_list {self.tower_print_list(ui,ctx);return;}
-                let all=match rows(&self.members) {Ok(rows)=>rows,Err(error)=>{
-                    ui.colored_label(Color32::LIGHT_BLUE,error);ui.small(t(z,"原方案的标签、内部配置和装配位置完整保留。可以新建层式项目，或在下方选择原成员编辑。","Original labels, inserts and placements are preserved. Start a layer project or edit an existing member below."));
-                    for (i,m) in self.members.iter().enumerate(){if ui.button(&m.name).clicked(){action=Some(Action::Edit(i,None));}}
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt("tower-config-scroll")
+            .auto_shrink([false, false]);
+        let scroll = if reset_scroll {
+            scroll.vertical_scroll_offset(0.)
+        } else {
+            scroll
+        };
+        scroll.show(ui, |ui| {
+            if self.members.is_empty() {
+                ui.add_space(16.);
+                ui.strong(t(z, "开始你的第一个项目", "Start your first project"));
+                ui.label(RichText::new(t(z, "先关联本地模型库，再选择尺寸并添加抽屉层。", "Link a local model library, choose a size and add layers.")).weak());
+                return;
+            }
+            if self.tower.print_list { self.tower_print_list(ui, ctx); return; }
+            let all = match rows(&self.members) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    ui.colored_label(ui.visuals().hyperlink_color, error);
+                    ui.small(t(z, "原方案的标签、内部配置和装配位置完整保留。可新建层式项目，或选择原成员编辑。", "Original labels, inserts and placements are preserved. Start a layer project or edit an existing member."));
+                    for (i, m) in self.members.iter().enumerate() {
+                        if ui.button(&m.name).clicked() { action = Some(Action::Edit(i, None)); }
+                    }
                     return;
-                }};
-                let Some(first)=all.first() else {return;};let mut width=first.width.clone();let mut depth=first.depth;
-                ui.strong(t(z,"整体尺寸","Overall size"));
-                ui.horizontal(|ui|{ui.label(t(z,"宽度","Width"));for w in ["S","M","L","XL"] {ui.selectable_value(&mut width,w.to_owned(),w);}});
-                ui.horizontal(|ui|{ui.label(t(z,"深度","Depth"));for d in 3..=7 {ui.selectable_value(&mut depth,d,d.to_string());}});
-                if width!=first.width||depth!=first.depth {action=Some(Action::Resize(width,depth));}
-                ui.small(format!("{} {:.1} mm · {} {}",t(z,"标称宽度","Nominal width"),crate::constraints::stacking::width(&first.width).unwrap_or(0) as f32/10.,first.depth,t(z,"格深度","depth units")));
-                ui.checkbox(&mut self.tower.reset_inserts,t(z,"改规格时重置内部配置（保留标牌）","Reset inserts when changing size (keep labels)"));
-                ui.separator();
-                let top=all.last().unwrap();
-                egui::Frame::group(ui.style()).corner_radius(8.).show(ui,|ui| {ui.set_min_width(ui.available_width());
-                    ui.strong(t(z,"↑ 顶盖","↑ Top cover"));
-                    for &i in &top.members {let m=&self.members[i];ui.push_id(("tower-roof",i),|ui| {
-                        if m.preset.assembly_kind==AssemblyKind::Sustainer {ui.label(format!("{} · {}",m.preset.selection.width,t(z,"箱子自带顶盖","Box lid")));return;}
-                        let mut roof=m.exterior.roof;
-                        egui::ComboBox::from_id_salt("roof").selected_text(roof_name(roof,z)).show_ui(ui,|ui| {for value in [crate::catalog::exterior::Roof::None,crate::catalog::exterior::Roof::Table,crate::catalog::exterior::Roof::Grid,crate::catalog::exterior::Roof::Bowl,crate::catalog::exterior::Roof::UnderTable] {ui.selectable_value(&mut roof,value,roof_name(value,z));}});
-                        if roof!=m.exterior.roof {action=Some(Action::Roof(i,roof));}
-                    });}
-                });
-                ui.horizontal(|ui| {ui.strong(t(z,"层","Layers"));ui.label(format!("{} {}",all.len(),t(z,"层","layers")));});
-                for row in all.iter().rev() {
-                    let expanded=self.tower.open_layer==Some(row.level);let active=self.members.get(self.active_member).is_some_and(|m|m.placement.level==row.level);
-                    let fill=if expanded {Color32::from_rgb(31,41,51)}else {ui.visuals().faint_bg_color};
-                    let frame=egui::Frame::group(ui.style()).fill(fill).corner_radius(9.).stroke(egui::Stroke::new(if active{1.5}else{1.},if active{Color32::from_rgb(108,205,221)}else{ui.visuals().widgets.noninteractive.bg_stroke.color}));
-                    let response=frame.show(ui,|ui| {ui.set_min_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.dnd_drag_source(egui::Id::new(("tower-layer",row.level)),row.level,|ui| {ui.label("::");});
-                            let title=format!("{:02}  {} {}",row.level+1,t(z,"层","Layer"),row.members.iter().map(|i|format!("{}{}",self.members[*i].preset.selection.width,row.depth)).collect::<Vec<_>>().join(" ＋ "));
-                            if ui.selectable_label(expanded,title).clicked() {self.tower.open_layer=if expanded{None}else{Some(row.level)};self.select_member_in_combination(row.members[0],ctx);}
-                            ui.label(&row.height);
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.small_button(t(z,"复制","Copy")).clicked(){action=Some(Action::Duplicate(row.level));}
-                            if ui.add_enabled(all.len()>1,egui::Button::new(t(z,"删除","Delete")).small()).clicked(){action=Some(Action::Delete(row.level));}
-                            if ui.add_enabled(row.level+1<all.len() as u32,egui::Button::new("↑").small()).clicked(){action=Some(Action::Move(row.level,row.level+1));}
-                            if ui.add_enabled(row.level>0,egui::Button::new("↓").small()).clicked(){action=Some(Action::Move(row.level,row.level-1));}
-                            let mut checked=row.members.iter().all(|i|self.member_selection.contains(i));if ui.checkbox(&mut checked,t(z,"勾选","Select")).changed(){for &i in &row.members {if checked {self.member_selection.insert(i);}else {self.member_selection.remove(&i);}}}
-                        });
-                        if !expanded{return;}
-                        let mut height=row.height.clone();let mut split=row.members.len()==2;
-                        ui.horizontal(|ui|{ui.label(t(z,"高度","Height"));for h in ["1F","2F","4F"] {let available=row.width!="XL"||split||h=="1F";ui.add_enabled_ui(available,|ui|{ui.selectable_value(&mut height,h.to_owned(),h);});}});
-                        if matches!(row.width.as_str(),"L"|"XL") {ui.horizontal(|ui|{ui.label(t(z,"拼法","Layout"));ui.add_enabled_ui(row.width!="XL",|ui|{ui.selectable_value(&mut split,false,format!("{} {}",t(z,"整块","Whole"),row.width));}).response.on_hover_text(t(z,"整块 XL 的安装面基准待校准；当前可用 S＋M 拼法。","Full XL seating datums need calibration; use S+M."));ui.selectable_value(&mut split,true,if row.width=="L" {"S ＋ S"}else{"S ＋ M"});});}
-                        if height!=row.height||split!=(row.members.len()==2) {action=Some(Action::Row(row.level,height,split));}
-                        ui.columns(row.members.len(),|columns| {for (col,&index) in row.members.iter().enumerate() {columns[col].push_id(index,|ui|{self.tower_cell(ui,index,&mut action);});}});
-                    });
-                    if let Some(from)=response.response.dnd_release_payload::<u32>() && *from!=row.level {action=Some(Action::Move(*from,row.level));}
                 }
-                ui.horizontal_wrapped(|ui|{if ui.button(t(z,"＋ 添加抽屉层","＋ Drawer layer")).clicked(){action=Some(Action::Add(AssemblyKind::Drawer));}
- if ui.button(t(z,"＋ 添加箱子层","＋ Box layer")).clicked(){action=Some(Action::Add(AssemblyKind::Sustainer));}});
-                ui.separator();
-                egui::Frame::group(ui.style()).corner_radius(8.).show(ui,|ui|{ui.set_min_width(ui.available_width());ui.strong(t(z,"↓ 底座","↓ Base"));for &i in &first.members {ui.push_id(("tower-base",i),|ui|{let mut base=self.members[i].exterior.base;egui::ComboBox::from_id_salt("base").selected_text(base_name(base,z)).show_ui(ui,|ui|{for value in [crate::catalog::exterior::Base::None,crate::catalog::exterior::Base::Plain,crate::catalog::exterior::Base::Trolley] {ui.selectable_value(&mut base,value,base_name(value,z));}});if base!=self.members[i].exterior.base {action=Some(Action::Base(i,base));}});}});
-                self.workflow_undo_ui(ui,ctx);
-                ui.checkbox(&mut self.tower.show_parts,t(z,"显示零件属性面板","Show part properties"));
+            };
+            let Some(first) = all.first() else { return; };
+            let mut width = first.width.clone();
+            let mut depth = first.depth;
+            ui.horizontal(|ui| {
+                ui.strong(t(z, "整体尺寸", "Overall size"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button(t(z, "选项", "Options"), |ui| {
+                        ui.checkbox(&mut self.tower.reset_inserts, t(z, "改规格时重置内部配置（保留标牌）", "Reset inserts on size changes (keep labels)"));
+                    });
+                });
             });
+            ui.small(t(z, "宽度", "Width"));
+            appearance::size_choices(ui, &mut width, &[("S".into(), "S"), ("M".into(), "M"), ("L".into(), "L"), ("XL".into(), "XL")]);
+            ui.small(t(z, "深度", "Depth"));
+            appearance::size_choices(ui, &mut depth, &[(3,"3"), (4,"4"), (5,"5"), (6,"6"), (7,"7")]);
+            if width != first.width || depth != first.depth { action = Some(Action::Resize(width, depth)); }
+            ui.small(format!("{} {:.1} mm · {} {}", t(z, "标称宽度", "Nominal width"), crate::constraints::stacking::width(&first.width).unwrap_or(0) as f32 / 10., first.depth, t(z, "格深度", "depth units")));
+            ui.add_space(12.);
+            let top = all.last().unwrap();
+            egui::Frame::group(ui.style()).corner_radius(12.).inner_margin(12.).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.strong(t(z, "顶盖", "Top cover"));
+                for &i in &top.members {
+                    let m = &self.members[i];
+                    ui.push_id(("tower-roof", i), |ui| {
+                        if m.preset.assembly_kind == AssemblyKind::Sustainer {
+                            ui.label(format!("{} · {}", m.preset.selection.width, t(z, "箱子自带顶盖", "Box lid")));
+                            return;
+                        }
+                        let mut roof = m.exterior.roof;
+                        egui::ComboBox::from_id_salt("roof").width(ui.available_width()).selected_text(roof_name(roof,z)).show_ui(ui, |ui| {
+                            for value in [crate::catalog::exterior::Roof::None, crate::catalog::exterior::Roof::Table, crate::catalog::exterior::Roof::Grid, crate::catalog::exterior::Roof::Bowl, crate::catalog::exterior::Roof::UnderTable] {
+                                ui.selectable_value(&mut roof, value, roof_name(value,z));
+                            }
+                        });
+                        if roof != m.exterior.roof { action = Some(Action::Roof(i,roof)); }
+                    });
+                }
+            });
+            ui.add_space(8.);
+            ui.horizontal(|ui| { ui.strong(t(z, "抽屉与箱子", "Drawers & boxes")); ui.label(RichText::new(format!("{} {}", all.len(), t(z,"层","layers"))).weak()); });
+            for row in all.iter().rev() {
+                let expanded = self.tower.open_layer == Some(row.level);
+                let active = self.members.get(self.active_member).is_some_and(|m| m.placement.level == row.level);
+                let frame = egui::Frame::group(ui.style()).fill(ui.visuals().panel_fill).corner_radius(12.).inner_margin(10.)
+                    .stroke(egui::Stroke::new(1., if active { ui.visuals().text_color() } else { ui.visuals().widgets.noninteractive.bg_stroke.color }));
+                let response = ui.push_id(("layer-card", row.level), |ui| frame.show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.dnd_drag_source(egui::Id::new(("tower-layer",row.level)),row.level, |ui| { ui.label(RichText::new("::").weak()); });
+                        let title = format!("{:02}  {} / {}", row.level + 1, row.members.iter().map(|i| format!("{}{}", self.members[*i].preset.selection.width, row.depth)).collect::<Vec<_>>().join(" + "), row.height);
+                        if ui.selectable_label(expanded, RichText::new(title).strong()).clicked() {
+                            self.tower.open_layer = if expanded { None } else { Some(row.level) };
+                            self.select_member_in_combination(row.members[0],ctx);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("···", |ui| {
+                                if ui.button(t(z,"复制这一层","Duplicate layer")).clicked() { action=Some(Action::Duplicate(row.level)); ui.close(); }
+                                if ui.add_enabled(row.level+1<all.len() as u32,egui::Button::new(t(z,"上移","Move up"))).clicked() { action=Some(Action::Move(row.level,row.level+1)); ui.close(); }
+                                if ui.add_enabled(row.level>0,egui::Button::new(t(z,"下移","Move down"))).clicked() { action=Some(Action::Move(row.level,row.level-1)); ui.close(); }
+                                let mut checked=row.members.iter().all(|i|self.member_selection.contains(i));
+                                if ui.checkbox(&mut checked,t(z,"勾选导出成员","Select members for export")).changed() {
+                                    for &i in &row.members { if checked { self.member_selection.insert(i); } else { self.member_selection.remove(&i); } }
+                                }
+                                ui.separator();
+                                if ui.add_enabled(all.len()>1,egui::Button::new(t(z,"删除这一层","Delete layer"))).clicked() { action=Some(Action::Delete(row.level)); ui.close(); }
+                            });
+                        });
+                    });
+                    if !expanded { return; }
+                    ui.separator();
+                    let mut height=row.height.clone();
+                    let mut split=row.members.len()==2;
+                    ui.small(t(z,"层高","Layer height"));
+                    if row.width != "XL" || split {
+                        appearance::size_choices(ui,&mut height,&[("1F".into(),"1F"),("2F".into(),"2F"),("4F".into(),"4F")]);
+                    } else { ui.label("1F"); }
+                    if matches!(row.width.as_str(),"L"|"XL") {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(t(z,"拼法","Layout"));
+                            ui.add_enabled_ui(row.width!="XL",|ui| { ui.selectable_value(&mut split,false,format!("{} {}",t(z,"整块","Whole"),row.width)); }).response.on_hover_text(t(z,"整块 XL 安装面待校准；可用 S＋M。","Full XL seating datums need calibration; use S+M."));
+                            ui.selectable_value(&mut split,true,if row.width=="L" {"S + S"} else {"S + M"});
+                        });
+                    }
+                    if height!=row.height || split!=(row.members.len()==2) { action=Some(Action::Row(row.level,height,split)); }
+                    ui.columns(row.members.len(),|columns| {
+                        for (col,&index) in row.members.iter().enumerate() { columns[col].push_id(index,|ui|self.tower_cell(ui,index,&mut action)); }
+                    });
+                })).inner;
+                if let Some(from)=response.response.dnd_release_payload::<u32>() && *from!=row.level { action=Some(Action::Move(*from,row.level)); }
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(t(z,"＋ 抽屉层","＋ Drawer layer")).clicked() { action=Some(Action::Add(AssemblyKind::Drawer)); }
+                if ui.button(t(z,"＋ 箱子层","＋ Box layer")).clicked() { action=Some(Action::Add(AssemblyKind::Sustainer)); }
+            });
+            ui.add_space(8.);
+            egui::Frame::group(ui.style()).corner_radius(12.).inner_margin(12.).show(ui,|ui| {
+                ui.set_min_width(ui.available_width());
+                ui.strong(t(z,"底座","Base"));
+                for &i in &first.members { ui.push_id(("tower-base",i),|ui| {
+                    let mut base=self.members[i].exterior.base;
+                    egui::ComboBox::from_id_salt("base").width(ui.available_width()).selected_text(base_name(base,z)).show_ui(ui,|ui| {
+                        for value in [crate::catalog::exterior::Base::None,crate::catalog::exterior::Base::Plain,crate::catalog::exterior::Base::Trolley] { ui.selectable_value(&mut base,value,base_name(value,z)); }
+                    });
+                    if base!=self.members[i].exterior.base { action=Some(Action::Base(i,base)); }
+                }); }
+            });
+            self.workflow_undo_ui(ui,ctx);
+            ui.add_space(12.);
         });
         if let Some(action) = action
             && let Err(e) = self.tower_action(action, ctx)
         {
             self.tower.error = e;
         }
-        ui.separator();
-        self.tower_footer(ui, ctx);
     }
     fn tower_cell(&mut self, ui: &mut egui::Ui, index: usize, action: &mut Option<Action>) {
         let z = self.zh;
@@ -944,8 +1020,8 @@ impl App {
                                 ui.set_min_height(
                                     crate::constraints::tower::units(&p.selection.height)
                                         .unwrap_or(1) as f32
-                                        * 96.
-                                        - 8.,
+                                        * 18.
+                                        + 62.,
                                 );
                                 if let Some(d) = drawer {
                                     ui.strong(format!("{} · {}", d + 1, p.selection.height));
@@ -1057,7 +1133,11 @@ impl App {
             if ui
                 .add_enabled(
                     !items.is_empty(),
-                    egui::Button::new(t(z, "导出 3MF…", "Export 3MF…")),
+                    egui::Button::new(
+                        RichText::new(t(z, "导出 3MF…", "Export 3MF…")).color(Color32::WHITE),
+                    )
+                    .fill(appearance::BRAND)
+                    .min_size(egui::vec2(150., 38.)),
                 )
                 .clicked()
             {
@@ -1236,7 +1316,31 @@ impl App {
     }
     pub(super) fn tower_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(100));
-        let folder = self.home.join("output/tower-workflow");
+        let workspace_smoke = std::env::args().any(|a| a == "--smoke-workspace");
+        let folder = self.home.join(if workspace_smoke {
+            "output/workspace-ui"
+        } else {
+            "output/tower-workflow"
+        });
+        if workspace_smoke {
+            let theme = if [1, 3, 5, 7].contains(&self.smoke_stage) {
+                appearance::Appearance::Dark
+            } else {
+                appearance::Appearance::Light
+            };
+            if self.appearance != theme {
+                self.appearance = theme;
+                theme.apply(ctx);
+            }
+            if self.smoke_frame == 0 {
+                let size = if [6, 7].contains(&self.smoke_stage) {
+                    egui::vec2(1050., 700.)
+                } else {
+                    egui::vec2(1440., 960.)
+                };
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
         let error = if !self.tower.error.is_empty() {
             Some(self.tower.error.clone())
         } else if let Some(e) = &self.preview_modes.error {

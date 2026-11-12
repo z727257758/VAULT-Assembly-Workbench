@@ -1,3 +1,4 @@
+mod appearance;
 mod color_preview;
 mod combination;
 mod exterior_smoke;
@@ -6,6 +7,7 @@ mod preview_modes;
 mod stopper_smoke;
 mod tower;
 mod workflow;
+mod workspace;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     render::{Camera, Renderer, ViewOptions},
@@ -70,6 +72,8 @@ struct Preset {
 }
 #[derive(Serialize, Deserialize)]
 struct Settings {
+    #[serde(default)]
+    appearance: appearance::Appearance,
     #[serde(default)]
     export: crate::export::Options,
     #[serde(default)]
@@ -146,6 +150,7 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    appearance: appearance::Appearance,
     tower: tower::State,
     active_drawer: Option<usize>,
     preview_modes: preview_modes::State,
@@ -238,7 +243,6 @@ impl App {
         smoke: bool,
         debug_ui: bool,
     ) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
         let mut fonts = egui::FontDefinitions::default();
         for path in ["msyh.ttc", "simhei.ttf"]
             .into_iter()
@@ -262,20 +266,9 @@ impl App {
             }
         }
         cc.egui_ctx.set_fonts(fonts);
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = Color32::from_rgb(23, 29, 37);
-        style.visuals.window_fill = Color32::from_rgb(23, 29, 37);
-        style.visuals.selection.bg_fill = Color32::from_rgb(35, 87, 115);
-        style.spacing.item_spacing = egui::vec2(8., 8.);
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
-        cc.egui_ctx.set_style(style);
         let settings = Settings::load(&home);
+        let appearance = settings.as_ref().map(|s| s.appearance).unwrap_or_default();
+        appearance.apply(&cc.egui_ctx);
         let root = settings.as_ref().and_then(Settings::startup_root);
         let last_model_root = settings
             .as_ref()
@@ -291,6 +284,7 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            appearance,
             tower: Default::default(),
             active_drawer: None,
             preview_modes: Default::default(),
@@ -796,6 +790,7 @@ impl App {
     }
     fn save_settings(&self) -> Result<(), String> {
         let settings = Settings {
+            appearance: self.appearance,
             export: self.export_options.clone(),
             model_root: self.last_model_root.to_string_lossy().into(),
             language: if self.zh { "zh" } else { "en" }.into(),
@@ -877,7 +872,10 @@ impl App {
                         );
                         continue;
                     }
-                    if self.smoke && std::env::args().any(|a| a == "--smoke-tower") {
+                    if self.smoke
+                        && std::env::args()
+                            .any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
+                    {
                         self.setup_tower_smoke(ctx);
                     }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
@@ -1229,139 +1227,17 @@ impl App {
         });
         self.joints_open = open;
     }
-    fn toolbar(&mut self, ctx: &egui::Context) {
-        let z = self.zh;
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(5.);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(crate::app_name(z))
-                        .size(24.)
-                        .strong()
-                        .color(Color32::from_rgb(108, 205, 221)),
-                );
-                ui.label(
-                    RichText::new(t(z, "非官方辅助工具", "Unofficial Companion Tool"))
-                        .small()
-                        .color(Color32::GRAY),
-                );
-                ui.separator();
-                if ui
-                    .selectable_label(self.scene.assembly, t(z, "装配预览", "Assembly view"))
-                    .clicked()
-                {
-                    self.assembly(ctx);
-                }
-                if !self.scene.assembly {
-                    ui.label(t(z, "单件预览", "Single part view"));
-                }
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    if ui
-                        .button(t(z, "打开模型库", "Open library"))
-                        .on_hover_text(self.last_model_root.display().to_string())
-                        .clicked()
-                    {
-                        let mut dialog = rfd::FileDialog::new();
-                        if let Some(dir) = crate::paths::directory_hint(&self.last_model_root) {
-                            dialog = dialog.set_directory(dir);
-                        }
-                        if let Some(root) = dialog.pick_folder() {
-                            self.scan(root, ctx);
-                        }
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.bom.is_empty(),
-                            egui::Button::new(if self.combination_view {
-                                t(z, "整体配色", "Overall colors")
-                            } else {
-                                t(z, "成员配色", "Member colors")
-                            }),
-                        )
-                        .clicked()
-                    {
-                        if self.combination_view {
-                            self.open_global_colors();
-                        } else {
-                            self.colors_open = true;
-                        }
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.bom.is_empty(),
-                            egui::Button::new(t(z, "导出 3MF…", "Export 3MF…")),
-                        )
-                        .clicked()
-                    {
-                        self.commit_member();
-                        self.export_options.format = crate::export::Format::ThreeMf;
-                        self.export_scope = if self.combination_view {
-                            workflow::ExportScope::All
-                        } else {
-                            workflow::ExportScope::Current
-                        };
-                        self.export_open = true;
-                    }
-                    if self.export_rx.is_some() {
-                        ui.spinner();
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(if z { "English" } else { "中文" }).clicked() {
-                        self.zh = !z;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                            crate::app_name(self.zh).into(),
-                        ));
-                        if let Err(e) = self.save_settings() {
-                            self.status = e;
-                        }
-                    }
-                });
-            });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                if self.combination_view {
-                    ui.strong(t(z, "1 整体装配", "1 Overall assembly"));
-                    ui.label(t(
-                        z,
-                        "→ 2 配置层内抽屉与标牌 → 3 打印清单与导出",
-                        "→ 2 Configure member → 3 Review and export 3MF",
-                    ));
-                } else {
-                    if ui
-                        .button(t(z, "← 整体装配", "← Overall assembly"))
-                        .clicked()
-                    {
-                        self.show_combination(ctx);
-                    }
-                    if let Some(m) = self.members.get(self.active_member) {
-                        ui.strong(format!(" / {}", m.name));
-                    }
-                    ui.label(t(
-                        z,
-                        "修改保留在当前方案；保存方案写入磁盘。",
-                        "Edits stay in this project; Save preset writes to disk.",
-                    ));
-                }
-            });
-            ui.add_space(5.);
-        });
-    }
     fn left(&mut self, ctx: &egui::Context) {
         let z = self.zh;
         egui::SidePanel::left("library")
-            .default_width(390.)
-            .width_range(320. ..=560.)
+            .default_width(400.)
+            .width_range(360. ..=560.)
             .resizable(true)
+            .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(egui::Margin::symmetric(20, 16)))
             .show(ctx, |ui| {
+                self.workspace_header(ui, ctx);
                 if self.combination_view && self.tab==0 {self.tower_panel(ui,ctx);return;}
                 egui::ScrollArea::vertical().id_salt("configuration-panel-scroll").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, 0, t(z, "装配配置", "Assembly"));
-                    ui.selectable_value(&mut self.tab, 1, t(z, "全部组件", "Library"));
-                    ui.selectable_value(&mut self.tab, 2, t(z, "说明资料", "Manuals"));
-                });
-                ui.separator();
                 if self.tab == 0 {
                     self.combination_controls(ui,ctx);
                     if self.combination_view {return;}
@@ -1743,7 +1619,9 @@ impl App {
         .into();
     }
     fn bottom(&mut self, ctx: &egui::Context) {
-        if self.combination_view && (!self.smoke || std::env::args().any(|a| a == "--smoke-tower"))
+        if self.combination_view
+            && (!self.smoke
+                || std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace"))
         {
             return;
         }
@@ -2059,7 +1937,7 @@ impl App {
                     ui.label(RichText::new(p.label(z)).strong());
                     if p.pose.body.is_some() {
                         ui.colored_label(
-                            Color32::from_rgb(108, 205, 221),
+                            ui.visuals().hyperlink_color,
                             t(
                                 z,
                                 "展示时拆分 · 源 STL 未修改",
@@ -2213,111 +2091,21 @@ impl App {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(14, 18, 23))
-                    .inner_margin(12.),
+                    .fill(ctx.style().visuals.extreme_bg_color)
+                    .inner_margin(0.),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if self.debug_ui
-                        && self.scene_key != "combination"
-                        && ui
-                            .button(t(z, "装配关系 / 检查", "Relations / Check"))
-                            .clicked()
-                    {
-                        self.joints_open = true;
-                    }
-                    if self.debug_ui {
-                        ui.label(RichText::new("DEBUG").color(Color32::YELLOW));
-                    }
-                    ui.heading(if self.scene.title.is_empty() {
-                        crate::app_name(z)
-                    } else {
-                        &self.scene.title
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(t(z, "适配画面", "Fit view")).clicked() {
-                            if self.preview_modes.special() {
-                                self.preview_mode_fit();
-                            } else {
-                                self.camera.fit(
-                                    &if self.interior_editor_open() {
-                                        self.interior_scene()
-                                    } else {
-                                        self.scene.clone()
-                                    },
-                                    self.explosion,
-                                );
-                            }
-                        }
-                        ui.add_enabled_ui(!self.preview_modes.special(), |ui| {
-                            ui.checkbox(
-                                &mut self.dimensions,
-                                t(z, "尺寸三视图", "Dimension views"),
-                            );
-                        });
-                    });
-                });
+                appearance::paint_stage(ui, ui.max_rect());
+                self.stage_controls(ctx, ui.max_rect());
                 if self.preview_modes_ui(ui, ctx) {
                     return;
                 }
-                ui.horizontal_wrapped(|ui| {
-                    for (label, yaw, pitch) in [
-                        (t(z, "立体", "Orbit"), 0.65, 0.5),
-                        (t(z, "正视", "Front"), 0., 0.),
-                        (
-                            t(z, "俯视", "Top"),
-                            0.,
-                            std::f32::consts::FRAC_PI_2 - 0.0001,
-                        ),
-                        (
-                            t(z, "右视", "Right"),
-                            std::f32::consts::FRAC_PI_2 - 0.0001,
-                            0.,
-                        ),
-                    ] {
-                        if ui.small_button(label).clicked() {
-                            self.camera.yaw = yaw;
-                            self.camera.pitch = pitch;
-                        }
-                    }
-                    if self.scene.assembly {
-                        ui.separator();
-                        if self.debug_ui
-                            && ui
-                                .small_button(t(z, "重排爆炸方向", "Reset explosion"))
-                                .clicked()
-                        {
-                            match crate::explosion::reset(&mut self.scene) {
-                                Ok(()) => {
-                                    self.explosion = 1.;
-                                    self.camera.fit(&self.scene, 1.);
-                                }
-                                Err(e) => self.status = e,
-                            }
-                        }
-                        ui.checkbox(&mut self.ghost, t(z, "外壳透明", "Ghost shell"));
-                    }
-                    if ui
-                        .checkbox(
-                            &mut self.export_options.plate.preview_colors,
-                            t(z, "打印颜色预览", "Print colors"),
-                        )
-                        .changed()
-                    {
-                        if let Err(e) = self.save_settings() {
-                            self.status = e;
-                        }
-                        ctx.request_repaint();
-                    }
-                });
-                ui.separator();
                 if self.scene.parts.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(t(z, "打开模型库开始预览", "Open a model library to begin"));
-                    });
+                    self.workspace_empty(ui, ctx);
                     return;
                 }
                 if self.dimensions {
+                    ui.add_space(110.);
                     let index = self.selected.unwrap_or(0);
                     let part = &self.scene.parts[index];
                     let mut p = part.clone();
@@ -3375,7 +3163,6 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.tower_tick(ctx);
-        self.toolbar(ctx);
         self.bottom(ctx);
         self.left(ctx);
         self.divider_view(ctx);
@@ -3466,7 +3253,8 @@ impl eframe::App for App {
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        if self.smoke && std::env::args().any(|a| a == "--smoke-tower") {
+        if self.smoke && std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
+        {
             self.tower_smoke(ctx);
             return;
         }
@@ -4558,6 +4346,7 @@ mod accessory_export_tests {
         std::fs::create_dir(home.path().join("state")).unwrap();
         let library = tempfile::tempdir().unwrap();
         let saved = Settings {
+            appearance: appearance::Appearance::Dark,
             model_root: library.path().to_string_lossy().into(),
             language: "en".into(),
             export: Default::default(),
@@ -4565,17 +4354,20 @@ mod accessory_export_tests {
         let data = toml::to_string(&saved).unwrap();
         std::fs::write(home.path().join("config/default.toml"), &data).unwrap();
         let first = Settings::load(home.path()).unwrap();
+        assert!(first.appearance == appearance::Appearance::Dark);
         assert!(first.model_root.is_empty());
         assert!(first.startup_root().is_none());
         std::fs::write(home.path().join("state/settings.toml"), &data).unwrap();
         let restored = Settings::load(home.path()).unwrap();
         assert_eq!(restored.startup_root(), Some(library.path().to_path_buf()));
+        assert!(restored.appearance == appearance::Appearance::Dark);
         drop(library);
         let missing = Settings::load(home.path()).unwrap();
         assert!(missing.startup_root().is_none());
         assert_eq!(missing.model_root, saved.model_root);
         let empty: Settings = toml::from_str("language = 'zh'").unwrap();
         assert!(empty.startup_root().is_none());
+        assert!(empty.appearance == appearance::Appearance::Light);
         std::fs::write(home.path().join("state/settings.toml"), "broken toml").unwrap();
         assert!(
             Settings::load(home.path())
