@@ -97,7 +97,7 @@ impl Preset {
     }
 }
 
-fn rows(members: &[Member]) -> Result<Vec<crate::constraints::tower::Row>, String> {
+pub(super) fn rows(members: &[Member]) -> Result<Vec<crate::constraints::tower::Row>, String> {
     crate::constraints::tower::rows(
         &members
             .iter()
@@ -110,7 +110,7 @@ fn rows(members: &[Member]) -> Result<Vec<crate::constraints::tower::Row>, Strin
             .collect::<Vec<_>>(),
     )
 }
-fn configure(p: &mut Preset, catalog: &Catalog, reset: bool) -> Result<(), String> {
+pub(super) fn configure(p: &mut Preset, catalog: &Catalog, reset: bool) -> Result<(), String> {
     if reset {
         p.gridfinity = Default::default();
         p.divider_layout = Default::default();
@@ -228,7 +228,7 @@ fn set_row(
     normalize(&mut next);
     Ok(next)
 }
-fn drawer_pattern(
+pub(super) fn drawer_pattern(
     p: &Preset,
     catalog: &Catalog,
     heights: &[&str],
@@ -422,6 +422,26 @@ impl App {
         if let Err(e) = self.tower_apply_project(project, ctx) {
             self.tower.error = e;
         }
+    }
+    pub(super) fn tower_from_recipe(
+        &mut self,
+        index: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let recipe = super::recipes::RECIPES
+            .get(index)
+            .ok_or("Unknown combination preset")?;
+        // Finish and validate the complete candidate before changing the session.
+        let saved = recipe.build(&self.catalog, &self.global_colors, self.zh)?;
+        self.tower_capture();
+        let project = Project {
+            name: saved.project_name.clone(),
+            saved,
+        };
+        self.tower_apply_project(project.clone(), ctx)?;
+        self.tower.current = self.tower.projects.len();
+        self.tower.projects.push(project);
+        Ok(())
     }
     pub(super) fn tower_load(&mut self, ctx: &egui::Context) {
         if self.smoke {
@@ -714,32 +734,43 @@ impl App {
         let mut new = false;
         let mut open = false;
         let mut save = false;
+        let mut recipe = None;
+        let name_limit = if z { 10 } else { 16 };
+        let short_name: String = self.tower.name.chars().take(name_limit).collect();
+        let menu_name = if self.tower.name.chars().count() > name_limit {
+            format!("{short_name}…")
+        } else {
+            short_name
+        };
         ui.horizontal(|ui| {
-            ui.menu_button(format!("项目 · {}", self.tower.name), |ui| {
-                ui.set_min_width(240.);
-                for (i, p) in self.tower.projects.iter().enumerate() {
-                    if ui
-                        .selectable_label(i == self.tower.current, &p.name)
-                        .clicked()
-                    {
-                        choose = Some(i);
+            ui.menu_button(
+                format!("{} · {}", t(z, "项目", "Project"), menu_name),
+                |ui| {
+                    ui.set_min_width(240.);
+                    for (i, p) in self.tower.projects.iter().enumerate() {
+                        if ui
+                            .selectable_label(i == self.tower.current, &p.name)
+                            .clicked()
+                        {
+                            choose = Some(i);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(t(z, "＋ 新建项目", "＋ New project")).clicked() {
+                        new = true;
                         ui.close();
                     }
-                }
-                ui.separator();
-                if ui.button(t(z, "＋ 新建项目", "＋ New project")).clicked() {
-                    new = true;
-                    ui.close();
-                }
-                if ui.button(t(z, "打开文件…", "Open file…")).clicked() {
-                    open = true;
-                    ui.close();
-                }
-                if ui.button(t(z, "保存为文件…", "Save to file…")).clicked() {
-                    save = true;
-                    ui.close();
-                }
-            });
+                    if ui.button(t(z, "打开文件…", "Open file…")).clicked() {
+                        open = true;
+                        ui.close();
+                    }
+                    if ui.button(t(z, "保存为文件…", "Save to file…")).clicked() {
+                        save = true;
+                        ui.close();
+                    }
+                },
+            );
             if ui
                 .small_button("＋")
                 .on_hover_text(t(z, "新建项目", "New project"))
@@ -747,6 +778,30 @@ impl App {
             {
                 new = true;
             }
+            ui.add_enabled_ui(
+                !self.busy && !self.catalog.root.as_os_str().is_empty(),
+                |ui| {
+                    ui.menu_button(t(z, "预设", "Presets"), |ui| {
+                        ui.set_max_width(340.);
+                        ui.small(t(
+                            z,
+                            "从预设新建项目，保留当前项目。",
+                            "Create a new project and keep the current one.",
+                        ));
+                        ui.separator();
+                        for (index, item) in super::recipes::RECIPES.iter().enumerate() {
+                            if ui
+                                .button(item.name(z))
+                                .on_hover_text(item.description(z))
+                                .clicked()
+                            {
+                                recipe = Some(index);
+                                ui.close();
+                            }
+                        }
+                    });
+                },
+            );
         });
         ui.add(
             egui::TextEdit::singleline(&mut self.tower.name)
@@ -765,6 +820,11 @@ impl App {
         }
         if new {
             self.tower_new(ctx);
+        }
+        if let Some(index) = recipe
+            && let Err(error) = self.tower_from_recipe(index, ctx)
+        {
+            self.tower.error = error;
         }
         if open {
             self.tower_capture();

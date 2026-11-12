@@ -120,6 +120,17 @@ pub struct Renderer {
     targets: Vec<Option<Target>>,
 }
 impl Renderer {
+    /// Drain submitted work before native teardown releases the GPU resources.
+    pub fn wait_idle(&self) -> Result<(), String> {
+        self.state
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .map(|_| ())
+            .map_err(|error| format!("GPU queue did not finish: {error}"))
+    }
     pub fn mesh_chunk_count(&self) -> usize {
         self.meshes.values().map(|m| m.chunks.len()).sum()
     }

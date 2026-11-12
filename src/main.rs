@@ -45,6 +45,13 @@ fn main() -> eframe::Result {
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| executable.parent().unwrap().to_path_buf());
     let smoke = std::env::args().any(|a| a == "--smoke-test");
+    if std::env::args().any(|a| a == "--audit-presets") {
+        if let Err(error) = app::audit_presets(&home) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--calibrate-sustainers") {
         let result = (|| -> Result<(), String> {
             let model_root = std::env::var("VAULT_MODEL_ROOT")

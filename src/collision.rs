@@ -251,6 +251,120 @@ pub fn check(scene: &Scene, tolerance: f32) -> Result<Report, String> {
             .collect(),
     })
 }
+
+/// Cross-member surface diagnostics at one display pose. Envelope rejection only
+/// selects triangle pairs to examine; it never counts as a positive crossing.
+pub fn check_between_members(
+    scene: &Scene,
+    tolerance: f32,
+    explosion: f32,
+) -> Result<Vec<Crossing>, String> {
+    check_between_members_with_budget(scene, tolerance, explosion, 10_000_000)
+}
+fn check_between_members_with_budget(
+    scene: &Scene,
+    tolerance: f32,
+    explosion: f32,
+    triangle_budget: usize,
+) -> Result<Vec<Crossing>, String> {
+    if !tolerance.is_finite()
+        || !(0.0001..=1.).contains(&tolerance)
+        || !explosion.is_finite()
+        || !(0. ..=1.).contains(&explosion)
+    {
+        return Err("Invalid crossing tolerance or explosion amount".into());
+    }
+    let mut bounds = Vec::with_capacity(scene.parts.len());
+    for part in &scene.parts {
+        let matrix = part.pose.matrix(explosion);
+        let mut envelope = Bounds::empty();
+        for x in [part.mesh.min.x, part.mesh.max.x] {
+            for y in [part.mesh.min.y, part.mesh.max.y] {
+                for z in [part.mesh.min.z, part.mesh.max.z] {
+                    envelope.add(matrix.transform_point3(Vec3::new(x, y, z)));
+                }
+            }
+        }
+        if !envelope.lo.is_finite() || !envelope.hi.is_finite() {
+            return Err("Non-finite crossing envelope".into());
+        }
+        bounds.push(envelope);
+    }
+    let mut trees: Vec<Option<Tree>> = (0..scene.parts.len()).map(|_| None).collect();
+    let mut total = 0usize;
+    let mut pairs = Vec::new();
+    for a in 0..scene.parts.len() {
+        for b in a + 1..scene.parts.len() {
+            if scene.parts[a].pose.instance / crate::scene::MEMBER_STRIDE
+                == scene.parts[b].pose.instance / crate::scene::MEMBER_STRIDE
+                || !bounds[a].overlaps(bounds[b], tolerance)
+            {
+                continue;
+            }
+            let missing: usize = [a, b]
+                .into_iter()
+                .filter(|&i| trees[i].is_none())
+                .map(|i| scene.parts[i].mesh.vertices.len() / 3)
+                .sum();
+            let required =
+                scene.parts[a].mesh.vertices.len() / 3 + scene.parts[b].mesh.vertices.len() / 3;
+            if required > triangle_budget {
+                return Err("Cross-member pair exceeds the diagnostic triangle budget".into());
+            }
+            // Bound retained BVH memory, rather than refusing a large assembly
+            // just because many small, separate candidate pairs were visited.
+            while total + missing > triangle_budget {
+                let evict = trees
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, t)| *i != a && *i != b && t.is_some())
+                    .max_by_key(|(_, t)| t.as_ref().unwrap().triangles.len())
+                    .map(|(i, _)| i)
+                    .ok_or("Cross-member diagnostic memory budget exhausted")?;
+                total -= trees[evict].take().unwrap().triangles.len();
+            }
+            for index in [a, b] {
+                if trees[index].is_some() {
+                    continue;
+                }
+                let part = &scene.parts[index];
+                total += part.mesh.vertices.len() / 3;
+                let matrix = part.pose.matrix(explosion);
+                trees[index] = Some(Tree::new(
+                    part.mesh
+                        .vertices
+                        .chunks_exact(3)
+                        .map(|tri| {
+                            let p = [
+                                matrix.transform_point3(tri[0].position.into()),
+                                matrix.transform_point3(tri[1].position.into()),
+                                matrix.transform_point3(tri[2].position.into()),
+                            ];
+                            let mut bounds = Bounds::empty();
+                            for point in p {
+                                bounds.add(point);
+                            }
+                            Triangle {
+                                p,
+                                bounds,
+                                center: (p[0] + p[1] + p[2]) / 3.,
+                            }
+                        })
+                        .collect(),
+                ));
+            }
+            if let Some(point) = trees[a]
+                .as_ref()
+                .unwrap()
+                .crossing(trees[b].as_ref().unwrap(), tolerance)
+            {
+                pairs.push(Crossing { a, b, point });
+            }
+        }
+    }
+    Ok(pairs)
+}
+
 #[cfg(test)]
 pub fn audit_pair(scene: &Scene, a: usize, b: usize) -> Vec<Vec3> {
     let build = |index: usize| {
@@ -285,6 +399,104 @@ pub fn audit_pair(scene: &Scene, a: usize, b: usize) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn member_triangles() -> Scene {
+        use crate::{
+            mesh::{Mesh, Vertex},
+            scene::{Part, Pose},
+        };
+        let make = |points: [[f32; 3]; 3], instance| {
+            let lo = points
+                .iter()
+                .copied()
+                .map(Vec3::from)
+                .fold(Vec3::splat(f32::INFINITY), Vec3::min);
+            let hi = points
+                .iter()
+                .copied()
+                .map(Vec3::from)
+                .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
+            Part {
+                mesh: std::sync::Arc::new(Mesh {
+                    vertices: points
+                        .into_iter()
+                        .map(|position| Vertex {
+                            position,
+                            normal: [0., 0., 1.],
+                            shade: 1.,
+                        })
+                        .collect(),
+                    min: lo,
+                    max: hi,
+                    size: hi - lo,
+                }),
+                pose: Pose {
+                    path: format!("triangle-{instance}"),
+                    instance,
+                    body: None,
+                    position: [0.; 3],
+                    rotation: [0.; 3],
+                    travel: [0.; 3],
+                    travel_frame: None,
+                },
+                source_size: hi - lo,
+                source_bodies: 1,
+                color: [1.; 4],
+                visible: true,
+            }
+        };
+        Scene {
+            parts: vec![
+                make([[-2., -2., 0.], [2., -2., 0.], [0., 2., 0.]], 0),
+                make(
+                    [[0., -1., -1.], [0., 1., 1.], [0., 1., -1.]],
+                    crate::scene::MEMBER_STRIDE,
+                ),
+            ],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn cross_member_check_uses_actual_triangles_and_the_requested_explosion_pose() {
+        let mut scene = member_triangles();
+        assert_eq!(check_between_members(&scene, 0.01, 0.).unwrap().len(), 1);
+        scene.parts[1].pose.travel = [10., 0., 0.];
+        assert!(check_between_members(&scene, 0.01, 1.).unwrap().is_empty());
+        assert_eq!(check_between_members(&scene, 0.01, 0.).unwrap().len(), 1);
+        scene.parts[1].pose.instance = 1;
+        assert!(check_between_members(&scene, 0.01, 0.).unwrap().is_empty());
+        assert_eq!(check(&scene, 0.01).unwrap().pairs.len(), 1);
+    }
+    #[test]
+    fn cross_member_check_rejects_invalid_parameters_and_does_not_ignore_hidden_parts() {
+        let mut scene = member_triangles();
+        scene.parts[1].visible = false;
+        assert_eq!(check_between_members(&scene, 0.01, 0.).unwrap().len(), 1);
+        for amount in [-0.1, 1.1, f32::NAN] {
+            assert!(check_between_members(&scene, 0.01, amount).is_err());
+        }
+        for tolerance in [0., -1., f32::INFINITY] {
+            assert!(check_between_members(&scene, tolerance, 0.).is_err());
+        }
+    }
+    #[test]
+    fn cross_member_envelope_overlap_alone_does_not_create_a_crossing() {
+        let mut scene = member_triangles();
+        scene.parts[1].mesh = std::sync::Arc::clone(&scene.parts[0].mesh);
+        assert!(check_between_members(&scene, 0.01, 0.).unwrap().is_empty());
+    }
+    #[test]
+    fn bounded_cross_member_cache_keeps_checking_later_pairs_after_eviction() {
+        let mut scene = member_triangles();
+        let mut last = scene.parts[0].clone();
+        last.pose.instance = 2 * crate::scene::MEMBER_STRIDE;
+        scene.parts.push(last);
+        let pairs = check_between_members_with_budget(&scene, 0.01, 0., 2).unwrap();
+        assert_eq!(
+            pairs.iter().map(|p| (p.a, p.b)).collect::<Vec<_>>(),
+            [(0, 1), (1, 2)]
+        );
+        assert!(check_between_members_with_budget(&scene, 0.01, 0., 1).is_err());
+    }
     #[test]
     fn seating_edge_contact_is_not_a_surface_crossing() {
         let face = [

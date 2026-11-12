@@ -4,6 +4,8 @@ mod combination;
 mod exterior_smoke;
 mod large_stl_smoke;
 mod preview_modes;
+mod recipes;
+pub(crate) use recipes::audit as audit_presets;
 mod stopper_smoke;
 mod tower;
 mod workflow;
@@ -872,6 +874,9 @@ impl App {
                         );
                         continue;
                     }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
+                        self.setup_recipe_smoke(ctx);
+                    }
                     if self.smoke
                         && std::env::args()
                             .any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
@@ -1621,7 +1626,9 @@ impl App {
     fn bottom(&mut self, ctx: &egui::Context) {
         if self.combination_view
             && (!self.smoke
-                || std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace"))
+                || std::env::args().any(|a| {
+                    a == "--smoke-tower" || a == "--smoke-workspace" || a == "--smoke-presets"
+                }))
         {
             return;
         }
@@ -3158,6 +3165,9 @@ impl App {
 impl eframe::App for App {
     fn on_exit(&mut self) {
         self.tower_flush();
+        if let Err(error) = self.renderer.wait_idle() {
+            eprintln!("{error}");
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -3252,6 +3262,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
+            self.recipe_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
         {
