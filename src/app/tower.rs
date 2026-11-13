@@ -5,7 +5,7 @@ pub(super) struct State {
     pub name: String,
     pub show_parts: bool,
     pub print_list: bool,
-    open_layer: Option<u32>,
+    pub(super) open_layer: Option<u32>,
     scroll_to_top: bool,
     error: String,
     reset_inserts: bool,
@@ -277,24 +277,7 @@ impl App {
         drawer: Option<usize>,
         ctx: &egui::Context,
     ) {
-        if member >= self.members.len() {
-            return;
-        }
-        self.commit_member();
-        if self.member_edit_baseline.is_none() {
-            self.member_edit_baseline = Some(self.workflow_snapshot());
-        }
-        self.restore_member(member);
-        if let Some(drawer) = drawer
-            && let Some(p) = self.members[member].preset.drawers.get(drawer).cloned()
-        {
-            self.restore_editor(p);
-            self.active_drawer = Some(drawer);
-        }
-        self.preview_modes.mode = super::preview_modes::Mode::Assembly;
-        self.tab = 0;
-        self.tower.print_list = false;
-        self.assembly(ctx);
+        self.open_inline_target(member, drawer, ctx);
     }
     fn tower_snapshot(&mut self) -> CombinationPreset {
         self.commit_member();
@@ -542,7 +525,7 @@ impl App {
 }
 
 #[derive(Clone)]
-enum Action {
+pub(super) enum Action {
     Resize(String, u8),
     Row(u32, String, bool),
     Duplicate(u32),
@@ -552,7 +535,6 @@ enum Action {
     Kind(usize, AssemblyKind),
     Pattern(usize, Vec<String>),
     Edit(usize, Option<usize>),
-    Label(usize, Option<usize>),
     Accessories(usize),
     Roof(usize, crate::catalog::exterior::Roof),
     RoofLayout(roofs::Layout),
@@ -560,16 +542,19 @@ enum Action {
     Base(usize, crate::catalog::exterior::Base),
 }
 impl App {
-    fn tower_action(&mut self, action: Action, ctx: &egui::Context) -> Result<(), String> {
+    pub(super) fn tower_action(
+        &mut self,
+        action: Action,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        if !matches!(action, Action::Edit(..)) {
+            self.close_inline_editor(ctx);
+        }
         self.commit_member();
         let reset = self.tower.reset_inserts;
         match action {
-            Action::Edit(i, d) | Action::Label(i, d) => {
-                let label = matches!(action, Action::Label(..));
+            Action::Edit(i, d) => {
                 self.tower_edit_slot(i, d, ctx);
-                if label {
-                    self.label_open = true;
-                }
                 return Ok(());
             }
             Action::Accessories(i) => {
@@ -1002,21 +987,7 @@ impl App {
                     "{}{} {}",
                     p.selection.width, p.selection.depth, p.selection.height
                 ));
-                ui.horizontal_wrapped(|ui| {
-                    for (kind, label) in [
-                        (AssemblyKind::Drawer, t(z, "抽屉", "Drawer")),
-                        (AssemblyKind::Sustainer, t(z, "箱子", "Box")),
-                    ] {
-                        if ui
-                            .selectable_label(p.assembly_kind == kind, label)
-                            .clicked()
-                            && kind != p.assembly_kind
-                        {
-                            *action = Some(Action::Kind(index, kind));
-                        }
-                    }
-                });
-                if p.assembly_kind == AssemblyKind::Drawer {
+                if p.assembly_kind == AssemblyKind::Drawer && p.selection.height != "1F" {
                     let parts = if p.drawers.is_empty() {
                         vec![p.selection.height.clone()]
                     } else {
@@ -1067,42 +1038,64 @@ impl App {
                 };
                 for (drawer, p) in cells {
                     ui.push_id(drawer, |ui| {
-                        ui.separator();
-                        if let Some(d) = drawer {
-                            ui.strong(format!(
-                                "{} {} · {}",
-                                t(z, "抽屉", "Drawer"),
-                                d + 1,
-                                p.selection.height
-                            ));
-                        }
-                        let interior = if !p.gridfinity.bins.is_empty() {
-                            t(z, "Gridfinity 收纳", "Gridfinity bins")
+                        ui.add_space(5.);
+                        let interior = if p
+                            .bom
+                            .iter()
+                            .any(|b| b.enabled && b.path.contains("/Gridfinity Baseplate/"))
+                        {
+                            t(z, "平底 · Gridfinity", "Flat · Gridfinity")
                         } else if p.divider_layout.enabled || !p.sustainer_dividers.items.is_empty()
                         {
-                            t(z, "收纳隔板", "Dividers")
+                            t(z, "分隔板", "Dividers")
                         } else {
-                            t(z, "无内部配置", "No inserts")
+                            t(z, "平底", "Flat")
                         };
-                        if ui
-                            .button(format!("{} · {interior}…", t(z, "内部", "Interior")))
-                            .clicked()
-                        {
-                            *action = Some(Action::Edit(index, drawer));
-                        }
                         let label = if p.label.active() {
                             p.label.text.replace('\n', " / ")
                         } else {
-                            t(z, "空白", "Blank").into()
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(format!("{} · {label}…", t(z, "标牌", "Label")))
-                                    .truncate(),
+                            format!(
+                                "{}{}-{}",
+                                p.selection.width, p.selection.depth, p.selection.height
                             )
+                        };
+                        let selected = self.inline_edit.open
+                            && self.inline_edit.target
+                                == Some(crate::scene::Target {
+                                    member: index,
+                                    drawer,
+                                });
+                        let response =
+                            layers::surface(ui, "interior-summary", selected, false, |ui| {
+                                ui.horizontal(|ui| {
+                                    if let Some(d) = drawer {
+                                        ui.strong(format!(
+                                            "{} {} · {}",
+                                            t(z, "抽屉", "Drawer"),
+                                            d + 1,
+                                            p.selection.height
+                                        ));
+                                    }
+                                    ui.label(format!(
+                                        "{} · {interior}",
+                                        if p.assembly_kind == AssemblyKind::Drawer {
+                                            t(z, "抽屉", "Drawer")
+                                        } else {
+                                            t(z, "翻盖箱", "Box")
+                                        }
+                                    ));
+                                });
+                                ui.add(
+                                    egui::Label::new(RichText::new(format!("◇ {label}")).weak())
+                                        .truncate(),
+                                );
+                            });
+                        if response
+                            .response
+                            .on_hover_text(t(z, "编辑内部和标签", "Edit interior and label"))
                             .clicked()
                         {
-                            *action = Some(Action::Label(index, drawer));
+                            *action = Some(Action::Edit(index, drawer));
                         }
                     });
                 }
@@ -1482,7 +1475,7 @@ impl App {
             return;
         }
         self.smoke_frame += 1;
-        if self.smoke_frame == 5 {
+        if self.smoke_frame == 5 && !self.inline_edit.open {
             self.preview_mode_fit();
         }
         if self.smoke_frame >= 10 && !self.screenshot_requested {
@@ -1524,8 +1517,64 @@ impl App {
             {
                 return Err("Incorrect layer shells".into());
             }
+            if [2, 12, 15].contains(&self.smoke_stage) {
+                if !self.combination_view
+                    || self.scene_key != "combination"
+                    || !self.inline_edit.open
+                    || self.inline_edit.target
+                        != Some(crate::scene::Target {
+                            member: 3,
+                            drawer: Some(1),
+                        })
+                    || self
+                        .scene
+                        .parts
+                        .iter()
+                        .filter(|p| p.pose.path.contains("/Modules/"))
+                        .count()
+                        != 6
+                {
+                    return Err(
+                        "Inline editing replaced the full assembly or lost its subdrawer target"
+                            .into(),
+                    );
+                }
+                if self.members[3].preset.drawers[0].label.text != "BIN A" {
+                    return Err("Subdrawer editing changed its sibling label".into());
+                }
+            }
             if self.smoke_stage == 2 && !self.label_open {
                 return Err("Subdrawer label editor did not open".into());
+            }
+            if [3, 13, 16].contains(&self.smoke_stage) && self.inline_edit.open {
+                return Err("Inline editor did not close when leaving configuration".into());
+            }
+            if [19, 20].contains(&self.smoke_stage) {
+                let target = crate::scene::Target {
+                    member: 3,
+                    drawer: Some(if self.smoke_stage == 19 { 1 } else { 0 }),
+                };
+                if self.scene_key != "combination"
+                    || !self.combination_view
+                    || self.inline_edit.target != Some(target)
+                    || self
+                        .scene
+                        .parts
+                        .iter()
+                        .filter(|p| p.pose.path.contains("/Modules/"))
+                        .count()
+                        != 6
+                {
+                    return Err("Path focus or target switch replaced the assembly scene".into());
+                }
+                if self.smoke_stage == 19
+                    && !self
+                        .selected
+                        .and_then(|i| self.scene.parts.get(i))
+                        .is_some_and(|p| target.contains(p) && p.pose.path == crate::label::PATH)
+                {
+                    return Err("Label focus selected the wrong repeated source instance".into());
+                }
             }
             if self.smoke_stage == 4 {
                 let layout = self.preview_modes.layout.as_ref().unwrap();
@@ -1612,8 +1661,25 @@ impl App {
                 Ok(())
             }
             12 => {
+                let overview = self.inline_edit.overview.clone();
+                self.close_inline_editor(ctx);
                 self.tower.print_list = true;
-                Ok(())
+                if let Some((camera, ghost)) = overview {
+                    if self.camera.center != camera.center
+                        || self.camera.radius != camera.radius
+                        || self.camera.zoom != camera.zoom
+                        || self.camera.pan != camera.pan
+                        || self.camera.yaw != camera.yaw
+                        || self.camera.pitch != camera.pitch
+                        || self.ghost != ghost
+                    {
+                        Err("Closing inline editing did not restore the overview camera".into())
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Err("Inline editing lost the overview camera".into())
+                }
             }
             13 => {
                 self.tower.show_parts = true;
@@ -1622,6 +1688,7 @@ impl App {
             14 => {
                 self.tower.show_parts = false;
                 self.tower.print_list = false;
+                self.tower_edit_slot(3, Some(1), ctx);
                 self.zh = false;
                 Ok(())
             }
@@ -1639,6 +1706,20 @@ impl App {
                 self.tab = 0;
                 Ok(())
             }
+            18 if workspace_smoke => {
+                self.tower.print_list = false;
+                self.tower_edit_slot(3, Some(1), ctx);
+                self.single(crate::label::PATH.into(), ctx);
+                Ok(())
+            }
+            19 => {
+                self.tower_edit_slot(3, Some(0), ctx);
+                Ok(())
+            }
+            20 => {
+                self.close_inline_editor(ctx);
+                Ok(())
+            }
             _ => {
                 let result = (|| -> Result<(), String> {
                     if rows(&self.members)?.len() != 3 {
@@ -1653,7 +1734,7 @@ impl App {
                         toml::from_str(&text).map_err(|e| e.to_string())?;
                     restored.validate(&self.catalog)?;
                     std::fs::write(folder.join("project.toml"), text).map_err(|e| e.to_string())?;
-                    std::fs::write(folder.join("smoke-result.txt"),"PASS: consistent configuration / print-list navigation, single-drawer editor and checklist, optional properties, English minimum-size editor, minimum-size project checklist and library, layer cards, common XL5 footprint, independent S+M cells, shared 2F housing / two 1F drawers, label editing, print list, print plates, project switching, layer duplication, undo, full and partial combination explosion, closed-view return and TOML roundtrip. All source geometry remains read-only; assembly estimates unverified.").map_err(|e|e.to_string())
+                    std::fs::write(folder.join("smoke-result.txt"),"PASS: one full assembly viewport during inline subdrawer editing, unchanged sibling label, target identity preserved, editor closed on navigation, English minimum-size floating editor, configuration / print-list navigation, optional properties, minimum-size project checklist and library, layer cards, common XL5 footprint, independent S+M cells, shared 2F housing / two 1F drawers, label editing, print plates, project switching, layer duplication, undo, full and partial combination explosion and TOML roundtrip. All source geometry remains read-only; assembly estimates unverified.").map_err(|e|e.to_string())
                 })();
                 if let Err(e) = result {
                     let _ = std::fs::write(folder.join("smoke-error.txt"), e);

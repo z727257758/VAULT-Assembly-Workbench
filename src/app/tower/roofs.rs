@@ -4,7 +4,7 @@ use crate::catalog::exterior::Roof;
 mod smoke;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Layout {
+pub(in crate::app) enum Layout {
     Whole,
     Apart,
 }

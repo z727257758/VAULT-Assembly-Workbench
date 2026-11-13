@@ -200,15 +200,18 @@ impl App {
         }
     }
     pub(super) fn commit_member(&mut self) {
-        if !self.members.is_empty() {
-            if let Some(drawer) = self.active_drawer {
-                self.members[self.active_member].preset.drawers[drawer] = self.member_snapshot();
-            } else {
-                self.members[self.active_member].preset = self.member_snapshot();
-            }
-        }
+        let preset = self.member_snapshot();
+        super::inline_edit::store_target(
+            &mut self.members,
+            crate::scene::Target {
+                member: self.active_member,
+                drawer: self.active_drawer,
+            },
+            preset,
+        );
     }
     fn close_member_editors(&mut self) {
+        self.inline_edit = Default::default();
         self.exterior_edit = None;
         self.gridfinity_open = false;
         self.label_open = false;
@@ -262,6 +265,11 @@ impl App {
         }
     }
     pub(super) fn show_combination(&mut self, ctx: &egui::Context) {
+        if self.inline_edit.open {
+            self.close_inline_editor(ctx);
+            self.tab = 0;
+            return;
+        }
         self.remember_combination_view();
         self.tab = 0;
         self.commit_member();
@@ -291,6 +299,11 @@ impl App {
     }
     /// Switch the editor context while keeping the combined scene and camera in place.
     pub(super) fn select_member_in_combination(&mut self, index: usize, ctx: &egui::Context) {
+        if self.inline_edit.open && index < self.members.len() {
+            let drawer = (!self.members[index].preset.drawers.is_empty()).then_some(0);
+            self.open_inline_target(index, drawer, ctx);
+            return;
+        }
         if index >= self.members.len()
             || (index == self.active_member && self.active_drawer.is_none())
         {
@@ -315,6 +328,13 @@ impl App {
             .checked_sub(1)
             .map(|d| d as usize);
         if member >= self.members.len() || self.busy || self.preview.has_pending() {
+            return;
+        }
+        if self.inline_edit.open {
+            let drawer =
+                drawer.or_else(|| (!self.members[member].preset.drawers.is_empty()).then_some(0));
+            self.open_inline_target(member, drawer, ctx);
+            self.selected = Some(index);
             return;
         }
         self.commit_member();
@@ -345,26 +365,13 @@ impl App {
         }
     }
     pub(super) fn focus_member(&mut self, ctx: &egui::Context) {
-        if self
-            .members
-            .get(self.active_member)
-            .is_some_and(|m| !m.preset.drawers.is_empty())
-        {
-            self.tower_edit_slot(self.active_member, self.active_drawer.or(Some(0)), ctx);
-            return;
-        }
         if self.members.is_empty() {
             return;
         }
-        self.remember_combination_view();
-        self.tab = 0;
-        self.tower.print_list = false;
-        self.commit_member();
-        self.restore_member(self.active_member);
-        if self.member_edit_baseline.is_none() {
-            self.member_edit_baseline = Some(self.workflow_snapshot());
-        }
-        self.assembly(ctx);
+        let drawer = self
+            .active_drawer
+            .or_else(|| (!self.members[self.active_member].preset.drawers.is_empty()).then_some(0));
+        self.tower_edit_slot(self.active_member, drawer, ctx);
     }
     fn remove_member(&mut self, ctx: &egui::Context) {
         self.remove_members(&[self.active_member], ctx);
@@ -867,7 +874,12 @@ impl App {
         ));
     }
     pub(super) fn paint_active_member(&self, ui: &egui::Ui, rect: egui::Rect) {
-        let Some(&(lo, hi)) = self.scene.member_bounds.get(self.active_member) else {
+        let bounds = if let Some(target) = self.inline_edit.target {
+            self.scene.target_envelope(target)
+        } else {
+            self.scene.member_bounds.get(self.active_member).copied()
+        };
+        let Some((lo, hi)) = bounds else {
             return;
         };
         if self.explosion > 0.001 {

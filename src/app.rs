@@ -2,6 +2,7 @@ mod appearance;
 mod color_preview;
 mod combination;
 mod exterior_smoke;
+mod inline_edit;
 mod large_stl_smoke;
 mod preview_modes;
 mod recipes;
@@ -152,6 +153,7 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    inline_edit: inline_edit::State,
     appearance: appearance::Appearance,
     tower: tower::State,
     active_drawer: Option<usize>,
@@ -286,6 +288,7 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            inline_edit: Default::default(),
             appearance,
             tower: Default::default(),
             active_drawer: None,
@@ -767,6 +770,10 @@ impl App {
         );
     }
     fn single(&mut self, path: String, ctx: &egui::Context) {
+        if self.inline_edit.open {
+            self.focus_preview_path(path, ctx);
+            return;
+        }
         self.combination_view = false;
         let name = crate::accessories::info(&path, self.zh)
             .map(|m| m.name)
@@ -1093,6 +1100,7 @@ impl App {
         }
     }
     fn open_asset(&mut self, path: &str, ctx: &egui::Context) {
+        self.close_inline_editor(ctx);
         if path.to_lowercase().ends_with(".stl") {
             self.single(path.into(), ctx);
         } else if path.to_lowercase().ends_with(".pdf") {
@@ -1250,95 +1258,7 @@ impl App {
                 if self.tab == 0 {
                     if self.tower.print_list { self.member_print_list(ui, ctx); return; }
                     if self.combination_view {return;}
-                    if self.assembly_kind==AssemblyKind::Sustainer {
-                        ui.strong(t(z,"箱子内部配置","Box inserts"));
-                        let supported=crate::sustainer_dividers::supported(&self.selection,self.sustainer_options);
-                        if !supported {ui.small(t(z,"展开下方“结构与装配选项”，将箱体切换为隔板槽或密封分区。","Open Structure & assembly options below and choose a Dividers or Sealed body."));}
-                        ui.add_enabled_ui(supported,|ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                if ui.button(t(z,"配置收纳隔板…","Configure dividers…")).clicked() {self.sustainer_divider_editor.open=true;}
-                                if ui.add_enabled(!self.sustainer_dividers.items.is_empty(),egui::Button::new(t(z,"移除全部隔板","Remove all dividers"))).clicked() {
-                                    self.sustainer_dividers.items.clear();self.sustainer_divider_editor.reset();self.assembly(ctx);
-                                }
-                            });
-                            ui.label(format!("{} {}",self.sustainer_dividers.items.len(),t(z,"块收纳隔板","storage dividers")));
-                        });
-                    }
-                    if self.assembly_kind==AssemblyKind::Drawer {
-                    ui.strong(t(z, "抽屉内部配置", "Drawer inserts"));
-                    let has_dividers=self.divider_layout.enabled || self.bom.iter().any(|b|b.enabled && b.path.contains("/Grid Dividers/"));
-                    let mut mode=if has_dividers {2} else if self.bom.iter().any(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")) {1} else {0};
-                    let previous=mode;
-                    let baseplate=self.catalog.accessories(&self.selection).into_iter()
-                        .filter(|e|e.path.contains("/Gridfinity Baseplate/"))
-                        .min_by_key(|e|e.path.contains("Handle"))
-                        .map(|e|e.path.clone());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.radio_value(&mut mode,0,t(z,"无内部配置","None"));
-                        ui.add_enabled_ui(baseplate.is_some(),|ui| {ui.radio_value(&mut mode,1,t(z,"Gridfinity 收纳","Gridfinity storage"));});
-                        ui.add_enabled_ui(crate::dividers::Grid::new(&self.selection).is_ok(),|ui| {ui.radio_value(&mut mode,2,t(z,"收纳隔板","Storage dividers"));});
-                    });
-                    if mode!=previous {
-                        self.divider_layout.remove(&mut self.bom,&self.selection);
-                        for b in &mut self.bom {
-                            if b.path.contains("/Gridfinity Baseplate/") {b.enabled=false;}
-                        }
-                        self.layout_cache.remove(&crate::dividers::spec(&self.selection));
-                        self.divider_editor.open=false;
-                        self.divider_editor.reset();
-                        if mode==1 {
-                            if let Some(path)=baseplate {self.select_accessory(path,true,1);}
-                        } else if mode==2 {
-                            self.divider_layout.enabled=true;
-                        }
-                        self.assembly(ctx);
-                    }
-                    ui.label(RichText::new(t(z,"底板与隔板互斥，切换会移除当前内部配置。","Baseplates and dividers are exclusive. Switching removes the current insert.")).small().color(Color32::GRAY));
-                    if mode==2 {
-                        ui.horizontal_wrapped(|ui| {
-                            let label=if self.divider_layout.items.is_empty() {t(z,"添加收纳隔板","Add storage dividers")} else {t(z,"编辑收纳隔板","Edit storage dividers")};
-                            if ui.button(label).clicked() {self.divider_editor.open=true;}
-                            if ui.button(t(z,"移除收纳隔板","Remove storage dividers")).clicked() {self.remove_dividers(ctx);}
-                        });
-                        ui.label(format!("{} {}",self.divider_layout.items.len(),t(z,"块收纳隔板","storage dividers")));
-                    }
-                    if mode==1 {
-                        let plates: Vec<_> = self.catalog.accessories(&self.selection).into_iter()
-                            .filter(|e|e.path.contains("/Gridfinity Baseplate/")).collect();
-                        let variant_name = |path: &str| {
-                            if path.contains("2 Handles") {t(z,"双提手","Two handles")}
-                            else if path.contains("1 Handle") {t(z,"单提手","One handle")}
-                            else {t(z,"标准版","Standard")}
-                        };
-                        let current=self.bom.iter().find(|b|b.enabled && b.path.contains("/Gridfinity Baseplate/")).map(|b|b.path.clone()).unwrap_or_default();
-                        let mut chosen=current.clone();
-                        ui.label(t(z,"底板类型","Baseplate type"));
-                        egui::ComboBox::from_id_salt("gridfinity-baseplate-type")
-                            .width(ui.available_width())
-                            .selected_text(variant_name(&current))
-                            .show_ui(ui,|ui| {
-                                for plate in &plates {ui.selectable_value(&mut chosen,plate.path.clone(),variant_name(&plate.path));}
-                            });
-                        if chosen!=current {
-                            let mut candidate=self.gridfinity.clone();candidate.baseplate=chosen.clone();
-                            match candidate.validate(&self.selection) {
-                                Ok(())=>{self.select_accessory(chosen,true,1);self.assembly(ctx);self.gridfinity_error=None;}
-                                Err(e)=>{self.gridfinity_error=Some(format!("{e}；请先调整盒子布局"));}
-                            }
-                        }
-                        if let Ok(grid)=crate::gridfinity::grid_for(&self.selection,&self.gridfinity.baseplate) {
-                            ui.small(format!("{} × {} {} · {}",grid[0],grid[1],t(z,"格","cells"),t(z,"底板随抽屉规格匹配","Baseplate follows drawer size")));
-                        }
-                        if let Some(error)=&self.gridfinity_error {ui.colored_label(Color32::LIGHT_RED,error);}
-                        ui.add_space(6.);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add_enabled(crate::gridfinity::grid(&self.selection).is_ok(),egui::Button::new(t(z,"编辑 Gridfinity 盒子","Edit Gridfinity bins"))).clicked() {self.gridfinity_open=true;}
-                            if !self.gridfinity.bins.is_empty() && ui.button(t(z,"移除全部盒子","Remove all bins")).clicked(){self.gridfinity.bins.clear();self.assembly(ctx);}
-                        });
-                        ui.label(format!("{} {}",self.gridfinity.bins.len(),t(z,"个盒子","bins")));
-                        ui.small(t(z,"盒高默认随层高配置，可在编辑器中调整。","Bin heights follow the drawer by default; adjust them in the editor."));
-                    }
-                    }
+                    self.inserts_ui(ui,ctx);
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.strong(t(z,"标签文字","Label text"));
@@ -1755,7 +1675,13 @@ impl App {
     fn interior_scene(&self) -> Scene {
         let mut scene = self.scene.clone();
         for p in &mut scene.parts {
-            p.visible = crate::dividers::interior_part(&p.pose.path);
+            p.visible = crate::dividers::interior_part(&p.pose.path)
+                && (self.scene_key != "combination"
+                    || crate::scene::Target {
+                        member: self.active_member,
+                        drawer: self.active_drawer,
+                    }
+                    .contains(p));
         }
         scene
     }
@@ -1763,6 +1689,9 @@ impl App {
         self.divider_editor.open || self.sustainer_divider_editor.open
     }
     fn divider_view(&mut self, ctx: &egui::Context) {
+        if self.scene_key == "combination" {
+            return;
+        }
         if self.interior_editor_open() {
             if !self.scene.assembly {
                 if !self.preview.has_pending()
@@ -2165,6 +2094,7 @@ impl App {
             .show(ctx, |ui| {
                 appearance::paint_stage(ui, ui.max_rect());
                 self.stage_controls(ctx, ui.max_rect());
+                self.inline_editor_ui(ctx, ui.max_rect());
                 if self.preview_modes_ui(ui, ctx) {
                     return;
                 }
@@ -2326,7 +2256,9 @@ impl App {
                                     })
                                     .and_then(|(path, instance)| {
                                         self.scene.parts.iter().position(|p| {
-                                            p.pose.path == path && p.pose.instance == instance
+                                            p.pose.path == path
+                                                && p.pose.instance
+                                                    == self.local_scene_instance(instance)
                                         })
                                     })
                             } else if self.interior_editor_open() {
@@ -2334,14 +2266,18 @@ impl App {
                                     .selected_part(&self.divider_layout)
                                     .and_then(|(path, instance)| {
                                         self.scene.parts.iter().position(|p| {
-                                            p.pose.path == path && p.pose.instance == instance
+                                            p.pose.path == path
+                                                && p.pose.instance
+                                                    == self.local_scene_instance(instance)
                                         })
                                     })
                             } else {
                                 self.selected
                             },
                             ghost: self.ghost,
-                            interior_only: self.interior_editor_open() && self.scene.assembly,
+                            interior_only: self.interior_editor_open()
+                                && self.scene.assembly
+                                && self.scene_key != "combination",
                             colliding: self
                                 .collision_report
                                 .as_ref()
@@ -2358,7 +2294,9 @@ impl App {
                     );
                     if self.scene_key == "combination" && self.explosion == 0. {
                         self.paint_active_member(ui, rect);
-                        self.paint_spatial_dimensions(ui, rect);
+                        if !self.inline_edit.open {
+                            self.paint_spatial_dimensions(ui, rect);
+                        }
                     }
                     if self.export_options.plate.preview_colors
                         && self.scene_key != "combination"
@@ -2809,7 +2747,7 @@ impl App {
                         draft.bins.retain(|b| Some(b.id) != selected);
                         selected = None;
                     }
-                    if ui.button("查看底板与盒子").clicked() {
+                    if ui.button("特写底板与盒子").clicked() {
                         focus = true;
                     }
                     if ui.button("取消选择").clicked() {
@@ -2846,7 +2784,7 @@ impl App {
                             crate::label::stroke_check_ui(ui,&b.label);
                         }
                     }
-                    if ui.button("单独预览此盒子").clicked() {preview=Some(b.path());}
+                    if ui.button("特写此盒子").clicked() {preview=Some(b.path());}
                 }
                 // Any newly entered script requiring a larger minimum font size raises
                 // the shared size for the whole layout, never an individual override.
@@ -2887,7 +2825,9 @@ impl App {
         if let Some(path) = preview {
             self.single(path, ctx);
         }
-        if focus {
+        if focus && self.combination_view {
+            self.inline_edit.pending_focus = true;
+        } else if focus {
             for p in &mut self.scene.parts {
                 p.visible = p.pose.path.contains("/Boxes/")
                     || p.pose.path.contains("/Gridfinity Baseplate/")
@@ -2939,7 +2879,7 @@ impl App {
                     });
                 });
                 ui.horizontal(|ui|{
-                    if ui.button(t(z,"单独预览标签","Preview label")).clicked(){preview=true;}
+                    if ui.button(t(z,"特写标签","Focus label")).clicked(){preview=true;}
                     if ui.button(t(z,"恢复空白标签","Restore blank label")).clicked(){self.label=Default::default();}
                 });
                 if self.label.style == crate::label::Style::Flat {
@@ -3234,6 +3174,11 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.tower_tick(ctx);
+        if self.inline_edit.open
+            && (self.tab != 0 || self.tower.print_list || self.preview_modes.special())
+        {
+            self.close_inline_editor(ctx);
+        }
         self.workspace_toolbar(ctx);
         self.left(ctx);
         self.divider_view(ctx);
@@ -3284,7 +3229,7 @@ impl eframe::App for App {
             &self.catalog,
             &self.selection,
             self.sustainer_options,
-            self.scene.sustainer_interior.as_deref(),
+            self.scene.interior_geometry(self.active_member),
             &mut self.sustainer_dividers,
         ) {
             self.assembly(ctx);

@@ -1,8 +1,10 @@
 pub mod drawers;
 mod exterior;
 pub mod layouts;
+mod target;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
 use glam::{Mat4, Quat, Vec3};
+pub(crate) use target::Target;
 const MAX_SCENE_TRIANGLES: usize = 16_000_000;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -82,6 +84,7 @@ pub struct Scene {
     /// Closed, world-axis envelopes measured from actual vertices on the worker.
     pub member_bounds: Vec<(Vec3, Vec3)>,
     pub sustainer_interior: Option<Box<crate::sustainer_dividers::Geometry>>,
+    pub member_interiors: Vec<Option<Box<crate::sustainer_dividers::Geometry>>>,
     pub title: String,
     pub parts: Vec<Part>,
     pub calibrated: bool,
@@ -407,6 +410,7 @@ impl Scene {
         let mut scene = Self {
             member_bounds: Vec::new(),
             sustainer_interior: None,
+            member_interiors: Vec::new(),
             title,
             parts,
             calibrated: !assembly,
@@ -1063,6 +1067,9 @@ impl Scene {
                 closed_hi = closed_hi.max(hi + shift);
             }
             result.member_bounds.push((closed_lo, closed_hi));
+            result
+                .member_interiors
+                .push(scene.sustainer_interior.take());
             if crate::sustainer::lid_angle(&scene).is_some() {
                 crate::sustainer::set_lid_angle(&mut scene, angle)?;
             }
@@ -1088,6 +1095,89 @@ impl Scene {
 #[cfg(test)]
 mod combination_tests {
     use super::*;
+    #[test]
+    fn detail_target_keeps_repeated_sources_separate_inside_shared_housing() {
+        let mut scene = unit_scene();
+        let shell = scene.parts[0].clone();
+        scene.parts = vec![shell.clone(); 4];
+        let target = Target {
+            member: 5,
+            drawer: Some(1),
+        };
+        for (part, owner) in scene.parts.iter_mut().zip([
+            Target {
+                member: 5,
+                drawer: None,
+            },
+            Target {
+                member: 5,
+                drawer: Some(0),
+            },
+            target,
+            Target {
+                member: 6,
+                drawer: Some(1),
+            },
+        ]) {
+            part.pose.instance = owner.instance(2);
+            part.pose.position = [part.pose.instance as f32, 20., 30.];
+        }
+        let detail = scene.target_scene(target);
+        assert_eq!(detail.parts.len(), 1);
+        assert_eq!(Target::of(&detail.parts[0]), target);
+        let (lo, hi) = scene.target_envelope(target).unwrap();
+        assert_eq!(lo, Vec3::new(target.instance(2) as f32, 20., 30.));
+        assert_eq!(hi - lo, shell.mesh.size);
+        assert_eq!(
+            scene
+                .target_scene(Target {
+                    member: 5,
+                    drawer: None
+                })
+                .parts
+                .len(),
+            3
+        );
+        assert_eq!(scene.parts.len(), 4);
+        assert!(scene.parts.iter().all(|p| p.visible));
+    }
+    #[test]
+    fn combined_insert_editors_keep_each_members_local_geometry() {
+        let mut source = unit_scene();
+        source.sustainer_interior = Some(Box::new(crate::sustainer_dividers::Geometry {
+            floor: 7.,
+            specification: "first".into(),
+            ..Default::default()
+        }));
+        let mut second = unit_scene();
+        second.sustainer_interior = Some(Box::new(crate::sustainer_dividers::Geometry {
+            floor: 11.,
+            specification: "second".into(),
+            ..Default::default()
+        }));
+        let combined = Scene::combine(
+            vec![
+                (source, Placement::default(), 0.),
+                (
+                    second,
+                    Placement {
+                        level: 1,
+                        ..Default::default()
+                    },
+                    0.,
+                ),
+            ],
+            0.,
+        )
+        .unwrap();
+        assert_eq!(combined.interior_geometry(0).unwrap().floor, 7.);
+        assert_eq!(combined.interior_geometry(1).unwrap().floor, 11.);
+        assert_eq!(
+            combined.interior_geometry(1).unwrap().specification,
+            "second"
+        );
+        assert!(combined.interior_geometry(2).is_none());
+    }
     #[test]
     fn displayed_dimensions_measure_rotated_vertices_instead_of_rotated_aabb() {
         let mut source = unit_scene();
