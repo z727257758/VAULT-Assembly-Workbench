@@ -81,6 +81,10 @@ pub struct Part {
 }
 #[derive(Clone, Default)]
 pub struct Scene {
+    /// Runtime layout metadata used to regenerate per-member display movement.
+    pub member_placements: Vec<Placement>,
+    /// Upper member -> supporting members, supplied by the validated assembly layout.
+    pub member_supports: Vec<Vec<usize>>,
     /// Closed, world-axis envelopes measured from actual vertices on the worker.
     pub member_bounds: Vec<(Vec3, Vec3)>,
     pub sustainer_interior: Option<Box<crate::sustainer_dividers::Geometry>>,
@@ -277,110 +281,12 @@ impl Scene {
                 cache.insert(item.path.clone(), loader.source(&item.path)?);
             }
         }
-        let module = items
-            .iter()
-            .find(|i| i.name().contains(" Module "))
-            .and_then(|i| cache.get(&i.path));
-        let size = module.map(|m| m.size).unwrap_or(Vec3::new(160., 60., 150.));
-        let (w, h, d) = (size.x, size.y, size.z);
         let mut parts = Vec::new();
         for item in items.iter().filter(|i| i.enabled) {
             let mesh = cache.get(&item.path).unwrap();
             let bodies = loader.prepared(&item.path, assembly)?;
             for copy in 0..item.qty.min(100) {
-                for (body_index, body) in bodies.iter().enumerate() {
-                    let display_index = copy as usize * bodies.len() + body_index;
-                    let side = if display_index.is_multiple_of(2) {
-                        -1.
-                    } else {
-                        1.
-                    };
-                    let n = item.name();
-                    let mut pos = Vec3::ZERO;
-                    let mut rot = Vec3::ZERO;
-                    let mut travel = Vec3::ZERO;
-                    let mut color = [0.65, 0.58, 0.85, 1.];
-                    if assembly {
-                        if n.contains(" Module ") {
-                            rot.x = 90.;
-                            travel = Vec3::new(0., h * 0.9, -d * 0.5);
-                            color = [0.33, 0.54, 0.72, 1.];
-                        } else if n.contains("Box") || n.contains("Back Panel") {
-                            pos.y = -h * 0.1;
-                            travel.z = d * 0.35;
-                            color = [0.45, 0.70, 0.60, 1.];
-                            if n.contains("Part 1") {
-                                pos.z = -d * 0.22;
-                            }
-                            if n.contains("Part 2") || n.contains("Back Panel") {
-                                pos.z = d * 0.22;
-                                travel.z += d * 0.3;
-                            }
-                        } else if n.contains("Roof") {
-                            rot = Vec3::new(90., -45., 0.);
-                            pos.y = h * 0.5 + 6.;
-                            travel.y = h * 2.;
-                            color = [0.80, 0.84, 0.88, 1.];
-                        } else if n.contains("Runner Guide") || n.contains("Runner Slide") {
-                            rot.z = side * 90.;
-                            pos = Vec3::new(side * (w * 0.5 - 9.), -h * 0.2, 0.);
-                            travel = Vec3::new(
-                                side * w * if n.contains("Guide") { 0.65 } else { 0.35 },
-                                0.,
-                                d * 0.25,
-                            );
-                            color = if n.contains("Guide") {
-                                [0.78, 0.82, 0.88, 1.]
-                            } else {
-                                [0.30, 0.68, 0.73, 1.]
-                            };
-                        } else if n.contains("Rails") {
-                            rot.x = 90.;
-                            pos = Vec3::new(0., side * h * 0.22, d * 0.46);
-                            travel = Vec3::new(0., side * h * 0.9, d * 0.65);
-                            color = [0.87, 0.57, 0.28, 1.];
-                        } else if item.path.contains("/Facades/") {
-                            rot.x = 90.;
-                            pos.z = d * 0.52;
-                            travel.z = d * 0.9;
-                            color = [0.80, 0.84, 0.88, 1.];
-                        } else if n.contains("Stopper") {
-                            pos = Vec3::new(side * (w * 0.5 - 8.), -h * 0.3, d * 0.47);
-                            travel = Vec3::new(side * w * 0.85, -h * 0.5, d * 0.8);
-                            color = [0.88, 0.60, 0.32, 1.];
-                        } else if n.contains("Springs") {
-                            rot.x = 90.;
-                            pos = Vec3::new(side * w * 0.24, 0., d * 0.53);
-                            travel = Vec3::new(side * w * 0.45, h * 0.8, d * 1.1);
-                            color = [0.88, 0.60, 0.32, 1.];
-                        } else if n.contains("Latch") {
-                            pos.y = h * 0.5;
-                            travel = Vec3::new(0., h * 1.5, -d * 0.5);
-                            color = [0.88, 0.60, 0.32, 1.];
-                        } else if item.group == "Key" || item.group == "Mechanism" {
-                            rot.x = 90.;
-                            let slot = if n.contains("Label") {
-                                0.
-                            } else if n.contains("Facade Cap") {
-                                1.
-                            } else if n.contains("Key Cap") {
-                                2.
-                            } else if n.contains("Part 2") {
-                                4.
-                            } else {
-                                3.
-                            };
-                            pos = Vec3::new((slot - 1.5) * w * 0.08, 0., d * 0.55 + slot * 3.);
-                            travel = Vec3::new(
-                                (slot - 1.5) * w * 0.28,
-                                -h * 0.8,
-                                d * (1.1 + slot * 0.12),
-                            );
-                        } else {
-                            pos = Vec3::new(0., -h * 0.25, 0.);
-                            travel = Vec3::new(w * (copy as f32 + 1.), -h, 0.);
-                        }
-                    }
+                for body in bodies.iter() {
                     parts.push(Part {
                         mesh: body.mesh.clone(),
                         source_size: mesh.size,
@@ -390,15 +296,15 @@ impl Scene {
                             instance: copy,
                             body: body.id,
                             position: if assembly {
-                                pos.to_array()
+                                [0.; 3]
                             } else {
                                 body.source_center.to_array()
                             },
-                            rotation: rot.to_array(),
-                            travel: travel.to_array(),
+                            rotation: [0.; 3],
+                            travel: [0.; 3],
                             travel_frame: None,
                         },
-                        color,
+                        color: [0.65, 0.58, 0.85, 1.],
                         visible: true,
                     });
                 }
@@ -408,6 +314,8 @@ impl Scene {
             return Err("No enabled model files".into());
         }
         let mut scene = Self {
+            member_placements: Vec::new(),
+            member_supports: Vec::new(),
             member_bounds: Vec::new(),
             sustainer_interior: None,
             member_interiors: Vec::new(),
@@ -420,11 +328,7 @@ impl Scene {
             mating_checks: Vec::new(),
         };
         if assembly {
-            if crate::sustainer::is_scene(&scene) {
-                crate::sustainer::apply(&mut scene)?;
-                return Ok(scene);
-            }
-            let _ = crate::constraints::basic_relations(&mut scene);
+            crate::constraints::AssemblyRules::initialize(&mut scene, items)?;
         }
         Ok(scene)
     }
@@ -1025,6 +929,7 @@ impl Scene {
                 return Err("同一列和层只能放置一个成员 / Duplicate column and level".into());
             }
             pool.share(scene)?;
+            crate::constraints::AssemblyRules::close_drawers(scene)?;
             if crate::sustainer::lid_angle(scene).is_some() {
                 crate::sustainer::set_lid_angle(scene, 0.)?;
             }
@@ -1067,6 +972,7 @@ impl Scene {
                 closed_hi = closed_hi.max(hi + shift);
             }
             result.member_bounds.push((closed_lo, closed_hi));
+            result.member_placements.push(placement);
             result
                 .member_interiors
                 .push(scene.sustainer_interior.take());
@@ -1081,13 +987,7 @@ impl Scene {
             result.relations.extend(scene.relations);
             result.mating_checks.extend(scene.mating_checks);
         }
-        crate::explosion::space_combination(
-            &mut result,
-            &members
-                .iter()
-                .map(|(_, placement, _)| *placement)
-                .collect::<Vec<_>>(),
-        )?;
+        crate::constraints::AssemblyRules::space_combination(&mut result)?;
         Ok(result)
     }
 }

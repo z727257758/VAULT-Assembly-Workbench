@@ -105,7 +105,13 @@ pub(super) struct State {
     pub(super) overview: Option<(Camera, bool)>,
     pub pending_focus: bool,
     path: Option<String>,
-    viewport: Option<egui::Rect>,
+    pub(super) viewport: Option<egui::Rect>,
+}
+impl State {
+    pub(super) fn clear_focus_request(&mut self) {
+        self.pending_focus = false;
+        self.path = None;
+    }
 }
 pub(super) fn target_preset(members: &[Member], target: Target) -> Option<&Preset> {
     let preset = &members.get(target.member)?.preset;
@@ -126,7 +132,12 @@ pub(super) fn store_target(members: &mut [Member], target: Target, preset: Prese
         member.preset = preset;
     }
 }
-fn fit_detail(camera: &mut Camera, scene: &Scene, viewport: egui::Rect, panel_width: f32) {
+pub(super) fn fit_detail(
+    camera: &mut Camera,
+    scene: &Scene,
+    viewport: egui::Rect,
+    panel_width: f32,
+) {
     camera.fit(scene, 0.);
     let matrix = camera.matrix(viewport.aspect_ratio());
     let mut projected = egui::Rect::NOTHING;
@@ -389,6 +400,7 @@ impl App {
                 return;
             }
         }
+        self.motion_controls_ui(ui, ctx);
         if self.assembly_kind == AssemblyKind::Sustainer {
             let before = self.sustainer_options;
             if matches!(self.selection.width.as_str(), "L" | "XL") {
@@ -441,19 +453,6 @@ impl App {
             } else {
                 self.assembly(ctx);
             }
-        }
-        if self.assembly_kind == AssemblyKind::Sustainer
-            && ui
-                .add(
-                    egui::Slider::new(&mut self.sustainer_angle, 0. ..=110.).text(t(
-                        z,
-                        "开盖 °",
-                        "Lid °",
-                    )),
-                )
-                .changed()
-        {
-            self.assembly(ctx);
         }
         ui.small(t(
             z,

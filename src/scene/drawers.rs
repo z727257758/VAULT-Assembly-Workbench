@@ -8,7 +8,10 @@ fn retain(scene: &mut Scene, housing: bool) {
         .retain(|p| crate::catalog::tower::housing(&p.pose.path) == housing);
     crate::constraints::tower::retain_present(scene);
 }
-pub fn shared_shell(mut shell: Scene, drawers: Vec<(Scene, u8)>) -> Result<Scene, String> {
+pub fn shared_shell(shell: Scene, drawers: Vec<(Scene, u8)>) -> Result<Scene, String> {
+    crate::constraints::AssemblyRules::shared_shell(shell, drawers)
+}
+pub(crate) fn compose(mut shell: Scene, drawers: Vec<(Scene, u8)>) -> Result<Scene, String> {
     retain(&mut shell, true);
     let parent = shell
         .parts
@@ -37,8 +40,11 @@ pub fn shared_shell(mut shell: Scene, drawers: Vec<(Scene, u8)>) -> Result<Scene
             part.pose.position = (Vec3::from(part.pose.position) + shift).to_array();
         }
         crate::constraints::tower::namespace_drawer(&mut scene, index)?;
+        let mounts = crate::constraints::AssemblyRules::drawer_mounts(&scene)?;
         retain(&mut scene, false);
-        crate::constraints::tower::bind_drawer_roots(&mut scene, &parent_id, inverse, index);
+        crate::constraints::tower::bind_drawer_roots(
+            &mut scene, &parent_id, inverse, index, &mounts,
+        )?;
         shell.parts.extend(scene.parts);
         shell.relations.extend(scene.relations);
         shell.mating_checks.extend(scene.mating_checks);

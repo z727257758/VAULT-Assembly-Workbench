@@ -109,7 +109,9 @@ impl Exterior {
                 );
             }
         }
-        if !self.pull_extension.is_finite() || !(0. ..=800.).contains(&self.pull_extension) {
+        if !self.pull_extension.is_finite()
+            || !crate::constraints::AssemblyRules::PULL_EXTENSION.contains(&self.pull_extension)
+        {
             return Err("拉杆伸出量应为 0–800 mm / Invalid handle extension".into());
         }
         if (self.stationary_handle || self.pull_handle || self.board != Board::None)

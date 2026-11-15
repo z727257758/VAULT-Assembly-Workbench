@@ -12,14 +12,7 @@ use std::collections::BTreeMap;
 pub const PREFIX: &str = "02. SUSTAINERS/";
 pub const STACKING_LATCH: &str = "01. DRAWERS/07. Universal/Latch.stl";
 pub fn is_scene(scene: &Scene) -> bool {
-    scene
-        .parts
-        .iter()
-        .any(|p| p.pose.path.starts_with(PREFIX) && p.pose.path.contains("/Modules/"))
-        && scene
-            .parts
-            .iter()
-            .all(|p| p.pose.path.starts_with(PREFIX) || p.pose.path == STACKING_LATCH)
+    constraints::AssemblyRules::family(scene) == constraints::AssemblyKind::Sustainer
 }
 pub const LID: &str = "Sustainer datum: lid / paired hinge axes";
 pub const UPPER_SEAT: &str = "Sustainer datum: upper hinge / roof seat / inside-seat-v5";
@@ -1318,8 +1311,8 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
         if (r.label == LOCK_INNER || r.label == LOCK_OUTER)
             && let Joint::Hinge { min, max, .. } = &mut r.joint
         {
-            *min = -180.;
-            *max = 180.;
+            *min = *constraints::AssemblyRules::LOCK_ANGLE.start();
+            *max = *constraints::AssemblyRules::LOCK_ANGLE.end();
         }
         constraints::add(scene, r)?;
     }
@@ -1539,70 +1532,10 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
 }
 
 pub fn lid_angle(scene: &Scene) -> Option<f32> {
-    scene.relations.iter().find_map(|r| {
-        if r.label == LID {
-            if let Joint::Hinge { angle, .. } = r.joint {
-                Some(angle)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    })
+    constraints::AssemblyRules::lid_angle(scene)
 }
 pub fn set_lid_angle(scene: &mut Scene, value: f32) -> Result<(), String> {
-    if !value.is_finite() || !(0. ..=110.).contains(&value) {
-        return Err("Invalid lid angle".into());
-    }
-    let i = scene
-        .relations
-        .iter()
-        .position(|r| r.label == LID)
-        .ok_or("Sustainer lid is unavailable")?;
-    let closed = constraints::latch_display_pose(
-        scene
-            .parts
-            .iter()
-            .any(|p| p.pose.path.contains("/LOCK OUTER PART 2-4F")),
-        scene
-            .parts
-            .iter()
-            .any(|p| p.pose.path.contains("/Modules/") && p.pose.path.contains("/XL4/")),
-    );
-    let released = constraints::latch_release_pose();
-    let previous: Vec<_> = scene.relations.iter().map(|r| r.joint.clone()).collect();
-    // Select the released display state before any cover lift. Interpolating
-    // the cover through a still-closed clasp produces a real mesh crossing.
-    for (index, r) in scene.relations.iter_mut().enumerate() {
-        if let Joint::Hinge { angle, .. } = &mut r.joint {
-            if index == i {
-                *angle = value;
-            } else if r.label == LOCK_INNER {
-                *angle = if value > 0. {
-                    released.inner_degrees - closed.inner_degrees
-                } else {
-                    0.
-                };
-            } else if r.label == LOCK_OUTER {
-                // The outer joint is relative to the moving inner link.
-                *angle = if value > 0. {
-                    released.outer_degrees
-                        - closed.outer_degrees
-                        - (released.inner_degrees - closed.inner_degrees)
-                } else {
-                    0.
-                };
-            }
-        }
-    }
-    if let Err(e) = constraints::solve(scene) {
-        for (r, joint) in scene.relations.iter_mut().zip(previous) {
-            r.joint = joint;
-        }
-        return Err(e);
-    }
-    reset_explosion(scene)
+    constraints::AssemblyRules::set_lid_angle(scene, value)
 }
 // Bounding projections provide display spacing only, not a surface-interference check.
 fn explosion_projection(part: &Part, axis: Vec3) -> (f32, f32) {
@@ -1646,6 +1579,9 @@ fn explosion_axis(scene: &Scene, index: usize, label: &str, fallback: Vec3) -> V
     })
 }
 pub fn reset_explosion(scene: &mut Scene) -> Result<(), String> {
+    constraints::AssemblyRules::reset_explosion(scene)
+}
+pub(crate) fn layout_explosion(scene: &mut Scene) -> Result<(), String> {
     use constraints::PartId;
     let facade = *indices(scene, "Facade.stl")
         .first()

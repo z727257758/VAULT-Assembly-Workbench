@@ -31,8 +31,8 @@ pub fn prepare(
     // Side-runner alignment sets the floor gap to 2.0 mm; rear gap is 0.7 mm.
     scene.parts[drawer].pose.position = [
         0.,
-        floor + 2.0 + box_half.z * 0.5,
-        back + 0.7 + box_half.y * 0.5,
+        floor + constraints::AssemblyRules::DRAWER_FLOOR_GAP + box_half.z * 0.5,
+        back + constraints::AssemblyRules::DRAWER_REAR_GAP + box_half.y * 0.5,
     ];
     scene.parts[facade].pose.position[1] = floor + (box_half.z + 3.5) * 0.5;
     Ok(())

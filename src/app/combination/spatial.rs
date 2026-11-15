@@ -47,21 +47,10 @@ pub(super) fn position_relative(
         .filter(|(i, _)| !moving.contains(i))
         .map(|(_, m)| m.clone())
         .collect();
-    validate_layout(&base, 0.)?;
+    let layout = validated_layout(&base, 0.)?;
     let target = &members[anchor];
-    let mut widths = std::collections::BTreeMap::<u32, i32>::new();
-    for m in &base {
-        let w = crate::constraints::stacking::width(&m.preset.selection.width)?;
-        widths
-            .entry(m.placement.column)
-            .and_modify(|v| *v = (*v).min(w))
-            .or_insert(w);
-    }
-    let last = *widths.keys().max().ok_or("没有参照对象 / No target")?;
-    let mut starts = vec![0i32];
-    for c in 0..=last {
-        starts.push(starts[c as usize] + widths.get(&c).copied().unwrap_or(1648));
-    }
+    let starts = &layout.column_starts;
+    let last = starts.len() as u32 - 2;
     let target_end = starts[target.placement.column as usize]
         + crate::constraints::stacking::width(&target.preset.selection.width)?;
     let (column, level, insert) = match side {
@@ -87,7 +76,7 @@ pub(super) fn position_relative(
         // Reuse a free adjacent slot when reattaching an existing pair.
         if !insert
             && moving.len() == 2
-            && widths.contains_key(&(column + 1))
+            && base.iter().any(|m| m.placement.column == column + 1)
             && m.placement.column > column
         {
             m.placement.column += 1;
@@ -429,6 +418,15 @@ mod tests {
             },
             preset: p,
         }
+    }
+    #[test]
+    fn side_insertion_reuses_rule_column_boundaries_across_empty_columns() {
+        let original = vec![member("L", 0, 0), member("M", 3, 0), member("S", 4, 0)];
+        let placed = position_relative(&original, &[2], 0, Side::Right).unwrap();
+        let layout = validated_layout(&placed, 0.).unwrap();
+        assert_eq!(placed[2].placement.column, 1);
+        assert_eq!(placed[1].placement.column, 4);
+        assert!((layout.left[2] - layout.left[0] - 329.6).abs() < 0.01);
     }
     #[test]
     fn side_insertion_preserves_the_existing_stack() {

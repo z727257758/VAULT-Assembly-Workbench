@@ -40,6 +40,7 @@ fn member(
             bom: vec![],
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             gridfinity: Default::default(),
             divider_layout: Default::default(),
             sustainer_dividers: Default::default(),
@@ -479,6 +480,27 @@ fn library_supporting_lid_closes_without_changing_saved_angles_or_dimensions() {
             .iter()
             .any(|&(i, a)| i == 1 && (a - 35.).abs() < 0.01)
     );
+    let mut runtime = opened.clone();
+    let base = runtime
+        .relations
+        .iter()
+        .find(|r| r.child.instance / MEMBER_STRIDE == 0 && r.label.contains(crate::sustainer::LID))
+        .unwrap()
+        .child
+        .clone();
+    let before = toml::to_string(&runtime.definition()).unwrap();
+    assert!(crate::constraints::AssemblyRules::set_joint_value(&mut runtime, &base, 10.).is_err());
+    assert_eq!(before, toml::to_string(&runtime.definition()).unwrap());
+    let top = runtime
+        .relations
+        .iter()
+        .find(|r| r.child.instance / MEMBER_STRIDE == 1 && r.label.contains(crate::sustainer::LID))
+        .unwrap()
+        .child
+        .clone();
+    crate::constraints::AssemblyRules::set_joint_value(&mut runtime, &top, 45.).unwrap();
+    assert!(runtime.relations.iter().any(|r| r.child == base
+        && matches!(r.joint, crate::constraints::Joint::Hinge { angle: 0., .. })));
 }
 #[test]
 #[ignore = "requires read-only VAULT_MODEL_ROOT library and large-mesh memory"]
@@ -889,6 +911,16 @@ fn library_exterior_spacing_and_export_regression() {
         member("neighbor", "S", 3, "2F", false, 1, 0),
     ];
     m[0].exterior.base = Base::Trolley;
+    configure(&mut m, &catalog);
+    // A regular S+S layer shares its footprint; an outward wheel cannot shift
+    // its neighboring column. Independent towers below use different depths.
+    assert!(
+        load(&root, &home, &m, 0., &cancel)
+            .err()
+            .unwrap()
+            .contains("Accessory envelopes overlap")
+    );
+    m[1].preset.selection.depth = 4;
     configure(&mut m, &catalog);
     let scene = load(&root, &home, &m, 0., &cancel).unwrap();
     assert!(scene.member_bounds[0].1.x <= scene.member_bounds[1].0.x + 0.02);

@@ -1,3 +1,7 @@
+mod kinematics;
+mod rules;
+pub use kinematics::{Mechanism, MotionKind, MotionPlan, MotionSample, SliderMount};
+pub use rules::{AssemblyKind, AssemblyRules};
 pub mod exterior;
 pub mod stacking;
 pub mod tower;
@@ -192,29 +196,8 @@ struct LatchRecipes {
     release_inner_degrees: f32,
     release_outer_degrees: f32,
 }
-fn latch_recipes() -> &'static LatchRecipes {
-    static RECIPES: std::sync::LazyLock<LatchRecipes> = std::sync::LazyLock::new(|| {
-        toml::from_str(include_str!("../config/sustainer-locks.toml"))
-            .expect("Valid latch display calibration")
-    });
-    &RECIPES
-}
 pub fn latch_display_pose(tall: bool, xl4: bool) -> LatchDisplayPose {
-    let recipes = latch_recipes();
-    if xl4 {
-        recipes.xl4
-    } else if tall {
-        recipes.tall
-    } else {
-        recipes.one_floor
-    }
-}
-pub fn latch_release_pose() -> LatchDisplayPose {
-    let r = latch_recipes();
-    LatchDisplayPose {
-        inner_degrees: r.release_inner_degrees,
-        outer_degrees: r.release_outer_degrees,
-    }
+    AssemblyRules::latch_display_pose(tall, xl4)
 }
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceHit {
@@ -343,8 +326,8 @@ impl Relation {
             pivot: inverse.transform_point3(world_pivot).to_array(),
             axis: inverse.transform_vector3(world_axis).to_array(),
             angle: 0.,
-            min: 0.,
-            max: 110.,
+            min: *AssemblyRules::LID_ANGLE.start(),
+            max: *AssemblyRules::LID_ANGLE.end(),
         };
         relation.joint.transform()?;
         Ok(relation)
@@ -571,119 +554,7 @@ fn world_anchor(scene: &Scene, index: usize, point: Vec3, normal: Vec3) -> Surfa
 /// Conservative initial datums for the standard drawer. Bounds are only used for
 /// exterior face placement, never as a cavity-fit or collision proof.
 pub fn basic_relations(scene: &mut Scene) -> Result<usize, String> {
-    if !scene.relations.is_empty() {
-        return Err("Basic relations require an empty constraint graph".into());
-    }
-    let original = scene.clone();
-    let result = (|| {
-        let module = scene
-            .parts
-            .iter()
-            .position(|p| p.pose.path.contains("/Modules/"));
-        let drawer = scene.parts.iter().position(|p| {
-            p.pose.path.contains("/Boxes/")
-                && p.pose.path.contains(" Box ")
-                && !p.pose.path.contains(" Part ")
-        });
-        let facade = scene
-            .parts
-            .iter()
-            .position(|p| p.pose.path.contains("/Facades/"));
-        let (Some(module), Some(drawer), Some(facade)) = (module, drawer, facade) else {
-            return Err(
-                "Basic relations currently support non-split drawers with a separate facade".into(),
-            );
-        };
-        crate::module_assembly::prepare(scene, module, drawer, facade)?;
-        let mut slider = Relation::fixed(scene, module, drawer, true)?;
-        if let Joint::Slider { min, max, .. } = &mut slider.joint {
-            *min = 0.;
-            *max = (scene.parts[drawer].source_size.y - 20.).max(0.);
-        }
-        slider.label = "Manual step 10: drawer / housing slide".into();
-        add(scene, slider)?;
-        // Attach subassemblies before moving the facade, so descendants follow
-        // its correction and subsequent drawer travel rather than staying behind.
-        for i in 0..scene.parts.len() {
-            if [module, drawer, facade].contains(&i) {
-                continue;
-            }
-            let path = &scene.parts[i].pose.path;
-            let name = path.rsplit('/').next().unwrap_or(path);
-            let parent = if name.contains("Runner Guide")
-                || name.contains("Stopper")
-                || name == "Latch.stl"
-                || path.contains("/Roofs/")
-            {
-                Some(module)
-            } else if name.contains("Runner Slide")
-                || name.contains("Rails")
-                || name.contains("Baseplate")
-            {
-                Some(drawer)
-            } else if name.contains("Key") || name == "Label.stl" || name == "Facade Cap.stl" {
-                Some(facade)
-            } else {
-                None
-            };
-            if let Some(parent) = parent {
-                let mut relation = Relation::fixed(scene, parent, i, false)?;
-                relation.label = "Subassembly attachment (verify)".into();
-                add(scene, relation)?;
-            }
-        }
-        let (_, box_hi) = world_bounds(&scene.parts[drawer]);
-        let (face_lo, face_hi) = world_bounds(&scene.parts[facade]);
-        let face_center = (face_lo + face_hi) * 0.5;
-        let anchor_a = world_anchor(
-            scene,
-            drawer,
-            Vec3::new(face_center.x, face_center.y, box_hi.z),
-            Vec3::Z,
-        );
-        let anchor_b = world_anchor(
-            scene,
-            facade,
-            Vec3::new(face_center.x, face_center.y, face_lo.z),
-            -Vec3::Z,
-        );
-        let mut mate = Relation::face(scene, anchor_a, anchor_b, 0.2, 0.)?;
-        mate.label = "Facade / drawer exterior datum (verify)".into();
-        add(scene, mate)?;
-        // Planar support datums: spring front against facade rear. Split bodies keep
-        // separate IDs and independent anchors. These are starting points, not CAD fits.
-        for i in 0..scene.parts.len() {
-            if scene.parts[i].pose.path.ends_with("/Springs.stl") {
-                let (lo, hi) = world_bounds(&scene.parts[i]);
-                let center = (lo + hi) * 0.5;
-                let (facade_lo, _) = world_bounds(&scene.parts[facade]);
-                let parent = world_anchor(
-                    scene,
-                    facade,
-                    Vec3::new(center.x, center.y, facade_lo.z),
-                    -Vec3::Z,
-                );
-                let child = world_anchor(scene, i, Vec3::new(center.x, center.y, hi.z), Vec3::Z);
-                let mut mate = Relation::face(scene, parent, child, 0.2, 0.)?;
-                mate.label = "Spring / facade rear datum (verify)".into();
-                add(scene, mate)?;
-            }
-        }
-        crate::front_panel::apply(scene, facade)?;
-        // Manual front view: label on the left, round screw cap on the right.
-        // Rotate the entire front subassembly, retaining all child-local mates.
-        rotate_subassembly(scene, facade, Quat::from_rotation_z(std::f32::consts::PI))?;
-        crate::module_assembly::latch(scene, module)?;
-        crate::runners::apply(scene, module, drawer)?;
-        crate::geared_rails::apply(scene, drawer)?;
-        crate::baseplate::apply(scene, drawer)?;
-        crate::explosion::reset(scene)?;
-        Ok(scene.relations.len())
-    })();
-    if result.is_err() {
-        *scene = original;
-    }
-    result
+    AssemblyRules::assemble_drawer(scene)
 }
 /// Give each assembly its own identities without changing any source file path.
 pub fn namespace_member(scene: &mut Scene, member: usize) -> Result<(), String> {

@@ -25,10 +25,12 @@ impl App {
         };
         let z = self.zh;
         let descriptors = modules(&self.members);
-        let top = crate::constraints::stacking::plan(&descriptors, 0.)
+        let layout = crate::constraints::stacking::plan(&descriptors, 0.);
+        let top = layout
+            .as_ref()
             .is_ok_and(|p| !p.supports.iter().any(|s| s.contains(&edit.index)));
-        let stroke = crate::constraints::stacking::plan(&descriptors, 0.).map_or(0., |p| {
-            crate::constraints::exterior::pull_limit(&descriptors, &p, edit.index)
+        let stroke = layout.as_ref().map_or(0., |p| {
+            crate::constraints::AssemblyRules::pull_limit(&descriptors, p, edit.index)
         });
         let ground = m.placement.level == 0;
         let roof_available = top && m.preset.assembly_kind == AssemblyKind::Drawer;

@@ -51,15 +51,20 @@ fn modules(members: &[Member]) -> Vec<crate::constraints::stacking::Module<'_>> 
         .collect()
 }
 pub(super) fn validate_layout(members: &[Member], gap: f32) -> Result<(), String> {
+    validated_layout(members, gap).map(|_| ())
+}
+pub(super) fn validated_layout(
+    members: &[Member],
+    gap: f32,
+) -> Result<crate::constraints::stacking::Layout, String> {
     let descriptors = modules(members);
-    let layout = crate::constraints::stacking::plan(&descriptors, gap)?;
-    crate::constraints::exterior::validate_layout(
+    crate::constraints::AssemblyRules::layout(
         &descriptors,
-        &layout,
         &members
             .iter()
             .map(|m| m.exterior.clone())
             .collect::<Vec<_>>(),
+        gap,
     )
 }
 impl Preset {
@@ -68,8 +73,9 @@ impl Preset {
             || !(3..=7).contains(&self.selection.depth)
             || !["1F", "2F", "4F"].contains(&self.selection.height.as_str())
             || self.selection.width == "XL" && self.selection.height != "1F"
-            || !self.sustainer_angle.is_finite()
-            || !(0. ..=110.).contains(&self.sustainer_angle)
+            || crate::constraints::AssemblyRules::validate_lid_angle(self.sustainer_angle).is_err()
+            || crate::constraints::AssemblyRules::validate_drawer_extension(self.drawer_extension)
+                .is_err()
             || self.bom.iter().any(|b| {
                 b.qty == 0
                     || b.qty > 100
@@ -190,6 +196,7 @@ impl App {
             assembly_kind: self.assembly_kind,
             sustainer_options: self.sustainer_options.normalized(&self.selection),
             sustainer_angle: self.sustainer_angle,
+            drawer_extension: self.drawer_extension,
             selection: self.selection.clone(),
             bom: self.bom.clone(),
             divider_layout: if self.assembly_kind == AssemblyKind::Drawer {
@@ -240,6 +247,7 @@ impl App {
         self.assembly_kind = p.assembly_kind;
         self.sustainer_options = p.sustainer_options;
         self.sustainer_angle = p.sustainer_angle;
+        self.drawer_extension = p.drawer_extension;
         self.gridfinity = p.gridfinity;
         self.label = p.label;
         self.divider_layout = p.divider_layout;
@@ -985,6 +993,7 @@ fn load_member_scene(
         )
     };
     load_scene_definition(&mut scene, home, &key)?;
+    crate::constraints::AssemblyRules::close_drawers(&mut scene)?;
 
     if !p.drawers.is_empty() {
         let mut children = Vec::new();
@@ -1006,9 +1015,8 @@ pub(super) fn load(
     gap: f32,
     cancel: &crate::preview::Cancel,
 ) -> Result<Scene, String> {
-    validate_layout(members, gap)?;
     let descriptors = modules(members);
-    let layout = crate::constraints::stacking::plan(&descriptors, gap)?;
+    let layout = validated_layout(members, gap)?;
     let exterior_catalog = if members.iter().any(|m| !m.exterior.is_empty()) {
         Some(Catalog::scan(root.to_path_buf())?)
     } else {
@@ -1083,11 +1091,41 @@ pub(super) fn load(
         )?;
     }
     for (i, (_, _, angle)) in scenes.iter_mut().enumerate() {
-        if layout.supports.iter().any(|below| below.contains(&i)) {
-            *angle = 0.;
+        *angle = crate::constraints::AssemblyRules::preview_lid_angle(&layout, i, *angle);
+    }
+    let mut scene = Scene::combine_positioned(scenes, gap, Some(shifts))?;
+    scene.member_supports = layout.supports;
+    for (member, m) in members.iter().enumerate() {
+        if m.preset.assembly_kind != AssemblyKind::Drawer {
+            continue;
+        }
+        let targets: Vec<_> = if m.preset.drawers.is_empty() {
+            vec![(None, m.preset.drawer_extension)]
+        } else {
+            m.preset
+                .drawers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (Some(i), p.drawer_extension))
+                .collect()
+        };
+        for (drawer, fraction) in targets {
+            if fraction == 0. {
+                continue;
+            }
+            let mechanism = crate::constraints::AssemblyRules::mechanism(
+                &scene,
+                crate::scene::Target { member, drawer },
+            )?;
+            crate::constraints::AssemblyRules::set_slider(
+                &mut scene,
+                &mechanism.child,
+                mechanism.min + fraction * (mechanism.max - mechanism.min),
+            )?;
         }
     }
-    Scene::combine_positioned(scenes, gap, Some(shifts))
+    crate::constraints::AssemblyRules::reset_explosion(&mut scene)?;
+    Ok(scene)
 }
 
 impl App {
@@ -1363,6 +1401,14 @@ impl App {
             self.camera.fit(&self.scene, 0.);
             self.camera.yaw = 0.5;
             self.camera.zoom = 1.08;
+            // Record the expected overview explicitly: inline editing no longer
+            // switches to a separate scene that populates this legacy snapshot.
+            self.combination_view_state = Some((
+                self.camera.clone(),
+                self.explosion,
+                self.dimensions,
+                self.ghost,
+            ));
         }
         if self.smoke_frame >= 10 && !self.screenshot_requested {
             self.screenshot_requested = true;
@@ -1412,6 +1458,16 @@ impl App {
                     }
                 }
             }
+            if [1, 2].contains(&self.smoke_stage)
+                && (self.members[1].preset.sustainer_angle != 65.
+                    || self.sustainer_angle != 65.
+                    || crate::constraints::AssemblyRules::lid_angle(&self.scene)
+                        .is_none_or(|a| (a - 65.).abs() > 0.001))
+            {
+                return Err(
+                    "Accepted lid motion was lost from project preferences or after rebuild".into(),
+                );
+            }
             if [2, 4].contains(&self.smoke_stage) {
                 let expected = &self
                     .combination_view_state
@@ -1458,9 +1514,11 @@ impl App {
                 if self.members.len() != 3 || self.members[0].preset.sustainer_angle != 65. {
                     return Err("Pair addition or saved lid state failed".into());
                 }
-                if let Some(angle) = crate::sustainer::lid_angle(&self.scene)
-                    && angle.abs() > 0.01
-                {
+                if self.scene.relations.iter().any(|relation| {
+                    relation.label.ends_with(crate::sustainer::LID)
+                        && self.scene.member_supports.iter().any(|below| below.contains(&((relation.child.instance / MEMBER_STRIDE) as usize)))
+                        && matches!(relation.joint,crate::constraints::Joint::Hinge{angle,..} if angle.abs()>0.01)
+                }) {
                     return Err("Supporting lid is open".into());
                 }
             }
@@ -1510,8 +1568,27 @@ impl App {
             1 => {
                 self.select_member_in_combination(1, ctx);
                 self.focus_member(ctx);
-                self.sustainer_angle = 65.;
+                let lid = self
+                    .scene
+                    .relations
+                    .iter()
+                    .find(|r| {
+                        r.child.instance / MEMBER_STRIDE == 1
+                            && crate::constraints::AssemblyRules::lid_angle_for(
+                                &self.scene,
+                                &r.child,
+                            )
+                            .is_some()
+                    })
+                    .unwrap()
+                    .child
+                    .clone();
+                // Queue an older preference first; the accepted motion must supersede it.
                 self.assembly(ctx);
+                if let Err(error) = self.apply_joint_motion(&lid, 65., ctx) {
+                    let _ = std::fs::write(folder.join("combination-smoke-error.txt"), error);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             2 => self.show_combination(ctx),
             3 => {
@@ -1687,7 +1764,7 @@ impl App {
                 let _ = std::fs::write(
                     folder.join("combination-smoke-result.txt"),
                     format!(
-                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; two pages; single-member label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove; detailed overall colors with S3 drawer and box previews; exploded ray selection and isolated color editing. GPU: {}. Parts: {}",
+                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; one assembly viewport with inline member editing; label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove; detailed overall colors with S3 drawer and box previews; exploded ray selection and isolated color editing. GPU: {}. Parts: {}",
                         self.renderer.state.adapter.get_info().name,
                         self.scene.parts.len()
                     ),
@@ -1820,6 +1897,7 @@ mod tests {
             assembly_kind: AssemblyKind::Drawer,
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             selection: Default::default(),
             bom: vec![],
             divider_layout: Default::default(),

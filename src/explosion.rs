@@ -90,14 +90,9 @@ pub(crate) fn space_combination(
 }
 
 pub fn reset(scene: &mut Scene) -> Result<(), String> {
-    if scene.assembly
-        && scene
-            .parts
-            .iter()
-            .all(|p| p.pose.path.starts_with(crate::sustainer::PREFIX))
-    {
-        return crate::sustainer::reset_explosion(scene);
-    }
+    crate::constraints::AssemblyRules::reset_explosion(scene)
+}
+pub(crate) fn layout_drawer(scene: &mut Scene) -> Result<(), String> {
     if !scene.assembly || scene.relations.is_empty() {
         return Err("Explosion layout requires an assembled drawer with relations".into());
     }

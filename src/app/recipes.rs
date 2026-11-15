@@ -199,6 +199,8 @@ impl Recipe {
                         ..Default::default()
                     },
                     sustainer_angle: 0.,
+                    drawer_extension: 0.,
+
                     drawers: vec![],
                     bom: vec![],
                     print_config: Some(config),

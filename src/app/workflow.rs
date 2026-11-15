@@ -666,6 +666,7 @@ mod tests {
             assembly_kind: AssemblyKind::Drawer,
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             divider_layout: Default::default(),
             sustainer_dividers: Default::default(),
         };

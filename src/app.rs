@@ -1,9 +1,11 @@
+mod animation;
 mod appearance;
 mod color_preview;
 mod combination;
 mod exterior_smoke;
 mod inline_edit;
 mod large_stl_smoke;
+mod motion;
 mod preview_modes;
 mod recipes;
 pub(crate) use recipes::audit as audit_presets;
@@ -13,6 +15,7 @@ mod workflow;
 mod workspace;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
+    constraints::AssemblyKind,
     render::{Camera, Renderer, ViewOptions},
     scene::{Definition, Scene},
 };
@@ -28,13 +31,6 @@ use std::{
 
 fn t(zh: bool, cn: &'static str, en: &'static str) -> &'static str {
     if zh { cn } else { en }
-}
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AssemblyKind {
-    #[default]
-    Drawer,
-    Sustainer,
 }
 impl AssemblyKind {
     fn label_path(self) -> &'static str {
@@ -68,6 +64,8 @@ struct Preset {
     sustainer_options: SustainerOptions,
     #[serde(default)]
     sustainer_angle: f32,
+    #[serde(default)]
+    drawer_extension: f32,
     selection: Selection,
     bom: Vec<Bom>,
     #[serde(default)]
@@ -153,6 +151,7 @@ struct AssemblyView {
     ghost: bool,
 }
 pub struct App {
+    animation: animation::State,
     inline_edit: inline_edit::State,
     appearance: appearance::Appearance,
     tower: tower::State,
@@ -178,6 +177,7 @@ pub struct App {
     assembly_kind: AssemblyKind,
     sustainer_options: SustainerOptions,
     sustainer_angle: f32,
+    drawer_extension: f32,
     drawer_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
     box_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
     gridfinity: crate::gridfinity::Layout,
@@ -288,6 +288,7 @@ impl App {
                 .expect("wgpu renderer required"),
         );
         let mut app = Self {
+            animation: Default::default(),
             inline_edit: Default::default(),
             appearance,
             tower: Default::default(),
@@ -317,6 +318,7 @@ impl App {
             },
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             drawer_state: None,
             box_state: None,
             gridfinity: Default::default(),
@@ -444,6 +446,7 @@ impl App {
         assembly: bool,
         ctx: &egui::Context,
     ) {
+        self.animation.tracks.clear();
         if assembly && self.combination_view {
             self.commit_member();
         }
@@ -893,6 +896,9 @@ impl App {
                     {
                         self.setup_tower_smoke(ctx);
                     }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
+                        self.setup_motion_smoke(ctx);
+                    }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
                     }
@@ -1046,6 +1052,25 @@ impl App {
                         }
                         self.camera.fit(&s, self.explosion);
                     }
+                    if s.assembly
+                        && self.scene_key != "combination"
+                        && self.assembly_kind == AssemblyKind::Drawer
+                        && self.drawer_extension > 0.
+                        && let Ok(m) = crate::constraints::AssemblyRules::mechanism(
+                            &s,
+                            crate::scene::Target {
+                                member: 0,
+                                drawer: None,
+                            },
+                        )
+                        && let Err(error) = crate::constraints::AssemblyRules::set_slider(
+                            &mut s,
+                            &m.child,
+                            m.min + self.drawer_extension * (m.max - m.min),
+                        )
+                    {
+                        self.status = error;
+                    }
                     self.renderer.upload(&s);
                     self.scene = s;
                     self.fixed_parent = None;
@@ -1198,13 +1223,13 @@ impl App {
                 self.status=match result{Ok(_)=>t(z,"面关系已建立；请执行相交检查","Face mate created; run intersection check").into(),Err(e)=>e};
             }
             ui.separator();ui.strong(format!("{} ({})",t(z,"当前关系","Current relations"),self.scene.relations.len()));
-            let previous=self.scene.relations.clone();let mut changed=false;let mut remove=None;
+            let previous=self.scene.relations.clone();let mut changed=false;let mut remove=None;let mut motion=None;
             for(index,r)in self.scene.relations.iter_mut().enumerate(){
                 let child=self.scene.parts.iter().find(|p|crate::constraints::PartId::of(p)==r.child).map(|p|p.label(z)).unwrap_or_else(||r.child.path.clone());
                 egui::CollapsingHeader::new(format!("{} · {}",index+1,child)).id_salt(("joint",index)).show(ui,|ui|{
                     ui.label(&r.label);ui.label(format!("{}: {}",t(z,"父件","Parent"),r.parent.path.rsplit('/').next().unwrap()));
                     match &mut r.joint {
-                        crate::constraints::Joint::Hinge{angle,min,max,..}=>{changed|=ui.add(egui::Slider::new(angle,*min..=*max).text(t(z,"转角 °","Angle °"))).changed();},
+                        crate::constraints::Joint::Hinge{angle,min,max,..}=>{let mut value=*angle;if ui.add(egui::Slider::new(&mut value,*min..=*max).text(t(z,"转角 °","Angle °"))).changed(){motion=Some((r.child.clone(),value));}},
                         crate::constraints::Joint::Fixed{..}=>{ui.label(t(z,"固定 6 个自由度","All 6 DOFs fixed"));},
                         crate::constraints::Joint::Face{gap,..}=>{ui.horizontal(|ui|{ui.label(t(z,"面间隙 mm","Face gap mm"));changed|=ui.add(egui::DragValue::new(gap).speed(0.05).range(-10. ..=100.)).changed();});},
                         crate::constraints::Joint::Slider{offset,min,max,axis,..}=>{
@@ -1218,7 +1243,7 @@ impl App {
                             });
                             if choice!=old_choice||negative!=old_negative {if choice<3{*axis=[0.;3];axis[choice]=if negative{-1.}else{1.};}else{*axis=old_axis.map(|v|-v);}changed=true;}
 
-                            changed|=ui.add(egui::Slider::new(offset,*min..=*max).text(t(z,"位移 mm","Travel mm"))).changed();
+                            let mut value=*offset;if ui.add(egui::Slider::new(&mut value,*min..=*max).text(t(z,"位移 mm","Travel mm"))).changed(){motion=Some((r.child.clone(),value));}
                             ui.horizontal(|ui|{for (label,value) in [(t(z,"下限","Min"),min),(t(z,"上限","Max"),max)]{ui.label(label);changed|=ui.add(egui::DragValue::new(value).speed(1.).range(-10000. ..=10000.)).changed();}});
                         }
                     }
@@ -1227,6 +1252,7 @@ impl App {
             }
             if let Some(index)=remove{self.scene.relations.remove(index);changed=true;}
             if changed{if let Err(e)=crate::constraints::solve(&mut self.scene){self.scene.relations=previous;self.status=e;}else{self.scene.calibrated=false;}}
+            if let Some((child,value))=motion && let Err(error)=self.apply_joint_motion(&child,value,ctx){self.status=error;}
             if ui.button(t(z,"保存装配位置与关系","Save poses and relations")).clicked(){
                 self.status=match toml::to_string_pretty(&self.scene.definition()).map_err(|e|e.to_string()).and_then(|s|self.write_state(&format!("assembly-{}.toml",self.scene_key),s)){Ok(_)=>t(z,"装配位置与关系已保存","Poses and relations saved").into(),Err(e)=>e};
             }
@@ -1259,6 +1285,7 @@ impl App {
                     if self.tower.print_list { self.member_print_list(ui, ctx); return; }
                     if self.combination_view {return;}
                     self.inserts_ui(ui,ctx);
+                    if self.assembly_kind==AssemblyKind::Drawer {self.motion_controls_ui(ui,ctx); }
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.strong(t(z,"标签文字","Label text"));
@@ -1354,12 +1381,8 @@ impl App {
                             for note in crate::sustainer::review_notes(&self.scene,z) {ui.small(note);}
                         }
                         ui.small(t(z,"开盖预览先松开卡扣；仅展示状态，未验证机械行程。螺钉未建模。","Lid preview releases the clasps first. States are illustrative; mechanical travel is unverified. Screws are not modeled."));
-                        if self.combination_view {
-                            if ui.add(egui::Slider::new(&mut self.sustainer_angle,0. ..=110.).text(t(z,"当前盒子开盖 °","Selected box lid °"))).changed() {self.assembly(ctx);}
-                        } else if let Some(mut angle)=crate::sustainer::lid_angle(&self.scene)
-                            && ui.add(egui::Slider::new(&mut angle,0. ..=110.).text(t(z,"开盖 °","Lid angle °"))).changed() {
-                                match crate::sustainer::set_lid_angle(&mut self.scene,angle) {Ok(())=>{self.sustainer_angle=angle;self.explosion=0.;self.camera.fit(&self.scene,0.);self.collision_report=None;},Err(e)=>self.status=e}
-                        }
+                        self.motion_controls_ui(ui,ctx);
+
                     }
                     });
                 } else {
@@ -2510,8 +2533,7 @@ impl App {
                     .get(active_member)
                     .map(|m| m.preset.clone())
                     .unwrap_or(preset);
-                if !p.sustainer_angle.is_finite()
-                    || !(0. ..=110.).contains(&p.sustainer_angle)
+                if crate::constraints::AssemblyRules::validate_lid_angle(p.sustainer_angle).is_err()
                     || p.assembly_kind == AssemblyKind::Sustainer
                         && (!p.gridfinity.bins.is_empty()
                             || p.divider_layout.enabled
@@ -2605,6 +2627,7 @@ impl App {
                     self.assembly_kind = p.assembly_kind;
                     self.sustainer_options = p.sustainer_options.normalized(&self.selection);
                     self.sustainer_angle = p.sustainer_angle;
+                    self.drawer_extension = p.drawer_extension;
                     self.label = p.label;
                     self.gridfinity = p.gridfinity;
                     self.sustainer_dividers = p.sustainer_dividers;
@@ -3174,6 +3197,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.tower_tick(ctx);
+        self.animation_tick(ctx);
         if self.inline_edit.open
             && (self.tab != 0 || self.tower.print_list || self.preview_modes.special())
         {
@@ -3265,6 +3289,10 @@ impl eframe::App for App {
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
+            self.motion_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
             self.recipe_smoke(ctx);
@@ -4417,6 +4445,7 @@ mod accessory_export_tests {
             assembly_kind: AssemblyKind::Drawer,
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             selection: Selection::default(),
             bom: vec![item.clone()],
             divider_layout: Default::default(),

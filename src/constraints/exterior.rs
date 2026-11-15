@@ -127,12 +127,7 @@ pub fn attach(
     let w = stacking::width(&s.width)? as f32 / 10.;
     let roof_width = stacking::width(&config.roof_selection(s).width)? as f32 / 10.;
     let roof_center = d.center_x + (roof_width - w) * 0.5;
-    let body_top = d.bottom
-        + match s.height.as_str() {
-            "1F" => 47.,
-            "2F" => 95.,
-            _ => 191.,
-        };
+    let body_top = d.bottom + super::AssemblyRules::installation_height(&s.height, false)?;
     let back = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     let mut base = None;
     let mut backbone = None;
@@ -302,16 +297,21 @@ pub fn attach(
                         (blo.z + bhi.z - lo.z - hi.z) * 0.5 - 4.5,
                     ),
                 );
-                if config.pull_extension > (tower_height + body_top - d.top - 38.).max(0.) + 0.25 {
+                if config.pull_extension
+                    > (tower_height + body_top - d.top - super::AssemblyRules::PULL_LOCK_RESERVE)
+                        .max(0.)
+                        + 0.25
+                {
                     return Err(
                         "拉杆长度不足以保持锁座内插入量 / Insufficient rod engagement".into(),
                     );
                 }
                 let rod_top = d.top + config.pull_extension + 30.;
-                let rod_bottom = rod_top - tower_height.max(61.);
+                let rod_bottom =
+                    rod_top - tower_height.max(super::AssemblyRules::MIN_PULL_ROD_LENGTH);
                 for side in [-1., 1.] {
                     let rod = scene.append_hardware_rod(
-                        tower_height.max(61.),
+                        tower_height.max(super::AssemblyRules::MIN_PULL_ROD_LENGTH),
                         Vec3::new(
                             d.center_x + side * (w * 0.5 - 42.),
                             (rod_top + rod_bottom) * 0.5,
@@ -622,27 +622,5 @@ pub fn pull_limit(
     layout: &stacking::Layout,
     index: usize,
 ) -> f32 {
-    let mut tops = vec![0f32; modules.len()];
-    for &i in &layout.order {
-        let h = match modules[i].selection.height.as_str() {
-            "1F" => {
-                if modules[i].is_box {
-                    61.
-                } else {
-                    47.
-                }
-            }
-            "2F" => 95.,
-            _ => 191.,
-        };
-        tops[i] = layout.supports[i].first().map_or(0., |&j| tops[j]) + h;
-    }
-    (tops[index]
-        - if modules[index].is_box && modules[index].selection.height == "1F" {
-            14.
-        } else {
-            0.
-        }
-        - 38.)
-        .clamp(0., 800.)
+    super::AssemblyRules::pull_limit(modules, layout, index)
 }

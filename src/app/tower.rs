@@ -119,6 +119,9 @@ pub(super) fn configure(p: &mut Preset, catalog: &Catalog, reset: bool) -> Resul
         p.sustainer_dividers = Default::default();
         p.bom.clear();
     }
+    if p.assembly_kind == AssemblyKind::Sustainer {
+        p.drawer_extension = 0.;
+    }
     p.sustainer_options = p.sustainer_options.normalized(&p.selection);
     p.bom = if p.assembly_kind == AssemblyKind::Drawer {
         catalog.reconfigure(&p.selection, &p.bom)
@@ -135,6 +138,7 @@ pub(super) fn configure(p: &mut Preset, catalog: &Catalog, reset: bool) -> Resul
 fn fresh_like(p: &Preset) -> Preset {
     let mut next = p.clone();
     next.drawers.clear();
+    next.drawer_extension = 0.;
     next.gridfinity = Default::default();
     next.divider_layout = Default::default();
     next.sustainer_dividers = Default::default();
@@ -1848,6 +1852,7 @@ mod tests {
             assembly_kind: AssemblyKind::Drawer,
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
+            drawer_extension: 0.,
             sustainer_dividers: Default::default(),
             divider_layout: Default::default(),
             gridfinity: Default::default(),

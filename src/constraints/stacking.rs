@@ -14,6 +14,10 @@ pub struct Module<'a> {
     pub is_box: bool,
 }
 pub struct Layout {
+    /// Column boundaries in tenths of a millimetre, including the final end.
+    pub column_starts: Vec<i32>,
+    /// Nominal closed support top for every member, shared with motion limits.
+    pub nominal_tops: Vec<f32>,
     pub left: Vec<f32>,
     pub supports: Vec<Vec<usize>>,
     pub order: Vec<usize>,
@@ -43,6 +47,8 @@ fn allowed(a: &[&str], b: &[&str]) -> bool {
 pub fn plan(modules: &[Module<'_>], gap: f32) -> Result<Layout, String> {
     if modules.is_empty() {
         return Ok(Layout {
+            column_starts: vec![],
+            nominal_tops: vec![],
             left: vec![],
             supports: vec![],
             order: vec![],
@@ -68,15 +74,14 @@ pub fn plan(modules: &[Module<'_>], gap: f32) -> Result<Layout, String> {
             .and_modify(|v| *v = (*v).min(w))
             .or_insert(w);
     }
-    let mut starts = BTreeMap::new();
-    let mut x = 0;
+    let mut starts = vec![0];
+    let fallback = width("S")?;
     for c in 0..=*columns.keys().max().unwrap() {
-        starts.insert(c, x);
-        x += columns.get(&c).copied().unwrap_or(1648);
+        starts.push(starts[c as usize] + columns.get(&c).copied().unwrap_or(fallback));
     }
     let left: Vec<_> = modules
         .iter()
-        .map(|m| starts[&m.placement.column])
+        .map(|m| starts[m.placement.column as usize])
         .collect();
     let mut order: Vec<_> = (0..modules.len()).collect();
     order.sort_by_key(|&i| (modules[i].placement.level, left[i]));
@@ -180,21 +185,15 @@ pub fn plan(modules: &[Module<'_>], gap: f32) -> Result<Layout, String> {
                 modules[i].name
             ));
         }
-        let height = match modules[i].selection.height.as_str() {
-            "1F" => {
-                if modules[i].is_box {
-                    61.
-                } else {
-                    47.
-                }
-            }
-            "2F" => 95.,
-            "4F" => 191.,
-            _ => return Err("未知高度 / Unknown height".into()),
-        };
+        let height = super::AssemblyRules::installation_height(
+            &modules[i].selection.height,
+            modules[i].is_box,
+        )?;
         tops[i] = base + height;
     }
     Ok(Layout {
+        column_starts: starts,
+        nominal_tops: tops,
         left: left.into_iter().map(|v| v as f32 / 10.).collect(),
         supports,
         order,

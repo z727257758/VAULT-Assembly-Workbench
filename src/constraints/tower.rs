@@ -1,6 +1,6 @@
 //! Tower and drawer-capacity rules, separate from UI and file matching.
 pub const DRAWER_STRIDE: u32 = 1000;
-pub const SLOT_PITCH: f32 = 48.;
+pub const SLOT_PITCH: f32 = super::AssemblyRules::DRAWER_SLOT_PITCH;
 pub fn units(height: &str) -> Result<u8, String> {
     match height {
         "1F" => Ok(1),
@@ -114,26 +114,9 @@ pub fn bind_drawer_roots(
     parent: &super::PartId,
     parent_inverse: glam::Mat4,
     drawer: usize,
-) {
-    let children: std::collections::HashSet<_> =
-        scene.relations.iter().map(|r| r.child.clone()).collect();
-    for part in &scene.parts {
-        let id = super::PartId::of(part);
-        if children.contains(&id) {
-            continue;
-        }
-        let (_, rotation, position) =
-            (parent_inverse * part.pose.matrix(0.)).to_scale_rotation_translation();
-        scene.relations.push(super::Relation {
-            parent: parent.clone(),
-            child: id,
-            joint: super::Joint::Fixed {
-                position: position.to_array(),
-                rotation: rotation.to_array(),
-            },
-            label: format!("Drawer slot {} (estimated)", drawer + 1),
-        });
-    }
+    mounts: &[super::SliderMount],
+) -> Result<(), String> {
+    super::AssemblyRules::bind_drawer_roots(scene, parent, parent_inverse, drawer, mounts)
 }
 
 #[cfg(test)]
