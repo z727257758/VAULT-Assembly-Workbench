@@ -171,6 +171,7 @@ pub(super) struct Header<'a> {
     pub kind: &'a str,
     pub size: &'a str,
     pub height: &'a str,
+    pub height_mm: f32,
     pub can_delete: bool,
     pub zh: bool,
 }
@@ -239,7 +240,8 @@ pub(super) fn layer(
                         action = Some(Action::Duplicate(header.level));
                     }
                 } else {
-                    ui.label(RichText::new(header.height).weak());
+                    ui.label(RichText::new(format!("{:.0} mm", header.height_mm)).weak());
+                    ui.label(header.height);
                 }
             });
         });
@@ -247,8 +249,9 @@ pub(super) fn layer(
         if expanded {
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                 .corner_radius(9.)
-                .inner_margin(8.)
+                .inner_margin(7.)
                 .show(ui, body);
         }
     });
@@ -273,6 +276,96 @@ pub(super) fn layer(
         response: response.response,
         open,
         action,
+    }
+}
+
+pub(super) fn group(
+    ui: &mut egui::Ui,
+    id: &str,
+    title: &str,
+    default_open: bool,
+    summary: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let id = ui.make_persistent_id(("tower-group", id));
+    let open = ui
+        .data(|data| data.get_temp::<bool>(id))
+        .unwrap_or(default_open);
+    let response = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .id_salt(id)
+                .sense(egui::Sense::click()),
+            |ui| {
+                ui.style_mut().interaction.selectable_labels = false;
+                ui.horizontal(|ui| {
+                    ui.set_min_height(39.);
+                    ui.strong(title);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14., 14.), egui::Sense::hover());
+                        let center = rect.center();
+                        let offset = if open { 2.5 } else { -2.5 };
+                        ui.painter().line(
+                            vec![
+                                center + egui::vec2(-4.5, offset),
+                                center - egui::vec2(0., offset),
+                                center + egui::vec2(4.5, offset),
+                            ],
+                            egui::Stroke::new(1.2, ui.visuals().weak_text_color()),
+                        );
+                        summary(ui);
+                    });
+                });
+            },
+        )
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, title)
+    });
+    if response.clicked() {
+        ui.data_mut(|data| data.insert_temp(id, !open));
+        !open
+    } else {
+        open
+    }
+}
+
+pub(super) fn set_group(ui: &egui::Ui, id: &str, open: bool) {
+    let id = ui.make_persistent_id(("tower-group", id));
+    ui.data_mut(|data| data.insert_temp(id, open));
+}
+
+pub(super) fn choice_row<T: PartialEq + Clone>(
+    ui: &mut egui::Ui,
+    label: &str,
+    width: f32,
+    value: &mut T,
+    choices: &[(T, &str)],
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).weak());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width.min(ui.available_width()), 32.),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| appearance::size_choices(ui, value, choices),
+            );
+        });
+    });
+}
+
+pub(super) fn palette(ui: &mut egui::Ui, palette: &[[u8; 3]], limit: usize) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(limit as f32 * 14., 14.), egui::Sense::hover());
+    for (i, &[r, g, b]) in palette.iter().take(limit).enumerate() {
+        let center = rect.left_center() + egui::vec2(7. + i as f32 * 14., 0.);
+        ui.painter().circle(
+            center,
+            4.8,
+            Color32::from_rgb(r, g, b),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
     }
 }
 

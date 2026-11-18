@@ -44,7 +44,7 @@ fn set_assignment(map: &mut std::collections::BTreeMap<String, u32>, path: &str,
         map.insert(key, slot);
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub follow_global_colors: bool,

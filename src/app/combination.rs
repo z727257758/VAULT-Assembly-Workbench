@@ -68,6 +68,16 @@ pub(super) fn validated_layout(
     )
 }
 impl Preset {
+    pub(super) fn apply_label_font(&mut self, font: Option<crate::label::Font>) {
+        if let Some(font) = font {
+            self.label.font = font;
+            self.gridfinity.apply_label_font(Some(font));
+            for drawer in &mut self.drawers {
+                drawer.apply_label_font(Some(font));
+            }
+        }
+    }
+
     pub(super) fn validate_member(&self, catalog: &Catalog) -> Result<(), String> {
         if !["S", "M", "L", "XL"].contains(&self.selection.width.as_str())
             || !(3..=7).contains(&self.selection.depth)
@@ -1131,7 +1141,7 @@ pub(super) fn load(
 impl App {
     pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
         self.commit_member();
-        let saved = CombinationPreset {
+        let mut saved = CombinationPreset {
             project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
             preset: self.member_snapshot(),
@@ -1139,6 +1149,10 @@ impl App {
             active_member: self.active_member,
             combination_gap: self.combination_gap,
         };
+        saved.preset.apply_label_font(self.label_font);
+        for member in &mut saved.members {
+            member.preset.apply_label_font(self.label_font);
+        }
         if let Err(e) = saved.validate(&self.catalog) {
             self.status = e;
             return;
@@ -1985,6 +1999,38 @@ mod tests {
         validate_layout(&members[..1], 0.).unwrap();
         assert!(validate_layout(&members[..2], 0.).is_err());
     }
+    #[test]
+    fn shared_label_font_applies_to_nested_drawers_and_gridfinity_copies() {
+        use crate::label::Font;
+
+        let mut saved = preset();
+        let mut child = preset();
+        child.label.text = "Drawer A".into();
+        child
+            .gridfinity
+            .bins
+            .push(crate::gridfinity::Bin::default());
+        child.gridfinity.bins[0].label.text = "电阻".into();
+        saved.drawers.push(child);
+
+        let mut effective = saved.clone();
+        effective.apply_label_font(Some(Font::ArialBold));
+        let leaf = &effective.drawers[0];
+        assert_eq!(effective.label.font, Font::ArialBold);
+        assert_eq!(leaf.label.font, Font::ArialBold);
+        assert_eq!(leaf.gridfinity.shared.font, Font::ArialBold);
+        assert_eq!(leaf.gridfinity.bins[0].label.font, Font::ArialBold);
+        assert_eq!(leaf.label.text, "Drawer A");
+        assert_eq!(leaf.gridfinity.bins[0].label.text, "电阻");
+
+        saved.apply_label_font(None);
+        assert_eq!(saved.drawers[0].label.font, Font::ChineseBold);
+        assert_eq!(
+            saved.drawers[0].gridfinity.bins[0].label.font,
+            Font::ChineseBold
+        );
+    }
+
     #[test]
     fn old_presets_load_and_combination_roundtrip_keeps_independent_state() {
         let old = toml::to_string(&preset()).unwrap();

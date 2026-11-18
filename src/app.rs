@@ -8,6 +8,7 @@ mod large_stl_smoke;
 mod motion;
 mod preview_modes;
 mod recipes;
+mod settings_panel;
 pub(crate) use recipes::audit as audit_presets;
 mod stopper_smoke;
 mod tower;
@@ -80,6 +81,8 @@ struct Settings {
     #[serde(default)]
     model_root: String,
     language: String,
+    #[serde(default)]
+    label_font: Option<crate::label::Font>,
 }
 impl Settings {
     fn load(home: &Path) -> Option<Self> {
@@ -154,6 +157,8 @@ pub struct App {
     animation: animation::State,
     inline_edit: inline_edit::State,
     appearance: appearance::Appearance,
+    label_font: Option<crate::label::Font>,
+    settings_page: Option<settings_panel::Page>,
     tower: tower::State,
     active_drawer: Option<usize>,
     preview_modes: preview_modes::State,
@@ -291,6 +296,8 @@ impl App {
             animation: Default::default(),
             inline_edit: Default::default(),
             appearance,
+            label_font: settings.as_ref().and_then(|s| s.label_font),
+            settings_page: None,
             tower: Default::default(),
             active_drawer: None,
             preview_modes: Default::default(),
@@ -467,7 +474,14 @@ impl App {
         self.preview.schedule(
             SceneRequest {
                 members: if assembly && self.combination_view {
-                    self.members.clone()
+                    self.members
+                        .iter()
+                        .cloned()
+                        .map(|mut member| {
+                            member.preset.apply_label_font(self.label_font);
+                            member
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 },
@@ -480,12 +494,12 @@ impl App {
                     Default::default()
                 },
                 gridfinity: if self.assembly_kind == AssemblyKind::Drawer {
-                    self.gridfinity.clone()
+                    self.gridfinity_with_label_font()
                 } else {
                     Default::default()
                 },
                 home: self.home.clone(),
-                label: self.label.clone(),
+                label: self.label.with_font(self.label_font),
                 items,
                 root,
                 title,
@@ -806,11 +820,17 @@ impl App {
             export: self.export_options.clone(),
             model_root: self.last_model_root.to_string_lossy().into(),
             language: if self.zh { "zh" } else { "en" }.into(),
+            label_font: self.label_font,
         };
         self.write_state(
             "settings.toml",
             toml::to_string_pretty(&settings).map_err(|e| e.to_string())?,
         )
+    }
+    fn gridfinity_with_label_font(&self) -> crate::gridfinity::Layout {
+        let mut layout = self.gridfinity.clone();
+        layout.apply_label_font(self.label_font);
+        layout
     }
     fn write_state(&self, name: &str, text: String) -> Result<(), String> {
         let dir = self.home.join("state");
@@ -891,8 +911,12 @@ impl App {
                         self.setup_roof_smoke(ctx);
                     }
                     if self.smoke
-                        && std::env::args()
-                            .any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
+                        && std::env::args().any(|a| {
+                            matches!(
+                                a.as_str(),
+                                "--smoke-tower" | "--smoke-workspace" | "--smoke-build-panel"
+                            )
+                        })
                     {
                         self.setup_tower_smoke(ctx);
                     }
@@ -2787,7 +2811,7 @@ impl App {
                     });
                     ui.add_space(8.);
                     ui.allocate_ui_with_layout(egui::vec2(preview_width,0.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                        self.gridfinity_editor.selected_preview(ui,&draft,selected,&self.export_options.plate);
+                        self.gridfinity_editor.selected_preview(ui,&draft,selected,&self.export_options.plate,self.label_font);
                     });
                 });
                 if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
@@ -2803,8 +2827,8 @@ impl App {
                         ui.strong("本盒标签文本（单独设置）");
                         ui.checkbox(&mut b.label.enabled,"标签文字");
                         if b.label.enabled {
-                            ui.add(egui::TextEdit::multiline(&mut b.label.text).desired_rows(2).char_limit(48).hint_text("最多两行；字体、字号、文字方式及深度在上方统一配置"));
-                            crate::label::stroke_check_ui(ui,&b.label);
+                            ui.add(egui::TextEdit::multiline(&mut b.label.text).desired_rows(2).char_limit(48).hint_text("最多两行"));
+                            crate::label::stroke_check_ui(ui,&b.label.with_font(self.label_font));
                         }
                     }
                     if ui.button("特写此盒子").clicked() {preview=Some(b.path());}
@@ -2884,14 +2908,7 @@ impl App {
                         ui.radio_value(&mut self.label.style,crate::label::Style::Engraved,t(z,"凹字","Engraved"));
                         ui.radio_value(&mut self.label.style,crate::label::Style::Flat,t(z,"平面分色","Flat color"));
                     });
-                    ui.horizontal(|ui|{
-                        ui.label(t(z,"字体","Font"));
-                        ui.selectable_value(&mut self.label.font,crate::label::Font::Chinese,t(z,"微软雅黑（中英文）","Microsoft YaHei"));
-                        ui.selectable_value(&mut self.label.font,crate::label::Font::Arial,"Arial");
-                        ui.selectable_value(&mut self.label.font,crate::label::Font::ChineseBold,t(z,"微软雅黑粗体（推荐）","Microsoft YaHei Bold (recommended)"));
-                        ui.selectable_value(&mut self.label.font,crate::label::Font::ArialBold,"Arial Bold");
-                    });
-                    crate::label::stroke_check_label_ui(ui, &self.label, path);
+                    crate::label::stroke_check_label_ui(ui, &self.label.with_font(self.label_font), path);
                     let minimum = self.label.min_size();
                     ui.add(egui::Slider::new(&mut self.label.size,minimum..=12.).text(t(z,"字号 mm","Size mm")));
                     ui.small(t(z,"0.4 mm 喷嘴经验建议：优先粗体；英文/数字最低 4 mm，中文及其他文字最低 5 mm。字号为 em 尺寸，非实际字高；复杂汉字需放大并检查切片。笔画检查结果见下方。","Guidance for a 0.4 mm nozzle: prefer bold; minimum em size 4 mm for ASCII, 5 mm for other scripts. Actual glyph height varies. Enlarge complex glyphs and inspect sliced paths. See the stroke geometry estimate below."));
@@ -3044,32 +3061,28 @@ impl App {
             .open(&mut open).resizable(true).vscroll(true).default_width(540.).default_height(680.).show(ctx,|ui|{
                 let total = self.export_review_ui(ui);
                 ui.add_enabled_ui(self.export_rx.is_none(),|ui|{
-                    for (format,label) in [
-                        (crate::export::Format::Stl,t(z,"STL 文件夹（每份单独文件）","STL folder (one file per copy)")),
-                        (crate::export::Format::ThreeMf,t(z,"3MF 工程（P1S 自动摆盘）","3MF project (P1S plate layout)")),
-                    ] {ui.radio_value(&mut self.export_options.format,format,label);}
                     ui.separator();
-                    if self.export_options.format==crate::export::Format::ThreeMf && self.export_scope == workflow::ExportScope::Current {
-                        ui.strong("Bambu Lab P1S · 0.4 mm");
-                        ui.small(t(z,"256 × 256 mm；参考配置限高 250 mm；自动避开左前禁放区与起始擦料线。","256 × 256 mm; profile height 250 mm; front-left keep-out and start purge lines reserved."));
-                        let p=&mut self.export_options.plate;
-                        ui.horizontal(|ui|{ui.label(t(z,"打印板","Plate"));ui.selectable_value(&mut p.textured,true,"Textured PEI");ui.selectable_value(&mut p.textured,false,"Smooth PEI / High Temp");});
-                        ui.add(egui::Slider::new(&mut p.margin,0.0..=30.0).text(t(z,"平台边距 mm","Bed margin mm")));
-                        ui.add(egui::Slider::new(&mut p.gap,0.0..=30.0).text(t(z,"零件间距 mm","Part spacing mm")));
-                        ui.add(egui::Slider::new(&mut p.brim,0.0..=10.0).text(t(z,"外侧 Brim mm（0 关闭）","Outer brim mm (0 off)")));
-                        ui.checkbox(&mut p.rotate,t(z,"允许平面旋转 90°","Allow 90° rotation on bed"));
-                        ui.checkbox(&mut p.flat_text_face_down,t(z,"平面分色标牌字面朝下","Print flat-color labels face down")).on_hover_text(t(z,"独立 Label 与 Cullenect 可拆标牌的平面文字朝向热床；盒子一体标签台保持原朝向。仅影响 3MF 打印摆盘。","Place flat text against the bed for standalone Label and Cullenect labels. Integral bin shelves keep their orientation. Applies to 3MF print placement only."));
-                        ui.checkbox(&mut p.split,t(z,"同色零件放不下时自动增加打印盘","Add plates when one color overflows"));
-                        ui.checkbox(&mut p.center,t(z,"每盘零件整体居中","Center each plate’s parts")).on_hover_text(t(z,"保留间距整体居中；若触及禁放区则保留原摆放。","Preserve spacing; keep original placement if centering hits the keep-out."));
-                        ui.separator();
-                        ui.add(egui::Slider::new(&mut p.layer,0.08..=0.28).step_by(0.01).text(t(z,"层高 mm","Layer height mm")));
-                        ui.add(egui::Slider::new(&mut p.walls,1..=10).text(t(z,"壁数","Wall loops")));
-                        ui.add(egui::Slider::new(&mut p.infill,0..=100).text(t(z,"螺旋填充 %","Gyroid infill %")));
-                        ui.label(t(z,"按耗材组合分盘，文字与底板同盘；多色打印请在 Bambu Studio 确认 AMS 映射、冲刷和擦拭塔。","Separate plates per color slot; overflow adds plates within that slot."));
-                        if ui.button(t(z,"配置零件颜色…","Configure part colors…")).clicked(){self.colors_open=true;}
-                        ui.checkbox(&mut p.support_by_name,t(z,"为 Turn On Supports 零件启用支撑","Enable support for Turn On Supports parts"));
-                        ui.checkbox(&mut p.module_clip_supports,t(z,"模块底部卡扣局部支撑","Local supports under module clips")).on_hover_text(t(z,"为识别到的标准 S/M/L Module 底部卡扣写入强制支撑涂绘，使用手动树状支撑；切片后生成，可在 Bambu Studio 修改。","Paint recognized lower clips of standard S/M/L modules with manual tree supports; generated on slicing and editable in Bambu Studio."));
-                        ui.small(t(z,"采用 Bambu PETG Basic 官方 P1S 兼容参数。按上述朝向选项摆盘，未切片；请在 Bambu Studio 检查支撑、耗材和首层后打印。","Uses official P1S-compatible Bambu PETG Basic settings and the orientation options above; unsliced. Review supports, filament and first layer in Bambu Studio."));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(match self.export_options.format {
+                            crate::export::Format::Stl => t(z, "STL 文件夹", "STL folder"),
+                            crate::export::Format::ThreeMf => t(z, "3MF 工程 · P1S", "3MF project · P1S"),
+                        });
+                        if ui.button(t(z, "导出设置…", "Export settings…")).clicked() {
+                            self.settings_page = Some(settings_panel::Page::Export);
+                        }
+                        if self.export_options.format == crate::export::Format::ThreeMf
+                            && self.export_scope == workflow::ExportScope::Current
+                        {
+                            if ui.button(t(z, "打印参数…", "Print parameters…")).clicked() {
+                                self.settings_page = Some(settings_panel::Page::Print);
+                            }
+                            if ui.button(t(z, "零件配色…", "Part colors…")).clicked() {
+                                self.colors_open = true;
+                            }
+                        }
+                    });
+                    if self.export_options.format == crate::export::Format::ThreeMf {
+                        ui.small(t(z, "3MF 为未切片工程。请在 Bambu Studio 核对耗材、支撑与首层。", "3MF projects are unsliced. Review filament, supports, and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled((total > 0 && total <= 1000) && !self.busy && !self.preview.has_pending(),
                         egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
@@ -3159,9 +3172,9 @@ impl App {
         }
         let root = self.catalog.root.clone();
         let options = self.export_options.clone();
-        let label = self.label.clone();
+        let label = self.label.with_font(self.label_font);
         let gf = if self.assembly_kind == AssemblyKind::Drawer {
-            self.gridfinity.clone()
+            self.gridfinity_with_label_font()
         } else {
             Default::default()
         };
@@ -3286,9 +3299,14 @@ impl eframe::App for App {
                 self.image = None;
             }
         }
+        self.settings_panel(ctx);
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-settings") {
+            self.settings_smoke(ctx);
+            return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
             self.motion_smoke(ctx);
@@ -3302,7 +3320,13 @@ impl eframe::App for App {
             self.roof_smoke(ctx);
             return;
         }
-        if self.smoke && std::env::args().any(|a| a == "--smoke-tower" || a == "--smoke-workspace")
+        if self.smoke
+            && std::env::args().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "--smoke-tower" | "--smoke-workspace" | "--smoke-build-panel"
+                )
+            })
         {
             self.tower_smoke(ctx);
             return;
@@ -4399,6 +4423,7 @@ mod accessory_export_tests {
             model_root: library.path().to_string_lossy().into(),
             language: "en".into(),
             export: Default::default(),
+            label_font: Some(crate::label::Font::ArialBold),
         };
         let data = toml::to_string(&saved).unwrap();
         std::fs::write(home.path().join("config/default.toml"), &data).unwrap();
@@ -4410,6 +4435,7 @@ mod accessory_export_tests {
         let restored = Settings::load(home.path()).unwrap();
         assert_eq!(restored.startup_root(), Some(library.path().to_path_buf()));
         assert!(restored.appearance == appearance::Appearance::Dark);
+        assert_eq!(restored.label_font, saved.label_font);
         drop(library);
         let missing = Settings::load(home.path()).unwrap();
         assert!(missing.startup_root().is_none());

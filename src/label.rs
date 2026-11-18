@@ -83,6 +83,12 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn with_font(&self, font: Option<Font>) -> Self {
+        let mut config = self.clone();
+        config.font = font.unwrap_or(self.font);
+        config
+    }
+
     pub fn active(&self) -> bool {
         self.enabled && !self.text.trim().is_empty()
     }
@@ -198,6 +204,11 @@ pub(crate) fn tab_text_polygons(config: &Config) -> Result<Vec<Vec<D2>>, String>
 fn text_polygons_with_width(config: &Config, half_width: f64) -> Result<Vec<Vec<D2>>, String> {
     text_polygons_in_area(config, half_width, 6.)
 }
+fn read_font(file: &str) -> Result<Vec<u8>, String> {
+    let path = crate::paths::windows_font(file).ok_or_else(|| format!("系统字体不可用：{file}"))?;
+    std::fs::read(&path).map_err(|e| format!("字体不可用：{}: {e}", path.display()))
+}
+
 fn text_polygons_in_area(
     config: &Config,
     half_width: f64,
@@ -209,12 +220,31 @@ fn text_polygons_in_area(
         Font::ChineseBold => "msyhbd.ttc",
         Font::ArialBold => "arialbd.ttf",
     };
-    let path = crate::paths::windows_font(file).ok_or_else(|| format!("系统字体不可用：{file}"))?;
-    let data = std::fs::read(&path).map_err(|e| format!("字体不可用：{}: {e}", path.display()))?;
+    let data = read_font(file)?;
     let face = ttf_parser::Face::parse(&data, 0).map_err(|e| format!("字体读取失败：{e:?}"))?;
+    let fallback_file = match config.font {
+        Font::Arial => Some("msyh.ttc"),
+        Font::ArialBold => Some("msyhbd.ttc"),
+        _ => None,
+    };
+    let fallback_data = fallback_file
+        .filter(|_| {
+            config
+                .text
+                .lines()
+                .flat_map(str::chars)
+                .any(|ch| face.glyph_index(ch).is_none())
+        })
+        .map(read_font)
+        .transpose()?;
+    let fallback = fallback_data
+        .as_deref()
+        .map(|data| ttf_parser::Face::parse(data, 0))
+        .transpose()
+        .map_err(|e| format!("备用字体读取失败：{e:?}"))?;
     let mut out = Outline {
         paths: Vec::new(),
-        scale: config.size as f64 / face.units_per_em() as f64,
+        scale: 1.,
         origin: D2::new(0., 0.),
     };
     let mut rows = Vec::new();
@@ -222,15 +252,21 @@ fn text_polygons_in_area(
         out.origin = D2::new(0., -(row as f64) * config.size as f64 * 1.35);
         let first = out.paths.len();
         for ch in line.chars().filter(|c| *c as u32 != 13) {
-            let id = face
+            let (glyph_face, id) = face
                 .glyph_index(ch)
+                .map(|id| (&face, id))
+                .or_else(|| {
+                    let fallback = fallback.as_ref()?;
+                    fallback.glyph_index(ch).map(|id| (fallback, id))
+                })
                 .ok_or_else(|| format!("当前字体不包含字符：{ch}"))?;
+            out.scale = config.size as f64 / glyph_face.units_per_em() as f64;
             let before = out.paths.len();
-            face.outline_glyph(id, &mut out);
+            glyph_face.outline_glyph(id, &mut out);
             if out.paths.len() == before && !ch.is_whitespace() {
                 return Err(format!("字符没有可用轮廓：{ch}"));
             }
-            out.origin.x += face.glyph_hor_advance(id).unwrap_or(0) as f64 * out.scale;
+            out.origin.x += glyph_face.glyph_hor_advance(id).unwrap_or(0) as f64 * out.scale;
         }
         rows.push(first..out.paths.len());
         let mut lo = f64::INFINITY;
@@ -669,6 +705,28 @@ pub fn write_stl(mesh: &Mesh, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arial_uses_yahei_for_missing_chinese_glyphs() {
+        for (font, primary, fallback) in [
+            (Font::Arial, "arial.ttf", "msyh.ttc"),
+            (Font::ArialBold, "arialbd.ttf", "msyhbd.ttc"),
+        ] {
+            if crate::paths::windows_font(primary).is_none()
+                || crate::paths::windows_font(fallback).is_none()
+            {
+                continue;
+            }
+            let config = Config {
+                enabled: true,
+                text: "A电阻".into(),
+                font,
+                ..Default::default()
+            };
+            assert!(!tab_text_polygons(&config).unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn stroke_opening_detects_thin_strokes_and_preserves_holes() {
         fn rectangle(w: f64, h: f64) -> CrossSection {

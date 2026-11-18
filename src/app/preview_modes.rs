@@ -104,7 +104,7 @@ fn build(request: PrintRequest, cancel: &crate::preview::Cancel) -> Result<Print
 impl App {
     fn print_request(&mut self) -> PrintRequest {
         self.commit_member();
-        let members = if self.combination_view {
+        let mut members = if self.combination_view {
             self.members
                 .iter()
                 .enumerate()
@@ -141,6 +141,9 @@ impl App {
                 },
             )]
         };
+        for (_, member) in &mut members {
+            member.preset.apply_label_font(self.label_font);
+        }
         PrintRequest {
             root: self.catalog.root.clone(),
             home: self.home.clone(),

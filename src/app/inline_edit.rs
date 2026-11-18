@@ -215,6 +215,7 @@ impl App {
         self.tab = 0;
         self.tower.print_list = false;
         self.tower.open_layer = Some(self.members[member].placement.level);
+        self.tower.layer_group_request = Some(true);
         self.inline_edit = State {
             open: true,
             target: Some(target),

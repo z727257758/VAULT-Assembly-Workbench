@@ -124,8 +124,12 @@ impl Editor {
         layout: &Layout,
         selected: Option<u32>,
         colors: &crate::print_plate::Config,
+        font: Option<crate::label::Font>,
     ) {
-        let bin = self.preview_bin(layout, selected);
+        let mut bin = self.preview_bin(layout, selected);
+        if let Some(bin) = &mut bin {
+            bin.label = bin.label.with_font(font);
+        }
         self.preview.show(
             ui,
             bin.as_ref(),
@@ -167,16 +171,6 @@ impl Editor {
                     ui.radio_value(&mut settings.style, crate::label::Style::Raised, "凸字");
                     ui.radio_value(&mut settings.style, crate::label::Style::Engraved, "凹字");
                     ui.radio_value(&mut settings.style, crate::label::Style::Flat, "平面分色");
-                });
-                ui.horizontal_wrapped(|ui| {
-                    for (font, name) in [
-                        (crate::label::Font::Chinese, "微软雅黑"),
-                        (crate::label::Font::ChineseBold, "微软雅黑粗体"),
-                        (crate::label::Font::Arial, "Arial"),
-                        (crate::label::Font::ArialBold, "Arial Bold"),
-                    ] {
-                        ui.selectable_value(&mut settings.font, font, name);
-                    }
                 });
                 let minimum = layout
                     .bins

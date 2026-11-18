@@ -1,4 +1,48 @@
 use super::*;
+
+#[test]
+fn section_header_click_preserves_other_sections() {
+    let ctx = egui::Context::default();
+    let frame = |events| {
+        let mut sections = [false; 2];
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400., 500.),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    sections = [
+                        group(ui, "layers", "Layers", true, |_| {}),
+                        group(ui, "colors", "Colors", false, |_| {}),
+                    ];
+                });
+            },
+        );
+        sections
+    };
+    assert_eq!(frame(vec![]), [true, false]);
+    let pos = egui::pos2(345., 25.);
+    for expected in [false, true] {
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        assert_eq!(frame(vec![]), [expected, false]);
+    }
+}
+
 struct Harness {
     ctx: egui::Context,
     time: f64,
@@ -54,6 +98,7 @@ impl Harness {
                             kind: "Drawer",
                             size: "M5",
                             height: "2F",
+                            height_mm: 100.,
                             can_delete: self.can_delete,
                             zh: false,
                         },

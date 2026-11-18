@@ -16,7 +16,6 @@ impl App {
 
     pub(super) fn workspace_toolbar(&mut self, ctx: &egui::Context) {
         let z = self.zh;
-        let mut theme = self.appearance;
         egui::TopBottomPanel::top("workspace-toolbar")
             .frame(
                 egui::Frame::new()
@@ -39,46 +38,9 @@ impl App {
                         },
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button(t(z, "设置", "Settings"), |ui| {
-                            ui.strong(t(z, "外观", "Appearance"));
-                            ui.selectable_value(
-                                &mut theme,
-                                appearance::Appearance::Light,
-                                t(z, "浅色", "Light"),
-                            );
-                            ui.selectable_value(
-                                &mut theme,
-                                appearance::Appearance::Dark,
-                                t(z, "深色", "Dark"),
-                            );
-                            ui.separator();
-                            if ui.button(if z { "English" } else { "中文" }).clicked() {
-                                self.zh = !z;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                                    crate::app_name(self.zh).into(),
-                                ));
-                                if let Err(e) = self.save_settings() {
-                                    self.status = e;
-                                }
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    !self.busy,
-                                    egui::Button::new(t(z, "更换模型库…", "Change library…")),
-                                )
-                                .clicked()
-                            {
-                                self.choose_library(ctx);
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.small(t(
-                                z,
-                                "非官方辅助工具 · 本地模型只读",
-                                "Unofficial companion · read-only models",
-                            ));
-                        });
+                        if ui.button(t(z, "设置", "Settings")).clicked() {
+                            self.settings_page = Some(settings_panel::Page::Appearance);
+                        }
                         ui.menu_button(t(z, "资料", "Resources"), |ui| {
                             if ui
                                 .selectable_label(self.tab == 1, t(z, "零件库", "Parts library"))
@@ -120,17 +82,22 @@ impl App {
                     });
                 });
             });
-        if theme != self.appearance {
-            self.appearance = theme;
-            theme.apply(ctx);
-            if let Err(e) = self.save_settings() {
-                self.status = e;
-            }
-        }
     }
 
     pub(super) fn workspace_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
+        let files = if self.combination_view {
+            self.tower_file_count()
+        } else {
+            self.bom
+                .iter()
+                .filter(|item| {
+                    item.enabled
+                        && (self.active_drawer.is_none()
+                            || !crate::catalog::tower::housing(&item.path))
+                })
+                .count()
+        };
         if !self.combination_view {
             if ui
                 .button(t(z, "← 返回整体配置", "← Back to project"))
@@ -144,73 +111,67 @@ impl App {
                 .on_hover_text(&context);
             ui.add_space(4.);
         }
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
-            if ui
-                .add_sized(
-                    [width, 34.],
-                    egui::Button::selectable(
-                        self.tab == 0 && !self.tower.print_list,
-                        if self.combination_view {
-                            t(z, "1 · 整体配置", "1 · Configure")
-                        } else {
-                            t(z, "1 · 编辑内容", "1 · Edit")
-                        },
-                    ),
-                )
-                .clicked()
-            {
-                self.tab = 0;
-                self.tower.print_list = false;
-            }
-            if ui
-                .add_sized(
-                    [width, 34.],
-                    egui::Button::selectable(
-                        self.tab == 0 && self.tower.print_list,
-                        t(z, "2 · 打印清单", "2 · Print list"),
-                    ),
-                )
-                .clicked()
-            {
-                self.tab = 0;
-                self.tower.print_list = true;
+        ui.horizontal_wrapped(|ui| {
+            for (tab, print, title) in [
+                (
+                    0,
+                    false,
+                    if self.combination_view {
+                        t(z, "搭建", "Build")
+                    } else {
+                        t(z, "编辑内容", "Edit")
+                    },
+                ),
+                (0, true, t(z, "打印清单", "Print list")),
+                (1, false, t(z, "零件库", "Parts library")),
+            ] {
+                let selected = self.tab == tab && (tab != 0 || self.tower.print_list == print);
+                let title = if print && files > 0 {
+                    format!("{title}  {files}")
+                } else {
+                    title.into()
+                };
+                let text = RichText::new(title).strong().color(if selected {
+                    ui.visuals().text_color()
+                } else {
+                    ui.visuals().weak_text_color()
+                });
+                let response = ui.add(egui::Button::new(text).frame(false));
+                if selected {
+                    let y = response.rect.bottom();
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(response.rect.left() + 5., y),
+                            egui::pos2(response.rect.right() - 5., y),
+                        ],
+                        egui::Stroke::new(2., ui.visuals().text_color()),
+                    );
+                }
+                if response.clicked() {
+                    self.tab = tab;
+                    if tab == 0 {
+                        self.tower.print_list = print;
+                    }
+                }
             }
         });
-        if self.tab == 0 && !self.tower.print_list {
+        if self.tab == 0 && !self.tower.print_list && !self.combination_view {
             ui.horizontal(|ui| {
-                ui.small(if self.combination_view {
-                    t(z, "尺寸、层与抽屉", "Size, layers & drawers")
-                } else {
-                    t(z, "内部收纳与标牌", "Inserts & labels")
-                });
+                ui.small(t(z, "内部收纳与标牌", "Inserts & labels"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add_enabled(
                             !self.bom.is_empty(),
-                            egui::Button::new(if self.combination_view {
-                                t(z, "整体配色…", "Project colors…")
-                            } else {
-                                t(z, "配色…", "Colors…")
-                            })
-                            .frame(false),
+                            egui::Button::new(t(z, "配色…", "Colors…")).frame(false),
                         )
                         .clicked()
                     {
-                        if self.combination_view {
-                            self.open_global_colors();
-                        } else {
-                            self.colors_open = true;
-                        }
+                        self.colors_open = true;
                     }
                 });
             });
-        } else if self.tab != 0 {
-            ui.strong(if self.tab == 1 {
-                t(z, "零件库", "Parts library")
-            } else {
-                t(z, "装配说明", "Manuals")
-            });
+        } else if self.tab == 2 {
+            ui.strong(t(z, "装配说明", "Manuals"));
         }
         ui.separator();
     }
@@ -291,7 +252,6 @@ impl App {
                     {
                         self.commit_member();
                         self.export_scope = workflow::ExportScope::Current;
-                        self.export_options.format = crate::export::Format::ThreeMf;
                         self.export_open = true;
                     }
                 });
@@ -395,22 +355,12 @@ impl App {
                                 }
                             }
                             ui.separator();
-                            ui.add_enabled_ui(!self.preview_modes.special(), |ui| {
-                                ui.checkbox(
-                                    &mut self.dimensions,
-                                    t(z, "尺寸三视图", "Dimension views"),
-                                );
-                            });
-                            ui.checkbox(&mut self.ghost, t(z, "外壳透明", "Ghost shell"));
                             if ui
-                                .checkbox(
-                                    &mut self.export_options.plate.preview_colors,
-                                    t(z, "打印颜色预览", "Print colors"),
-                                )
-                                .changed()
-                                && let Err(e) = self.save_settings()
+                                .button(t(z, "3D 视图设置…", "3D view settings…"))
+                                .clicked()
                             {
-                                self.status = e;
+                                self.settings_page = Some(settings_panel::Page::View);
+                                ui.close();
                             }
                             if self.debug_ui
                                 && ui

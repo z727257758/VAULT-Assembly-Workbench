@@ -190,6 +190,14 @@ impl Layout {
             self.shared.apply(bin);
         }
     }
+    pub fn apply_label_font(&mut self, font: Option<crate::label::Font>) {
+        if let Some(font) = font {
+            self.shared.font = font;
+            for bin in &mut self.bins {
+                bin.label.font = font;
+            }
+        }
+    }
     /// Migrate old presets from the lowest ID; shrinking to minimum existing depth
     /// preserves placement and avoids introducing overlaps while unifying them.
     pub fn adopt_shared(&mut self) {

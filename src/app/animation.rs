@@ -25,6 +25,59 @@ impl Default for State {
     }
 }
 impl App {
+    pub(super) fn layer_motion_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        members: &[usize],
+        ctx: &egui::Context,
+    ) {
+        let z = self.zh;
+        if self.scene_key != "combination" || self.busy || self.preview.has_pending() {
+            ui.add_enabled(
+                false,
+                egui::Button::new(t(z, "开合", "Open / close")).small(),
+            );
+            return;
+        }
+        let targets = members.iter().flat_map(|&member| {
+            let drawers = self.members[member].preset.drawers.len();
+            (0..drawers.max(1)).map(move |drawer| Target {
+                member,
+                drawer: (drawers != 0).then_some(drawer),
+            })
+        });
+        let mechanisms: Vec<_> = targets
+            .filter_map(|target| AssemblyRules::mechanism(&self.scene, target).ok())
+            .filter(|m| m.max > m.min + 0.001 && (m.kind != MotionKind::Lid || !m.supports_upper))
+            .collect();
+        let close = mechanisms.iter().any(|m| {
+            self.animation
+                .tracks
+                .iter()
+                .find(|track| track.plan.mechanism.child == m.child)
+                .map_or(m.value, |track| track.plan.goal)
+                > m.min + 0.001
+        });
+        let label = match (mechanisms.as_slice(), close) {
+            ([m], false) if m.kind == MotionKind::Drawer => t(z, "拉开", "Pull out"),
+            ([m], true) if m.kind == MotionKind::Drawer => t(z, "推回", "Push in"),
+            (_, false) => t(z, "打开", "Open"),
+            (_, true) => t(z, "关闭", "Close"),
+        };
+        if ui
+            .add_enabled(!mechanisms.is_empty(), egui::Button::new(label).small())
+            .clicked()
+        {
+            for m in mechanisms {
+                if let Err(error) =
+                    self.animate_joint_to(&m.child, if close { m.min } else { m.max }, ctx)
+                {
+                    self.status = error;
+                }
+            }
+        }
+    }
+
     fn motion_target(&self) -> Target {
         if self.scene_key == "combination" {
             Target {
