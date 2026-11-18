@@ -8,6 +8,9 @@ pub(super) struct State {
     pub print_list: bool,
     pub(super) open_layer: Option<u32>,
     pub(super) layer_group_request: Option<bool>,
+    scroll_to_layer: Option<u32>,
+    card_positions: BTreeMap<u32, f32>,
+    reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
     error: String,
     reset_inserts: bool,
@@ -30,6 +33,9 @@ impl Default for State {
             print_list: false,
             open_layer: Some(0),
             layer_group_request: None,
+            scroll_to_layer: None,
+            card_positions: BTreeMap::new(),
+            reorder: None,
             scroll_to_top: true,
             error: String::new(),
             reset_inserts: false,
@@ -46,6 +52,18 @@ impl Default for State {
     }
 }
 impl State {
+    pub(super) fn clear_reorder(&mut self) {
+        self.reorder = None;
+        self.card_positions.clear();
+    }
+
+    pub(super) fn reveal_layer(&mut self, level: u32) {
+        self.open_layer = Some(level);
+        self.layer_group_request = Some(true);
+        self.scroll_to_layer = Some(level);
+        self.print_list = false;
+    }
+
     fn title_ui(&mut self, ui: &mut egui::Ui, z: bool) {
         let id = ui.make_persistent_id("project-title-edit");
         if let Some(draft) = &mut self.rename_draft {
@@ -95,6 +113,52 @@ impl State {
             }
         }
     }
+}
+
+const REORDER_SECONDS: f64 = 0.25;
+
+struct ReorderMotion {
+    start: f64,
+    previous_y: BTreeMap<u32, f32>,
+}
+
+impl ReorderMotion {
+    fn remaining(&self, now: f64) -> f32 {
+        let t = ((now - self.start) / REORDER_SECONDS).clamp(0., 1.) as f32;
+        1. - t * t * (3. - 2. * t)
+    }
+}
+
+fn moved_level(level: u32, from: u32, to: u32) -> u32 {
+    if level == from {
+        to
+    } else if from < to && level > from && level <= to {
+        level - 1
+    } else if from > to && level >= to && level < from {
+        level + 1
+    } else {
+        level
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn reorder_animation_follows_the_same_layer_permutation() {
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|level| moved_level(level, 1, 3)),
+        [0, 3, 1, 2, 4]
+    );
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|level| moved_level(level, 3, 1)),
+        [0, 2, 3, 1, 4]
+    );
+    let motion = ReorderMotion {
+        start: 2.,
+        previous_y: BTreeMap::from([(3, 170.)]),
+    };
+    assert_eq!(motion.remaining(2.), 1.);
+    assert_eq!(motion.remaining(2. + REORDER_SECONDS / 2.), 0.5);
+    assert_eq!(motion.remaining(2. + REORDER_SECONDS), 0.);
 }
 
 pub(super) fn default_name() -> String {
@@ -498,6 +562,7 @@ impl App {
         };
         candidate.validate(&self.catalog)?;
         self.record_workflow();
+        self.tower.clear_reorder();
         self.members = next;
         let active = self
             .members
@@ -518,6 +583,7 @@ impl App {
     }
     fn tower_apply_project(&mut self, project: Project, ctx: &egui::Context) -> Result<(), String> {
         project.saved.validate(&self.catalog)?;
+        self.tower.clear_reorder();
         let saved = project.saved;
         self.tower.name = project.name;
         self.tower.rename_draft = None;
@@ -769,6 +835,7 @@ impl App {
         let top_kind_changed = matches!(action, Action::Kind(..));
         let mut next = self.members.clone();
         let level;
+        let mut reorder = None;
         match action {
             Action::Resize(width, depth) => {
                 next = resize(&next, &self.catalog, &width, depth, reset)?;
@@ -813,16 +880,18 @@ impl App {
             }
             Action::Move(from, to) => {
                 for m in &mut next {
-                    let l = m.placement.level;
-                    m.placement.level = if l == from {
-                        to
-                    } else if from < to && l > from && l <= to {
-                        l - 1
-                    } else if from > to && l >= to && l < from {
-                        l + 1
-                    } else {
-                        l
-                    };
+                    m.placement.level = moved_level(m.placement.level, from, to);
+                }
+                if from != to && !self.tower.card_positions.is_empty() {
+                    reorder = Some(ReorderMotion {
+                        start: ctx.input(|input| input.time),
+                        previous_y: self
+                            .tower
+                            .card_positions
+                            .iter()
+                            .map(|(&level, &y)| (moved_level(level, from, to), y))
+                            .collect(),
+                    });
                 }
                 level = to;
             }
@@ -933,7 +1002,9 @@ impl App {
         if boundaries || top_kind_changed {
             roofs::reconcile(&self.members, &mut next)?;
         }
-        self.tower_apply(next, level, ctx)
+        self.tower_apply(next, level, ctx)?;
+        self.tower.reorder = reorder;
+        Ok(())
     }
     pub(super) fn tower_project_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
@@ -1131,6 +1202,7 @@ impl App {
             let all = match rows(&self.members) {
                 Ok(rows) => rows,
                 Err(error) => {
+                    self.tower.scroll_to_layer = None;
                     ui.colored_label(ui.visuals().hyperlink_color, error);
                     ui.small(t(z, "原方案的标签、内部配置和装配位置完整保留。可新建层式项目，或选择原成员编辑。", "Original labels, inserts and placements are preserved. Start a layer project or edit an existing member."));
                     for (i, m) in self.members.iter().enumerate() {
@@ -1231,7 +1303,18 @@ impl App {
     ) {
         let z = self.zh;
         let first = &all[0];
+        let scroll_to_layer = self.tower.scroll_to_layer.take();
         roofs::show(self, ui, all.last().unwrap(), action);
+        let origin_y = ui.cursor().min.y;
+        let now = ctx.input(|input| input.time);
+        let mut reorder = self.tower.reorder.take();
+        let remaining = reorder.as_ref().map_or(0., |motion| motion.remaining(now));
+        if remaining > 0. {
+            ctx.request_repaint();
+        } else {
+            reorder = None;
+        }
+        self.tower.card_positions.clear();
         for row in all.iter().rev() {
             let expanded = self.tower.open_layer == Some(row.level);
             let all_boxes = row
@@ -1258,8 +1341,21 @@ impl App {
             let height_mm =
                 crate::constraints::AssemblyRules::installation_height(&row.height, all_boxes)
                     .unwrap_or_default();
+            let destination = ui.available_rect_before_wrap();
+            let y = destination.min.y - origin_y;
+            let previous = reorder
+                .as_ref()
+                .and_then(|motion| motion.previous_y.get(&row.level))
+                .copied()
+                .unwrap_or(y);
+            let offset = egui::vec2(0., (previous - y) * remaining);
+            let mut card_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("tower-card-slot", row.level))
+                    .max_rect(destination.translate(offset)),
+            );
             let card = layers::layer(
-                ui,
+                &mut card_ui,
                 layers::Header {
                     level: row.level,
                     kind,
@@ -1382,6 +1478,17 @@ impl App {
                     });
                 },
             );
+            let visual_rect = card.response.rect;
+            self.tower
+                .card_positions
+                .insert(row.level, visual_rect.min.y - origin_y);
+            ui.advance_cursor_after_rect(card_ui.min_rect().translate(-offset));
+            if scroll_to_layer == Some(row.level) {
+                let mut target = visual_rect.translate(-offset);
+                let visible_height = (ui.clip_rect().height() - 20.).max(40.);
+                target.max.y = target.max.y.min(target.min.y + visible_height);
+                ui.scroll_to_rect(target, None);
+            }
             if let Some(open) = card.open {
                 self.tower.open_layer = if open { Some(row.level) } else { None };
                 if open && !expanded {
@@ -1397,6 +1504,7 @@ impl App {
                 *action = Some(Action::Move(*from, row.level));
             }
         }
+        self.tower.reorder = reorder;
         ui.horizontal_wrapped(|ui| {
             if ui.button(t(z, "＋ 抽屉层", "＋ Drawer layer")).clicked() {
                 *action = Some(Action::Add(AssemblyKind::Drawer));
@@ -2032,7 +2140,20 @@ impl App {
             {
                 return Err("Incorrect layer shells".into());
             }
-            if [2, 12, 15].contains(&self.smoke_stage) {
+            if build_panel_smoke
+                && self.smoke_stage == 2
+                && (self.tower.open_layer != Some(0)
+                    || self.tower.print_list
+                    || self.tower.scroll_to_layer.is_some()
+                    || self.tower.layer_group_request.is_some()
+                    || self.inline_edit.open)
+            {
+                return Err("Preview selection did not reveal its layer in the build panel".into());
+            }
+            if build_panel_smoke && self.smoke_stage == 3 && self.tower.open_layer != Some(1) {
+                return Err("The moved layer did not stay expanded at its new position".into());
+            }
+            if !build_panel_smoke && [2, 12, 15].contains(&self.smoke_stage) {
                 if !self.combination_view
                     || self.scene_key != "combination"
                     || !self.inline_edit.open
@@ -2058,7 +2179,7 @@ impl App {
                     return Err("Subdrawer editing changed its sibling label".into());
                 }
             }
-            if self.smoke_stage == 2 && !self.label_open {
+            if !build_panel_smoke && self.smoke_stage == 2 && !self.label_open {
                 return Err("Subdrawer label editor did not open".into());
             }
             if [3, 13, 16].contains(&self.smoke_stage) && self.inline_edit.open {
@@ -2122,7 +2243,50 @@ impl App {
                     self.tower.layer_group_request = Some(false);
                 }
                 self.smoke_stage = 1;
+            } else if build_panel_smoke && self.smoke_stage == 1 {
+                let member = self
+                    .members
+                    .iter()
+                    .position(|member| member.placement.level == 0);
+                let part = member.and_then(|member| {
+                    let target = crate::scene::Target {
+                        member,
+                        drawer: None,
+                    };
+                    self.scene
+                        .parts
+                        .iter()
+                        .position(|part| target.contains(part))
+                });
+                if let Some(part) = part {
+                    self.tower.print_list = true;
+                    self.select_combination_part(part, ctx);
+                    self.smoke_stage = 2;
+                } else {
+                    let _ = std::fs::write(
+                        folder.join("smoke-error.txt"),
+                        "Missing bottom-layer test part",
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            } else if build_panel_smoke && self.smoke_stage == 2 {
+                match self.tower_action(Action::Move(0, 1), ctx) {
+                    Ok(()) if self.tower.reorder.is_some() => self.smoke_stage = 3,
+                    result => {
+                        let error = result
+                            .err()
+                            .unwrap_or_else(|| "Layer move did not start a transition".into());
+                        let _ = std::fs::write(folder.join("smoke-error.txt"), error);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
             } else {
+                if build_panel_smoke {
+                    let _ = std::fs::write(
+                        folder.join("selection-result.txt"),
+                        "PASS: preview selection reopened and located the bottom layer; moving it upward started a transition and kept the layer expanded at its new position.",
+                    );
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             return;

@@ -213,9 +213,8 @@ impl App {
         self.dimensions = false;
         self.preview_modes.mode = preview_modes::Mode::Assembly;
         self.tab = 0;
-        self.tower.print_list = false;
-        self.tower.open_layer = Some(self.members[member].placement.level);
-        self.tower.layer_group_request = Some(true);
+        self.tower
+            .reveal_layer(self.members[member].placement.level);
         self.inline_edit = State {
             open: true,
             target: Some(target),

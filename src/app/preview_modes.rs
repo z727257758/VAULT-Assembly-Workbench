@@ -3,6 +3,7 @@ use crate::scene::layouts::{PrintLayout, PrintPart};
 use glam::Vec3;
 
 const LAYER_GAP: f32 = 80.;
+const DEFAULT_PLATE_PITCH: f32 = 1.20;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -172,7 +173,7 @@ impl App {
                     Ok(layout) => {
                         state.camera = Camera::default();
                         state.camera.yaw = 0.;
-                        state.camera.pitch = 1.20;
+                        state.camera.pitch = DEFAULT_PLATE_PITCH;
                         state.camera.fit(&layout.scene, 0.);
                         let mut renderer = Renderer::new(self.renderer.state.clone());
                         renderer.upload(&layout.scene);
@@ -211,8 +212,29 @@ impl App {
                     self.preview_modes.camera.fit(&layout.scene, 0.);
                 }
             }
+            _ if self.interior_editor_open() => {
+                self.camera.fit(&self.interior_scene(), self.explosion);
+            }
             _ => self.camera.fit(&self.scene, self.explosion),
         }
+    }
+    pub(super) fn preview_camera(&self) -> &Camera {
+        if self.preview_modes.special() {
+            &self.preview_modes.camera
+        } else {
+            &self.camera
+        }
+    }
+
+    pub(super) fn preview_reset_view(&mut self) {
+        let (yaw, pitch) = if self.preview_modes.mode == Mode::Plates {
+            (0., DEFAULT_PLATE_PITCH)
+        } else {
+            let default = Camera::default();
+            (default.yaw, default.pitch)
+        };
+        self.preview_set_view(yaw, pitch);
+        self.preview_mode_fit();
     }
     pub(super) fn preview_set_view(&mut self, yaw: f32, pitch: f32) {
         let camera = if self.preview_modes.special() {
@@ -255,39 +277,15 @@ impl App {
                         ] {
                             ui.selectable_value(&mut self.preview_modes.mode, mode, label);
                         }
-                        ui.separator();
-                        if ui.button(t(z, "标牌…", "Label…")).clicked() {
-                            self.open_preview_label(None, ctx);
+                        if self.preview_modes.mode != Mode::Plates {
+                            ui.separator();
+                            if ui.button(t(z, "标牌…", "Label…")).clicked() {
+                                self.open_preview_label(None, ctx);
+                            }
                         }
                     });
-                    if self.preview_modes.mode == Mode::Exploded {
-                        let mut amount = if before == Mode::Exploded {
-                            self.explosion
-                        } else {
-                            1.
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(t(z, "展开程度", "Spread"));
-                            ui.spacing_mut().slider_width =
-                                (ui.available_width() - 65.).clamp(64., 180.);
-                            let slider = ui
-                                .scope(|ui| {
-                                    let dark = ui.visuals().dark_mode;
-                                    ui.visuals_mut().widgets.inactive.bg_fill =
-                                        Color32::from_gray(if dark { 75 } else { 210 });
-                                    ui.visuals_mut().selection.bg_fill = appearance::BRAND;
-                                    ui.add(
-                                        egui::Slider::new(&mut amount, 0.05..=1.)
-                                            .show_value(false)
-                                            .trailing_fill(true),
-                                    )
-                                })
-                                .inner;
-                            if slider.changed() {
-                                self.explosion = amount;
-                            }
-                            ui.monospace(format!("{:.0}%", amount * 100.));
-                        });
+                    if self.preview_modes.mode == Mode::Plates {
+                        self.plate_toolbar(ui, ctx);
                     }
                 });
             });
@@ -322,6 +320,104 @@ impl App {
             _ => false,
         }
     }
+
+    fn plate_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let z = self.zh;
+        let scopes = [
+            (0, t(z, "全部成员", "All members")),
+            (1, t(z, "勾选成员", "Checked members")),
+            (2, t(z, "当前成员", "Current member")),
+        ];
+        let mut edit = None;
+        ui.horizontal_wrapped(|ui| {
+            if let Some(layout) = &self.preview_modes.layout {
+                let label = self.preview_modes.filter.map_or_else(
+                    || t(z, "全部打印板", "All plates").to_owned(),
+                    |i| format!("{} {}", t(z, "打印板", "Plate"), i + 1),
+                );
+                egui::ComboBox::from_id_salt("preview-plate-filter")
+                    .selected_text(label)
+                    .width(100.)
+                    .height(300.)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.preview_modes.filter,
+                            None,
+                            t(z, "全部打印板", "All plates"),
+                        );
+                        for (i, plate) in layout.plates.iter().enumerate() {
+                            let response = ui.selectable_value(
+                                &mut self.preview_modes.filter,
+                                Some(i),
+                                format!("{} · {} / {}", i + 1, plate.name, plate.number + 1),
+                            );
+                            let slots = plate
+                                .slots
+                                .iter()
+                                .map(u32::to_string)
+                                .collect::<Vec<_>>()
+                                .join(" + ");
+                            response.on_hover_text(format!(
+                                "{} {} · {} {slots}{}",
+                                plate.copies,
+                                t(z, "份", "copies"),
+                                t(z, "耗材槽", "Slots"),
+                                if plate.removable {
+                                    t(z, " · 可拆标牌专用盘", " · Removable-label plate")
+                                } else {
+                                    ""
+                                },
+                            ));
+                        }
+                    });
+                let selected_part = self
+                    .preview_modes
+                    .selected
+                    .and_then(|i| layout.parts.get(i))
+                    .and_then(Option::as_ref)
+                    .filter(|part| {
+                        self.preview_modes
+                            .filter
+                            .is_none_or(|plate| part.plate == plate)
+                    });
+                if let Some(part) = selected_part {
+                    ui.small(format!("#{}", part.copy + 1))
+                        .on_hover_text(format!(
+                            "{} · {} {}",
+                            part.path.rsplit('/').next().unwrap_or(""),
+                            t(z, "打印板", "Plate"),
+                            part.plate + 1
+                        ));
+                    if (crate::label::is_label(&part.path)
+                        || part.path.starts_with(crate::gridfinity::PREFIX))
+                        && ui.small_button(t(z, "编辑标牌…", "Edit label…")).clicked()
+                    {
+                        edit = Some(part.clone());
+                    }
+                }
+            }
+            ui.menu_button(t(z, "排盘选项", "Plate options"), |ui| {
+                if self.combination_view {
+                    for (scope, label) in scopes {
+                        if ui
+                            .selectable_value(&mut self.preview_modes.scope, scope, label)
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                }
+                if ui.button(t(z, "打印参数…", "Print parameters…")).clicked() {
+                    self.settings_page = Some(settings_panel::Page::Print);
+                    ui.close();
+                }
+            });
+        });
+        if let Some(part) = edit {
+            self.open_preview_label(Some(part), ctx);
+        }
+    }
     fn open_preview_label(&mut self, target: Option<PrintPart>, ctx: &egui::Context) {
         self.preview_modes.mode = Mode::Assembly;
         if let Some(info) = &target
@@ -346,21 +442,10 @@ impl App {
         }
     }
     fn layers_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.add_space(if ui.max_rect().width() < 580. {
-            145.
-        } else {
-            94.
-        });
         let z = self.zh;
-        ui.small(t(
-            z,
-            "沿高度分层展示；不改变装配位置或打印方向。",
-            "Separate levels vertically; assembly and print poses are preserved.",
-        ));
         let names: Vec<_> = self.members.iter().map(|m| m.name.clone()).collect();
         let layout = self.scene.layered(LAYER_GAP, &names, z);
-        ui.separator();
-        let size = (ui.available_size() - egui::vec2(0., 80.)).max(egui::vec2(10., 10.));
+        let size = ui.available_size().max(egui::vec2(10., 10.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         navigate(ctx, &response, rect, &mut self.preview_modes.camera);
         if response.double_clicked() {
@@ -392,7 +477,7 @@ impl App {
         paint_image(ui, id, rect);
         // Keep the legend outside the model so different-height neighbors do not overlap labels.
         let painter = ui.painter().with_clip_rect(rect);
-        let mut y = rect.top() + 12.;
+        let mut y = rect.top() + 98.;
         for (label, _) in layout.labels {
             let galley = painter.layout(
                 label,
@@ -415,123 +500,47 @@ impl App {
         hint(ui, rect, z);
     }
     fn plates_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.add_space(if ui.max_rect().width() < 580. {
-            145.
-        } else {
-            94.
-        });
         let z = self.zh;
-        ui.horizontal_wrapped(|ui| {
-            if self.combination_view {
-                ui.label(t(z, "范围", "Scope"));
-                for (scope, label) in [
-                    (0, t(z, "全部成员", "All members")),
-                    (1, t(z, "勾选成员", "Checked members")),
-                    (2, t(z, "当前成员", "Current member")),
-                ] {
-                    ui.selectable_value(&mut self.preview_modes.scope, scope, label);
-                }
-            }
-            if ui.button(t(z, "打印设置…", "Print settings…")).clicked() {
-                self.export_scope = match self.preview_modes.scope {
-                    1 => workflow::ExportScope::Selected,
-                    2 => workflow::ExportScope::Current,
-                    _ => workflow::ExportScope::All,
-                };
-                if !self.combination_view {
-                    self.export_scope = workflow::ExportScope::Current;
-                }
-                self.export_open = true;
-            }
-            if ui.small_button(t(z, "俯视", "Top")).clicked() {
-                self.preview_modes.camera.yaw = 0.;
-                self.preview_modes.camera.pitch = std::f32::consts::FRAC_PI_2 - 0.0001;
-            }
-            if ui.small_button(t(z, "立体", "Orbit")).clicked() {
-                self.preview_modes.camera.yaw = 0.35;
-                self.preview_modes.camera.pitch = 0.95;
-            }
-        });
-        ui.small(t(z,"仅展示打印清单勾选项；复用 3MF 的方向、份数、分色与摆盘。各成员分别分盘。","Checked print items only; uses 3MF orientation, copies, materials and packing. Members keep separate plates."));
         self.pump_print_layout(ctx);
-        if let Some(error) = self.preview_modes.error.clone() {
-            ui.colored_label(Color32::LIGHT_RED, error);
-            if ui.button(t(z, "重新计算", "Retry")).clicked() {
-                self.preview_modes.key.clear();
-            }
+        if let Some(error) = &self.preview_modes.error {
+            ui.centered_and_justified(|ui| {
+                appearance::floating_frame(ui).show(ui, |ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    if ui.button(t(z, "重新计算", "Retry")).clicked() {
+                        self.preview_modes.key.clear();
+                    }
+                });
+            });
             return;
         }
         let Some(mut layout) = self.preview_modes.layout.take() else {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(t(
-                    z,
-                    "正在后台准备制造网格和打印板…",
-                    "Preparing manufacturing meshes and print plates…",
-                ));
+            ui.centered_and_justified(|ui| {
+                appearance::floating_frame(ui).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(t(z, "正在准备打印板…", "Preparing print plates…"));
+                    });
+                });
             });
             return;
         };
-        let previous_filter = self.preview_modes.filter;
-        ui.horizontal_wrapped(|ui| {
-            let label = self.preview_modes.filter.map_or_else(
-                || t(z, "全部打印板", "All plates").to_owned(),
-                |i| format!("{} {}", t(z, "打印板", "Plate"), i + 1),
-            );
-            egui::ComboBox::from_id_salt("preview-plate-filter")
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.preview_modes.filter,
-                        None,
-                        t(z, "全部打印板", "All plates"),
-                    );
-                    for (i, p) in layout.plates.iter().enumerate() {
-                        ui.selectable_value(
-                            &mut self.preview_modes.filter,
-                            Some(i),
-                            format!("{} · {} / {}", i + 1, p.name, p.number + 1),
-                        );
-                    }
-                });
-            ui.label(format!(
-                "{} {} · {} {}",
-                layout.plates.len(),
-                t(z, "盘", "plates"),
-                layout.plates.iter().map(|p| p.copies).sum::<usize>(),
-                t(z, "份", "copies")
-            ));
-            if let Some(i) = self.preview_modes.selected
-                && let Some(info) = &layout.parts[i]
-            {
-                ui.label(format!(
-                    "{} #{}",
-                    info.path.rsplit('/').next().unwrap_or(""),
-                    info.copy + 1
-                ));
-                if (crate::label::is_label(&info.path)
-                    || info.path.starts_with(crate::gridfinity::PREFIX))
-                    && ui.button(t(z, "编辑此标牌…", "Edit this label…")).clicked()
-                {
-                    self.open_preview_label(Some(info.clone()), ctx);
-                }
-            }
-        });
-        for (i, part) in layout.scene.parts.iter_mut().enumerate() {
-            let plate = layout.parts[i]
+        let printable_parts = layout.parts.iter().filter(|part| part.is_some()).count();
+        let mut visibility_changed = false;
+        for (index, part) in layout.scene.parts.iter_mut().enumerate() {
+            let plate = layout.parts[index]
                 .as_ref()
-                .map(|p| p.plate)
-                .unwrap_or_else(|| i - layout.parts.iter().filter(|p| p.is_some()).count());
-            part.visible = self
+                .map_or_else(|| index - printable_parts, |part| part.plate);
+            let visible = self
                 .preview_modes
                 .filter
-                .is_none_or(|selected| selected == plate);
+                .is_none_or(|filter| filter == plate);
+            visibility_changed |= visible != part.visible;
+            part.visible = visible;
         }
-        if previous_filter != self.preview_modes.filter {
+        if visibility_changed {
             self.preview_modes.camera.fit(&layout.scene, 0.);
         }
-        ui.separator();
-        let size = (ui.available_size() - egui::vec2(0., 80.)).max(egui::vec2(10., 10.));
+        let size = ui.available_size().max(egui::vec2(10., 10.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         navigate(ctx, &response, rect, &mut self.preview_modes.camera);
         if response.double_clicked() {
@@ -571,85 +580,6 @@ impl App {
         }
         hint(ui, rect, z);
         self.preview_modes.layout = Some(layout);
-    }
-    pub(super) fn print_preview_properties(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let z = self.zh;
-        ui.heading(t(z, "打印板与零件", "Print plates & parts"));
-        let Some(layout) = &self.preview_modes.layout else {
-            ui.label(t(z, "打印板准备中", "Preparing plates"));
-            return;
-        };
-        let mut filter = self.preview_modes.filter;
-        let mut edit = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if ui
-                .selectable_label(filter.is_none(), t(z, "显示全部打印板", "Show all plates"))
-                .clicked()
-            {
-                filter = None;
-            }
-            for (i, p) in layout.plates.iter().enumerate() {
-                if ui
-                    .selectable_label(
-                        filter == Some(i),
-                        format!("{} · {} / {}", i + 1, p.name, p.number + 1),
-                    )
-                    .clicked()
-                {
-                    filter = Some(i);
-                }
-                ui.small(format!(
-                    "{} {} · {} {}",
-                    p.copies,
-                    t(z, "份", "copies"),
-                    t(z, "耗材槽", "Slots"),
-                    p.slots
-                        .iter()
-                        .map(u32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" + ")
-                ));
-                if p.removable {
-                    ui.small(t(z, "可拆标牌专用盘", "Removable-label plate"));
-                }
-            }
-            if let Some(i) = self.preview_modes.selected
-                && let Some(info) = &layout.parts[i]
-            {
-                ui.separator();
-                ui.strong(info.path.rsplit('/').next().unwrap_or(""));
-                ui.label(format!(
-                    "{} {} · #{}",
-                    t(z, "打印板", "Plate"),
-                    info.plate + 1,
-                    info.copy + 1
-                ));
-                ui.small(&layout.plates[info.plate].name);
-                if (crate::label::is_label(&info.path)
-                    || info.path.starts_with(crate::gridfinity::PREFIX))
-                    && ui.button(t(z, "编辑此标牌…", "Edit this label…")).clicked()
-                {
-                    edit = Some(info.clone());
-                }
-            }
-        });
-        if filter != self.preview_modes.filter {
-            self.preview_modes.filter = filter;
-            if let Some(layout) = &mut self.preview_modes.layout {
-                let resource_count = layout.parts.iter().filter(|p| p.is_some()).count();
-                for (i, p) in layout.scene.parts.iter_mut().enumerate() {
-                    let plate = layout.parts[i]
-                        .as_ref()
-                        .map(|p| p.plate)
-                        .unwrap_or_else(|| i - resource_count);
-                    p.visible = filter.is_none_or(|f| f == plate);
-                }
-                self.preview_modes.camera.fit(&layout.scene, 0.);
-            }
-        }
-        if let Some(info) = edit {
-            self.open_preview_label(Some(info), ctx);
-        }
     }
 }
 fn navigate(ctx: &egui::Context, response: &egui::Response, rect: egui::Rect, camera: &mut Camera) {

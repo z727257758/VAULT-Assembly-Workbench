@@ -45,12 +45,6 @@ impl App {
     fn smoke_mechanism(&self, member: usize, drawer: Option<usize>) -> Result<Mechanism, String> {
         AssemblyRules::mechanism(&self.scene, Target { member, drawer })
     }
-    fn smoke_resume(&mut self) {
-        for t in &mut self.animation.tracks {
-            t.paused = false;
-        }
-    }
-
     pub(in crate::app) fn motion_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(16));
         let folder = self.home.join("output/motion-ui");
@@ -82,7 +76,9 @@ impl App {
                     .map(|p| (PartId::of(p), p.pose.matrix(0.)))
                     .collect();
             }
-            if [2, 3, 4, 5, 6, 8, 9].contains(&self.smoke_stage) {
+            if [3, 5, 6, 8, 9].contains(&self.smoke_stage)
+                || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0)
+            {
                 self.advance_motion(0.05, ctx);
             }
             if self.smoke_stage == 2 {
@@ -90,17 +86,11 @@ impl App {
                 if m.value < 30. {
                     return Ok(false);
                 }
-                for t in &mut self.animation.tracks {
-                    t.paused = true;
-                }
             }
             if self.smoke_stage == 4 {
                 let m = self.smoke_mechanism(1, Some(1))?;
                 if m.value < m.max * 0.35 {
                     return Ok(false);
-                }
-                for t in &mut self.animation.tracks {
-                    t.paused = true;
                 }
             }
             if [3, 5, 6, 8, 9].contains(&self.smoke_stage) && !self.animation.tracks.is_empty() {
@@ -221,11 +211,8 @@ impl App {
                     let m = self.smoke_mechanism(2, None)?;
                     self.animate_joint_to(&m.child, 90., ctx)?;
                     self.advance_motion(0.1, ctx);
-                    for t in &mut self.animation.tracks {
-                        t.paused = true;
-                    }
                 }
-                1 | 2 | 4 => self.smoke_resume(),
+                1 | 2 | 4 => {}
                 3 => {
                     self.tower_edit_slot(1, Some(1), ctx);
                     let m = self.smoke_mechanism(1, Some(1))?;
@@ -260,18 +247,18 @@ impl App {
                     let m = self.smoke_mechanism(1, Some(0))?;
                     self.animate_joint_to(&m.child, m.max, ctx)?;
                     self.advance_motion(0.1, ctx);
-                    for t in &mut self.animation.tracks {
-                        t.paused = true;
-                    }
-                    let before =
-                        toml::to_string(&self.scene.definition()).map_err(|e| e.to_string())?;
+                    let before = self.smoke_mechanism(1, Some(0))?.value;
+                    self.preview_modes.mode = preview_modes::Mode::Layers;
                     self.advance_motion(0.1, ctx);
-                    if before
-                        != toml::to_string(&self.scene.definition()).map_err(|e| e.to_string())?
-                    {
-                        return Err("Paused motion continued moving".into());
+                    if (before - self.smoke_mechanism(1, Some(0))?.value).abs() > 0.001 {
+                        return Err("Motion continued while viewing layers".into());
                     }
+                    self.preview_modes.mode = preview_modes::Mode::Assembly;
+                    self.advance_motion(0.1, ctx);
                     let value = self.smoke_mechanism(1, Some(0))?.value;
+                    if value <= before {
+                        return Err("Motion did not resume in the assembly view".into());
+                    }
                     self.animate_joint_to(&m.child, 0., ctx)?;
                     if (value - self.smoke_mechanism(1, Some(0))?.value).abs() > 0.001 {
                         return Err("Reversing motion jumped the model".into());
@@ -295,7 +282,7 @@ impl App {
                     self.assembly(ctx);
                 }
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"),"PASS: staged lock release / lid opening / re-latching; independent shared-shell drawer extraction; fixed housings; pause/resume/reversal; support and travel rejection; unchanged mesh resources; closed dimensions; persisted lid/drawer endpoints after rebuild and TOML roundtrip. Motion is a constrained display preview, not CAD validation.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"),"PASS: staged lock release / lid opening / re-latching; independent shared-shell drawer extraction; fixed housings; view-aware suspension and reversal; support and travel rejection; unchanged mesh resources; closed dimensions; persisted lid/drawer endpoints after rebuild and TOML roundtrip. Motion is a constrained display preview, not CAD validation.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

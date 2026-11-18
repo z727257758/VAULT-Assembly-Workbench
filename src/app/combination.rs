@@ -348,6 +348,10 @@ impl App {
         if member >= self.members.len() || self.busy || self.preview.has_pending() {
             return;
         }
+        if self.tower_regular() {
+            self.tower
+                .reveal_layer(self.members[member].placement.level);
+        }
         if self.inline_edit.open {
             let drawer =
                 drawer.or_else(|| (!self.members[member].preset.drawers.is_empty()).then_some(0));

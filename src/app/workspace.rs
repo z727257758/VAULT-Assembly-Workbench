@@ -299,7 +299,15 @@ impl App {
                             ui.small(if self.busy || self.preview.has_pending() {
                                 t(z, "正在更新预览…", "Updating preview…")
                             } else {
-                                t(z, "三维装配预览", "3D assembly preview")
+                                match self.preview_modes.mode {
+                                    preview_modes::Mode::Plates => {
+                                        t(z, "打印板预览", "Print plate preview")
+                                    }
+                                    preview_modes::Mode::Layers => {
+                                        t(z, "分层预览", "Layer preview")
+                                    }
+                                    _ => t(z, "三维装配预览", "3D assembly preview"),
+                                }
                             });
                         });
                         if !self.busy
@@ -325,7 +333,7 @@ impl App {
                         }
                     });
             });
-        egui::Area::new(egui::Id::new("stage-view-tools"))
+        let tools = egui::Area::new(egui::Id::new("stage-view-tools"))
             .order(egui::Order::Middle)
             .pivot(egui::Align2::RIGHT_TOP)
             .fixed_pos(
@@ -335,21 +343,14 @@ impl App {
                 appearance::floating_frame(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.menu_button(t(z, "视图", "View"), |ui| {
-                            for (label, yaw, pitch) in [
-                                (t(z, "立体", "Orbit"), 0.65, 0.5),
-                                (t(z, "正视", "Front"), 0., 0.),
-                                (
-                                    t(z, "俯视", "Top"),
-                                    0.,
-                                    std::f32::consts::FRAC_PI_2 - 0.0001,
-                                ),
-                                (
-                                    t(z, "右视", "Right"),
-                                    std::f32::consts::FRAC_PI_2 - 0.0001,
-                                    0.,
-                                ),
-                            ] {
-                                if ui.button(label).clicked() {
+                            if ui.button(t(z, "立体", "Orbit")).clicked() {
+                                let view = Camera::default();
+                                self.preview_set_view(view.yaw, view.pitch);
+                                ui.close();
+                            }
+                            for face in orientation::Face::ALL {
+                                if ui.button(face.label(z)).clicked() {
+                                    let (yaw, pitch) = face.view();
                                     self.preview_set_view(yaw, pitch);
                                     ui.close();
                                 }
@@ -385,30 +386,39 @@ impl App {
                             }
                         });
                         if ui.button(t(z, "适配画面", "Fit view")).clicked() {
-                            if self.preview_modes.special() {
-                                self.preview_mode_fit();
-                            } else {
-                                self.camera.fit(
-                                    &if self.interior_editor_open() {
-                                        self.interior_scene()
-                                    } else {
-                                        self.scene.clone()
-                                    },
-                                    self.explosion,
-                                );
-                            }
+                            self.preview_mode_fit();
                         }
                         if self.preview_modes.mode != preview_modes::Mode::Plates {
                             ui.toggle_value(&mut self.tower.show_parts, t(z, "零件", "Parts"))
                                 .on_hover_text(t(
                                     z,
-                                    "展开 / 收起零件树与属性",
+                                    "打开 / 关闭零件与属性浮窗",
                                     "Show / hide the part tree and properties",
                                 ));
                         }
                     });
                 });
             });
+        if !self.dimensions && !self.scene.parts.is_empty() {
+            egui::Area::new(egui::Id::new("stage-orientation"))
+                .order(egui::Order::Middle)
+                .pivot(egui::Align2::RIGHT_TOP)
+                .fixed_pos(egui::pos2(
+                    rect.right() - 16.,
+                    tools.response.rect.bottom() + 6.,
+                ))
+                .show(ctx, |ui| {
+                    ui.horizontal_top(|ui| {
+                        if let Some(face) = orientation::cube(ui, self.preview_camera(), z) {
+                            let (yaw, pitch) = face.view();
+                            self.preview_set_view(yaw, pitch);
+                        }
+                        if orientation::home(ui, z) {
+                            self.preview_reset_view();
+                        }
+                    });
+                });
+        }
     }
 
     pub(super) fn workspace_empty(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

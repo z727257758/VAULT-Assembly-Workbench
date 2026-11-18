@@ -193,6 +193,7 @@ impl App {
         }
     }
     fn restore_workflow(&mut self, state: Snapshot, ctx: &egui::Context) {
+        self.tower.clear_reorder();
         self.members = state.members;
         self.global_colors = state.colors;
         self.combination_gap = state.gap;

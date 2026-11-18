@@ -7,22 +7,13 @@ mod smoke;
 pub(super) struct Track {
     plan: MotionPlan,
     pub elapsed: f32,
-    pub paused: bool,
     last: MotionSample,
 }
+#[derive(Default)]
 pub(super) struct State {
     pub tracks: Vec<Track>,
-    speed: f32,
+    suspended: bool,
     smoke: smoke::State,
-}
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            tracks: vec![],
-            speed: 1.,
-            smoke: Default::default(),
-        }
-    }
 }
 impl App {
     pub(super) fn layer_motion_ui(
@@ -132,15 +123,6 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn animate_selected_to(
-        &mut self,
-        goal: f32,
-        ctx: &egui::Context,
-    ) -> Result<(), String> {
-        let mechanism = AssemblyRules::mechanism(&self.scene, self.motion_target())?;
-        self.animate_joint_to(&mechanism.child, goal, ctx)
-    }
-
     pub(super) fn animate_joint_to(
         &mut self,
         child: &crate::constraints::PartId,
@@ -168,7 +150,6 @@ impl App {
         self.animation.tracks.push(Track {
             plan,
             elapsed: 0.,
-            paused: false,
             last,
         });
         self.collision_report = None;
@@ -242,19 +223,19 @@ impl App {
             || self.dimensions
             || self.tab != 0
             || self.tower.print_list;
-        let mut tracks = std::mem::take(&mut self.animation.tracks);
+        if incompatible {
+            if !std::mem::replace(&mut self.animation.suspended, true)
+                && let Err(error) = AssemblyRules::reset_explosion(&mut self.scene)
+            {
+                self.status = error;
+            }
+            return;
+        }
+        self.animation.suspended = false;
+        let tracks = std::mem::take(&mut self.animation.tracks);
         let mut refresh = false;
-        for mut track in tracks.drain(..) {
-            if incompatible && !track.paused {
-                track.paused = true;
-                refresh = true;
-            }
-            if track.paused {
-                self.animation.tracks.push(track);
-                continue;
-            }
-            track.elapsed =
-                (track.elapsed + dt.clamp(0., 0.1) * self.animation.speed).min(track.plan.duration);
+        for mut track in tracks {
+            track.elapsed = (track.elapsed + dt.clamp(0., 0.1)).min(track.plan.duration);
             let sample = track.plan.sample(track.elapsed);
             match AssemblyRules::apply_motion_sample(
                 &mut self.scene,
@@ -280,7 +261,7 @@ impl App {
         if refresh && let Err(error) = AssemblyRules::reset_explosion(&mut self.scene) {
             self.status = error;
         }
-        if self.animation.tracks.iter().any(|t| !t.paused) {
+        if !self.animation.tracks.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -310,48 +291,29 @@ impl App {
             .animation
             .tracks
             .iter()
-            .find(|t| t.plan.mechanism.child == m.child);
-        let paused = track.is_some_and(|t| t.paused);
-        let playing = track.is_some();
-        let mut goal = track.map_or(m.value, |t| t.plan.goal);
+            .find(|track| track.plan.mechanism.child == m.child);
+        let goal = track.map_or(m.value, |track| track.plan.goal);
+        let (open, close) = if m.kind == MotionKind::Lid {
+            (t(z, "开盖", "Open lid"), t(z, "合盖", "Close lid"))
+        } else {
+            (t(z, "拉出", "Pull out"), t(z, "推回", "Push in"))
+        };
         let mut requested = None;
-        let mut toggle = false;
-        ui.horizontal_wrapped(|ui| {
-            let open = if m.kind == MotionKind::Lid {
-                t(z, "开启", "Open")
-            } else {
-                t(z, "拉出", "Pull out")
-            };
-            let close = if m.kind == MotionKind::Lid {
-                t(z, "合盖", "Close")
-            } else {
-                t(z, "推回", "Push in")
-            };
+        ui.horizontal(|ui| {
             if ui
-                .add_enabled(!blocked && m.max > m.min + 0.001, egui::Button::new(open))
+                .add_enabled(!blocked && m.max > goal + 0.001, egui::Button::new(open))
                 .clicked()
             {
                 requested = Some(m.max);
             }
             if ui
                 .add_enabled(
-                    m.value > m.min + 0.001 || m.latch > 0.001 || playing,
+                    goal > m.min + 0.001 || (track.is_none() && m.latch > 0.001),
                     egui::Button::new(close),
                 )
                 .clicked()
             {
                 requested = Some(m.min);
-            }
-            if playing
-                && ui
-                    .button(if paused {
-                        t(z, "继续", "Resume")
-                    } else {
-                        t(z, "暂停", "Pause")
-                    })
-                    .clicked()
-            {
-                toggle = true;
             }
         });
         if blocked {
@@ -361,47 +323,10 @@ impl App {
                 "Supporting an upper member; lid stays closed.",
             ));
         }
-        ui.add_enabled_ui(!blocked, |ui| {
-            if ui
-                .add(egui::Slider::new(&mut goal, m.min..=m.max).text(
-                    if m.kind == MotionKind::Lid {
-                        t(z, "开盖 °", "Lid °")
-                    } else {
-                        t(z, "拉出 mm", "Travel mm")
-                    },
-                ))
-                .changed()
-            {
-                requested = Some(goal);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.small(if m.kind == MotionKind::Lid {
-                format!("{:.0}°", m.value)
-            } else {
-                format!("{:.1} mm", m.value)
-            });
-            ui.label(t(z, "速度", "Speed"));
-            for speed in [0.5, 1., 2.] {
-                ui.selectable_value(&mut self.animation.speed, speed, format!("{speed}×"));
-            }
-        });
-        if toggle
-            && let Some(t) = self
-                .animation
-                .tracks
-                .iter_mut()
-                .find(|t| t.plan.mechanism.child == m.child)
+        if let Some(value) = requested
+            && let Err(error) = self.animate_joint_to(&m.child, value, ctx)
         {
-            t.paused = !t.paused;
-            ctx.request_repaint();
-        }
-        if let Some(value) = requested {
-            if m.kind == MotionKind::Lid {
-                self.update_lid_preference(value, ctx);
-            } else if let Err(error) = self.animate_joint_to(&m.child, value, ctx) {
-                self.status = error;
-            }
+            self.status = error;
         }
     }
 }

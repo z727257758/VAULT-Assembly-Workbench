@@ -43,14 +43,16 @@ impl Camera {
         self.zoom = 1.;
         self.pan = [0.; 2];
     }
-    pub fn matrix(&self, aspect: f32) -> Mat4 {
-        let extent = self.radius * 1.10 / self.zoom;
-        let direction = Vec3::new(
+    pub fn direction(&self) -> Vec3 {
+        Vec3::new(
             self.yaw.sin() * self.pitch.cos(),
             self.pitch.sin(),
             self.yaw.cos() * self.pitch.cos(),
-        );
-        let eye = self.center + direction * self.radius * 4.;
+        )
+    }
+    pub fn matrix(&self, aspect: f32) -> Mat4 {
+        let extent = self.radius * 1.10 / self.zoom;
+        let eye = self.center + self.direction() * self.radius * 4.;
         let view = Mat4::look_at_rh(eye, self.center, Vec3::Y);
         let halfx = extent * aspect.max(1.);
         let halfy = extent / aspect.clamp(0.01, 1.);

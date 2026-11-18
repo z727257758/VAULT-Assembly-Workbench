@@ -6,6 +6,7 @@ mod exterior_smoke;
 mod inline_edit;
 mod large_stl_smoke;
 mod motion;
+mod orientation;
 mod preview_modes;
 mod recipes;
 mod settings_panel;
@@ -933,8 +934,12 @@ impl App {
                         && std::env::args()
                             .any(|a| a == "--smoke-combination" || a == "--smoke-preview-modes")
                     {
+                        let plates = std::env::args().any(|a| a == "--smoke-preview-modes");
+                        if plates {
+                            self.export_options.plate = Default::default();
+                        }
                         self.setup_combination_smoke();
-                        if std::env::args().any(|a| a == "--smoke-preview-modes") {
+                        if plates {
                             for member in &mut self.members {
                                 member.preset.label.style = crate::label::Style::Flat;
                             }
@@ -1916,20 +1921,21 @@ impl App {
             ctx.request_repaint();
         }
     }
-    fn right(&mut self, ctx: &egui::Context) {
+    fn part_properties_window(&mut self, ctx: &egui::Context) {
+        if !self.tower.show_parts || self.preview_modes.mode == preview_modes::Mode::Plates {
+            return;
+        }
         let z = self.zh;
-        egui::SidePanel::right("properties")
+        let bounds = ctx.content_rect();
+        let mut open = true;
+        egui::Window::new(t(z, "零件与属性", "Parts & properties"))
+            .id(egui::Id::new("floating-part-properties"))
+            .open(&mut open)
             .default_width(290.)
-            .width_range(240. ..=450.)
-            .resizable(true)
+            .default_pos(bounds.right_top() + egui::vec2(-330., 102.))
+            .max_height((bounds.height() - 150.).max(180.))
+            .vscroll(true)
             .show(ctx, |ui| {
-                if self.preview_modes.mode == preview_modes::Mode::Plates && self.scene.assembly { self.print_preview_properties(ui,ctx); return; }
-                ui.horizontal(|ui| {
-                    ui.strong(t(z, "零件与属性", "Parts & properties"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("×").on_hover_text(t(z,"收起属性栏","Close properties")).clicked() { self.tower.show_parts = false; }
-                    });
-                });
                 if self.scene_key == "combination" {self.combination_properties(ui);return;}
                 ui.horizontal(|ui| {
                     if ui.small_button(t(z, "显示全部", "Show all")).clicked() {
@@ -2132,6 +2138,7 @@ impl App {
                     }
                 }
             });
+        self.tower.show_parts = open;
     }
     fn viewport(&mut self, ctx: &egui::Context) {
         let z = self.zh;
@@ -3222,9 +3229,6 @@ impl eframe::App for App {
         self.workspace_toolbar(ctx);
         self.left(ctx);
         self.divider_view(ctx);
-        if self.tower.show_parts || self.preview_modes.mode == preview_modes::Mode::Plates {
-            self.right(ctx);
-        }
         self.color_window(ctx);
         self.global_colors_window(ctx);
         self.renderer.print_colors = self
@@ -3258,6 +3262,7 @@ impl eframe::App for App {
             Vec::new()
         };
         self.viewport(ctx);
+        self.part_properties_window(ctx);
         self.relations_window(ctx);
         self.export_window(ctx);
         self.combination_spec_window(ctx);

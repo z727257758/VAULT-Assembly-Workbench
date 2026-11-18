@@ -31,12 +31,6 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn update_lid_preference(&mut self, value: f32, ctx: &egui::Context) {
-        if let Err(error) = self.animate_selected_to(value, ctx) {
-            self.status = error;
-        }
-    }
-
     pub(super) fn apply_joint_motion(
         &mut self,
         child: &PartId,

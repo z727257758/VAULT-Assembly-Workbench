@@ -230,13 +230,6 @@ impl Preview {
             if ui.button(t(z, "爆炸", "Explode")).clicked() {
                 self.explode(1.);
             }
-            let mut amount = self.explosion;
-            if ui
-                .add(egui::Slider::new(&mut amount, 0. ..=1.).text(t(z, "展开", "Spread")))
-                .changed()
-            {
-                self.explode(amount);
-            }
         });
         let can_isolate = self
             .scene
