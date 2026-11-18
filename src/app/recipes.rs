@@ -31,8 +31,30 @@ const fn box_cell(width: &'static str, height: &'static str, split_lid: bool) ->
         split_lid,
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Group {
+    Compact,
+    Workbench,
+    Wide,
+    Mixed,
+}
+
+impl Group {
+    pub const ALL: [Self; 4] = [Self::Compact, Self::Workbench, Self::Wide, Self::Mixed];
+
+    pub fn title(self, zh: bool) -> &'static str {
+        match self {
+            Self::Compact => t(zh, "紧凑与便携", "Compact & portable"),
+            Self::Workbench => t(zh, "桌面与工作台", "Desktop & workbench"),
+            Self::Wide => t(zh, "宽幅组合", "Wide combinations"),
+            Self::Mixed => t(zh, "箱抽组合", "Boxes & drawers"),
+        }
+    }
+}
+
 pub(super) struct Recipe {
     pub id: &'static str,
+    pub group: Group,
     cn: &'static str,
     en: &'static str,
     detail_cn: &'static str,
@@ -43,6 +65,7 @@ pub(super) struct Recipe {
 pub(super) const RECIPES: &[Recipe] = &[
     Recipe {
         id: "compact-s3",
+        group: Group::Compact,
         cn: "S3 紧凑四抽",
         en: "S3 compact four drawers",
         detail_cn: "三层：2F 双抽＋1F＋1F。",
@@ -56,6 +79,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "daily-m4",
+        group: Group::Workbench,
         cn: "M4 日常抽屉塔",
         en: "M4 everyday tower",
         detail_cn: "三层：2F＋2F 双抽＋1F。",
@@ -69,6 +93,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "organizer-m5",
+        group: Group::Workbench,
         cn: "M5 高低抽组合",
         en: "M5 mixed-height drawers",
         detail_cn: "4F 共用壳体放 2F＋1F＋1F，上方加 1F。",
@@ -81,6 +106,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "wide-l4",
+        group: Group::Wide,
         cn: "L4 整块与双列",
         en: "L4 whole and paired",
         detail_cn: "L 整块 2F 底层，S＋S 双抽层，L 整块 1F 顶层。",
@@ -97,6 +123,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "bridge-l3",
+        group: Group::Mixed,
         cn: "L3 双列配翻盖箱",
         en: "L3 paired drawers and box",
         detail_cn: "S＋S 的 2F 抽屉支承 L 规格 1F 翻盖箱。",
@@ -109,6 +136,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "mixed-m3",
+        group: Group::Mixed,
         cn: "M3 抽屉与翻盖箱",
         en: "M3 drawer and box",
         detail_cn: "2F 抽屉底层，1F 翻盖箱顶层。",
@@ -118,6 +146,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "tower-xl5",
+        group: Group::Wide,
         cn: "XL5 S＋M 三层塔",
         en: "XL5 three-level S+M tower",
         detail_cn: "三层 S＋M：2F、2F 双抽、1F；不使用整块 XL 抽屉。",
@@ -134,6 +163,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "mixed-xl4",
+        group: Group::Mixed,
         cn: "XL4 S＋M 混合塔",
         en: "XL4 S+M mixed tower",
         detail_cn: "S＋M 的 2F 抽屉底层，顶层为 S 抽屉＋M 翻盖箱。",
@@ -146,6 +176,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "portable-s6",
+        group: Group::Compact,
         cn: "S6 深款分盖组合",
         en: "S6 split-lid storage",
         detail_cn: "1F 抽屉底层，2F 分体顶盖翻盖箱。",
@@ -155,6 +186,7 @@ pub(super) const RECIPES: &[Recipe] = &[
     },
     Recipe {
         id: "deep-m7",
+        group: Group::Workbench,
         cn: "M7 深款工作塔",
         en: "M7 deep work tower",
         detail_cn: "2F 双抽壳体，顶部为 1F 分体顶盖翻盖箱。",

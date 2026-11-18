@@ -163,6 +163,72 @@ struct Project {
     name: String,
     saved: CombinationPreset,
 }
+
+impl Project {
+    fn summary(&self, zh: bool) -> String {
+        match rows(&self.saved.members) {
+            Ok(layers) if !layers.is_empty() => {
+                let first = &layers[0];
+                format!(
+                    "{}{} · {} {}",
+                    first.width,
+                    first.depth,
+                    layers.len(),
+                    t(zh, "层", "layers")
+                )
+            }
+            _ if self.saved.members.is_empty() => {
+                let selection = &self.saved.preset.selection;
+                format!(
+                    "{}{} · {}",
+                    selection.width, selection.depth, selection.height
+                )
+            }
+            _ => format!(
+                "{} {}",
+                self.saved.members.len(),
+                t(zh, "个成员", "members")
+            ),
+        }
+    }
+
+    fn duplicate(mut self, projects: &[Self], zh: bool) -> Self {
+        let base = format!("{}{}", self.name, t(zh, " 副本", " copy"));
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while projects.iter().any(|project| project.name == name) {
+            name = format!("{base} {suffix}");
+            suffix += 1;
+        }
+        self.name = name.clone();
+        self.saved.project_name = name;
+        self
+    }
+}
+
+enum ProjectAction {
+    Switch(usize),
+    Starter,
+    Recipe(usize),
+    Duplicate,
+    Open,
+    Save,
+}
+
+fn project_menu_item(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    command: ProjectAction,
+    action: &mut Option<ProjectAction>,
+) -> egui::Response {
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    if response.clicked() {
+        *action = Some(command);
+        ui.close();
+    }
+    response
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Projects {
     current: usize,
@@ -473,6 +539,7 @@ impl App {
         self.scene_key.clear();
         self.tower.open_layer = Some(self.members[self.active_member].placement.level);
         self.tower.print_list = false;
+        self.tab = 0;
         self.tower.scroll_to_top = true;
         self.preview_modes.mode = super::preview_modes::Mode::Assembly;
         self.assembly(ctx);
@@ -524,9 +591,7 @@ impl App {
                 combination_gap: 0.,
             },
         };
-        self.tower.current = self.tower.projects.len();
-        self.tower.projects.push(project.clone());
-        if let Err(e) = self.tower_apply_project(project, ctx) {
+        if let Err(e) = self.tower_add_project(project, ctx) {
             self.tower.error = e;
         }
     }
@@ -545,6 +610,20 @@ impl App {
             name: saved.project_name.clone(),
             saved,
         };
+        self.tower_add_project(project, ctx)
+    }
+
+    fn tower_duplicate_project(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let source = Project {
+            name: self.tower.name.clone(),
+            saved: self.tower_snapshot(),
+        };
+        self.tower_capture();
+        let project = source.duplicate(&self.tower.projects, self.zh);
+        self.tower_add_project(project, ctx)
+    }
+
+    fn tower_add_project(&mut self, project: Project, ctx: &egui::Context) -> Result<(), String> {
         self.tower_apply_project(project.clone(), ctx)?;
         self.tower.current = self.tower.projects.len();
         self.tower.projects.push(project);
@@ -858,103 +937,173 @@ impl App {
     }
     pub(super) fn tower_project_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
-        let mut choose = None;
-        let mut new = false;
-        let mut open = false;
-        let mut save = false;
-        let mut recipe = None;
+        let mut action = None;
         ui.horizontal(|ui| {
-            let controls_width = if z { 162. } else { 214. };
+            let controls_width = if z { 165. } else { 190. };
             let title_width = (ui.available_width() - controls_width).clamp(96., 440.);
             ui.scope(|ui| {
                 ui.set_max_width(title_width);
                 self.tower.title_ui(ui, z);
             });
             ui.add_space(6.);
-            ui.menu_button(t(z, "项目", "Project"), |ui| {
-                ui.set_min_width(240.);
-                for (i, p) in self.tower.projects.iter().enumerate() {
-                    if ui
-                        .selectable_label(i == self.tower.current, &p.name)
-                        .clicked()
-                    {
-                        choose = Some(i);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui.button(t(z, "＋ 新建项目", "＋ New project")).clicked() {
-                    new = true;
-                    ui.close();
-                }
-                if ui.button(t(z, "打开文件…", "Open file…")).clicked() {
-                    open = true;
-                    ui.close();
-                }
-                if ui.button(t(z, "保存为文件…", "Save to file…")).clicked() {
-                    save = true;
-                    ui.close();
-                }
-            });
-            if ui
-                .button("＋")
-                .on_hover_text(t(z, "新建项目", "New project"))
-                .clicked()
-            {
-                new = true;
-            }
-            ui.add_enabled_ui(
-                !self.busy && !self.catalog.root.as_os_str().is_empty(),
-                |ui| {
-                    ui.menu_button(t(z, "预设", "Presets"), |ui| {
-                        ui.set_max_width(340.);
-                        ui.small(t(
-                            z,
-                            "从预设新建项目，保留当前项目。",
-                            "Create a new project and keep the current one.",
-                        ));
-                        ui.separator();
-                        for (index, item) in super::recipes::RECIPES.iter().enumerate() {
+            let projects = ui.menu_button(t(z, "项目", "Projects"), |ui| {
+                ui.set_width(274.);
+                ui.small(
+                    RichText::new(format!(
+                        "{} · {}",
+                        t(z, "项目", "Projects"),
+                        self.tower.projects.len()
+                    ))
+                    .weak(),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(250.)
+                    .show(ui, |ui| {
+                        for (index, project) in self.tower.projects.iter().enumerate() {
+                            let current = index == self.tower.current;
+                            let name = if current {
+                                &self.tower.name
+                            } else {
+                                &project.name
+                            };
+                            let summary = project.summary(z);
+                            let row = format!("{name}\n{summary}");
                             if ui
-                                .button(item.name(z))
-                                .on_hover_text(item.description(z))
+                                .add_sized(
+                                    [ui.available_width(), 47.],
+                                    egui::Button::selectable(current, row).wrap(),
+                                )
+                                .on_hover_text(name)
                                 .clicked()
                             {
-                                recipe = Some(index);
+                                if !current {
+                                    action = Some(ProjectAction::Switch(index));
+                                }
                                 ui.close();
                             }
                         }
                     });
-                },
-            );
-        });
-        if choose.is_some() || new || recipe.is_some() || open || save {
-            self.tower.finish_rename();
-        }
-        if let Some(i) = choose {
-            self.tower_capture();
-            let p = self.tower.projects[i].clone();
-            if let Err(e) = self.tower_apply_project(p, ctx) {
-                self.tower.error = e;
-            } else {
-                self.tower.current = i;
+                ui.separator();
+                ui.menu_button(t(z, "＋ 新建", "＋ New"), |ui| {
+                    self.new_project_menu(ui, &mut action)
+                });
+                if ui.button(t(z, "打开文件…", "Open file…")).clicked() {
+                    action = Some(ProjectAction::Open);
+                    ui.close();
+                }
+                if ui.button(t(z, "保存为文件…", "Save to file…")).clicked() {
+                    action = Some(ProjectAction::Save);
+                    ui.close();
+                }
+            });
+            let create = ui.menu_button(t(z, "＋ 新建", "＋ New"), |ui| {
+                self.new_project_menu(ui, &mut action)
+            });
+            if self.smoke && std::env::args().any(|a| a == "--smoke-project-menu") {
+                let button = if self.smoke_stage == 0 {
+                    create.response
+                } else {
+                    projects.response
+                };
+                let id = egui::Popup::default_response_id(&button);
+                if !egui::Popup::is_id_open(ctx, id) {
+                    egui::Popup::open_id(ctx, id);
+                    ctx.request_repaint();
+                }
             }
-        }
-        if new {
-            self.tower_new(ctx);
-        }
-        if let Some(index) = recipe
-            && let Err(error) = self.tower_from_recipe(index, ctx)
-        {
+        });
+
+        let Some(action) = action else {
+            return;
+        };
+        egui::Popup::close_all(ctx);
+        self.tower.finish_rename();
+        let result = match action {
+            ProjectAction::Switch(index) => {
+                self.tower_capture();
+                let project = self.tower.projects[index].clone();
+                self.tower_apply_project(project, ctx)
+                    .map(|()| self.tower.current = index)
+            }
+            ProjectAction::Starter => {
+                self.tower_new(ctx);
+                Ok(())
+            }
+            ProjectAction::Recipe(index) => self.tower_from_recipe(index, ctx),
+            ProjectAction::Duplicate => self.tower_duplicate_project(ctx),
+            ProjectAction::Open => {
+                self.tower_capture();
+                self.load_preset(ctx);
+                Ok(())
+            }
+            ProjectAction::Save => {
+                self.save_preset();
+                Ok(())
+            }
+        };
+        if let Err(error) = result {
             self.tower.error = error;
         }
-        if open {
-            self.tower_capture();
-            self.load_preset(ctx);
-        }
-        if save {
-            self.save_preset();
-        }
+    }
+
+    fn new_project_menu(&self, ui: &mut egui::Ui, action: &mut Option<ProjectAction>) {
+        use super::recipes::{Group, RECIPES};
+
+        let z = self.zh;
+        let ready = !self.busy && !self.catalog.root.as_os_str().is_empty();
+        ui.spacing_mut().interact_size.y = 26.;
+        ui.spacing_mut().item_spacing.y = 4.;
+        ui.spacing_mut().button_padding.y = 4.;
+        ui.set_width(260.);
+        ui.small(RichText::new(t(z, "新建项目", "New project")).weak());
+        project_menu_item(
+            ui,
+            ready,
+            t(z, "从空白开始", "Start from scratch"),
+            ProjectAction::Starter,
+            action,
+        )
+        .on_hover_text(t(z, "从一层 S3 抽屉开始", "Start with one S3 drawer"));
+        ui.separator();
+        let height = (ui.ctx().content_rect().height() - 210.).clamp(180., 505.);
+        egui::ScrollArea::vertical()
+            .id_salt("new-project-recipes")
+            .max_height(height)
+            .show(ui, |ui| {
+                for group in Group::ALL {
+                    ui.add_space(4.);
+                    ui.small(RichText::new(group.title(z)).weak());
+                    for (index, recipe) in RECIPES
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, recipe)| recipe.group == group)
+                    {
+                        project_menu_item(
+                            ui,
+                            ready,
+                            recipe.name(z),
+                            ProjectAction::Recipe(index),
+                            action,
+                        )
+                        .on_hover_text(recipe.description(z));
+                    }
+                }
+            });
+        ui.separator();
+        project_menu_item(
+            ui,
+            ready && !self.members.is_empty(),
+            t(z, "复制当前项目", "Duplicate current project"),
+            ProjectAction::Duplicate,
+            action,
+        );
+        project_menu_item(
+            ui,
+            ready,
+            t(z, "打开项目文件…", "Open project file…"),
+            ProjectAction::Open,
+            action,
+        );
     }
 
     pub(super) fn tower_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1778,15 +1927,21 @@ impl App {
         if std::env::args().any(|a| a == "--smoke-build-panel") {
             self.tower.open_layer = Some(2);
         }
+        if std::env::args().any(|a| a == "--smoke-project-menu") {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1050., 700.)));
+        }
     }
     pub(super) fn tower_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(100));
         let workspace_smoke = std::env::args().any(|a| a == "--smoke-workspace");
         let build_panel_smoke = std::env::args().any(|a| a == "--smoke-build-panel");
+        let project_menu_smoke = std::env::args().any(|a| a == "--smoke-project-menu");
         let folder = self.home.join(if workspace_smoke {
             "output/workspace-ui"
         } else if build_panel_smoke {
             "output/build-panel-ui"
+        } else if project_menu_smoke {
+            "output/project-menu-ui"
         } else {
             "output/tower-workflow"
         });
@@ -1961,9 +2116,11 @@ impl App {
         }
         self.smoke_frame = 0;
         self.screenshot_requested = false;
-        if build_panel_smoke {
+        if build_panel_smoke || project_menu_smoke {
             if self.smoke_stage == 0 {
-                self.tower.layer_group_request = Some(false);
+                if build_panel_smoke {
+                    self.tower.layer_group_request = Some(false);
+                }
                 self.smoke_stage = 1;
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2410,6 +2567,34 @@ mod tests {
         assert!(rows(&legacy).is_err());
         assert_eq!(before, serde_json::to_vec(&legacy).unwrap());
     }
+    #[test]
+    fn project_copy_keeps_nested_content_and_uses_a_unique_name() {
+        let catalog = catalog();
+        let mut member = member(&catalog, "M", "2F", 0, 0);
+        member.preset = drawer_pattern(&member.preset, &catalog, &["1F", "1F"], false).unwrap();
+        member.preset.drawers[1].label.text = "工具".into();
+        let source = Project {
+            name: "工作台".into(),
+            saved: CombinationPreset {
+                project_name: "工作台".into(),
+                colors: Default::default(),
+                preset: member.preset.clone(),
+                members: vec![member],
+                active_member: 0,
+                combination_gap: 0.,
+            },
+        };
+        let first = source.clone().duplicate(&[], true);
+        let mut second = source.clone().duplicate(&[first], true);
+        assert_eq!(second.name, "工作台 副本 2");
+        assert_eq!(second.saved.project_name, second.name);
+        assert_eq!(second.summary(true), "M3 · 1 层");
+        let label = &mut second.saved.members[0].preset.drawers[1].label;
+        assert_eq!(label.text, "工具");
+        label.text = "更改".into();
+        assert_eq!(source.saved.members[0].preset.drawers[1].label.text, "工具");
+    }
+
     #[test]
     fn project_sessions_persist_current_project_and_leaf_labels() {
         let c = catalog();

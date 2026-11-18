@@ -914,7 +914,10 @@ impl App {
                         && std::env::args().any(|a| {
                             matches!(
                                 a.as_str(),
-                                "--smoke-tower" | "--smoke-workspace" | "--smoke-build-panel"
+                                "--smoke-tower"
+                                    | "--smoke-workspace"
+                                    | "--smoke-build-panel"
+                                    | "--smoke-project-menu"
                             )
                         })
                     {
@@ -3324,7 +3327,10 @@ impl eframe::App for App {
             && std::env::args().any(|a| {
                 matches!(
                     a.as_str(),
-                    "--smoke-tower" | "--smoke-workspace" | "--smoke-build-panel"
+                    "--smoke-tower"
+                        | "--smoke-workspace"
+                        | "--smoke-build-panel"
+                        | "--smoke-project-menu"
                 )
             })
         {
