@@ -558,7 +558,7 @@ fn copy_member_colors(source: &Config, target: &mut Config) {
     target.preview_colors = true;
 }
 
-fn color_component_name(path: &str, z: bool) -> String {
+pub(super) fn color_component_name(path: &str, z: bool) -> String {
     match crate::print_plate::color_key(path) {
         crate::print_plate::BIN_COLOR_KEY => t(
             z,

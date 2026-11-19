@@ -105,6 +105,7 @@ pub struct ViewOptions {
     pub ghost: bool,
     pub interior_only: bool,
     pub colliding: Vec<usize>,
+    pub member_offsets: Vec<Vec3>,
 }
 
 pub struct Renderer {
@@ -360,6 +361,7 @@ impl Renderer {
             ghost,
             interior_only,
             colliding,
+            member_offsets,
         } = options;
         self.target(index, [size[0].clamp(1, 4096), size[1].clamp(1, 4096)]);
         let target = self.targets[index].as_ref().unwrap();
@@ -398,8 +400,14 @@ impl Renderer {
             if ghost && ghost_shell(&p.pose.path) {
                 color[3] = 0.22;
             }
+            let mut model = p.pose.matrix(explosion);
+            if let Some(offset) =
+                member_offsets.get((p.pose.instance / crate::scene::MEMBER_STRIDE) as usize)
+            {
+                model.w_axis += offset.extend(0.);
+            }
             let uniform = ObjectUniform {
-                model: p.pose.matrix(explosion).to_cols_array_2d(),
+                model: model.to_cols_array_2d(),
                 color,
                 text_color: print_colors.map_or([0.; 4], |c| {
                     let mut v = c.slot_color(c.text_slot(&p.pose.path));

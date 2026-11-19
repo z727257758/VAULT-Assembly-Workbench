@@ -39,7 +39,7 @@ pub(super) struct CombinationPreset {
     #[serde(default)]
     pub combination_gap: f32,
 }
-fn modules(members: &[Member]) -> Vec<crate::constraints::stacking::Module<'_>> {
+pub(super) fn modules(members: &[Member]) -> Vec<crate::constraints::stacking::Module<'_>> {
     members
         .iter()
         .map(|m| crate::constraints::stacking::Module {
@@ -1879,14 +1879,21 @@ fn relocate_member(
     members[index].placement.level = level;
     Ok(true)
 }
-pub(super) fn retain_visibility(scene: &mut Scene, old: &Scene) {
+pub(super) fn retain_visibility(scene: &mut Scene, old: &Scene, sources: Option<&[usize]>) {
     let visible: HashMap<_, _> = old
         .parts
         .iter()
         .map(|p| (crate::constraints::PartId::of(p), p.visible))
         .collect();
     for part in &mut scene.parts {
-        if let Some(&value) = visible.get(&crate::constraints::PartId::of(part)) {
+        let mut id = crate::constraints::PartId::of(part);
+        if let Some(&source) = sources
+            .and_then(|indices| indices.get((id.instance / crate::scene::MEMBER_STRIDE) as usize))
+        {
+            id.instance = source as u32 * crate::scene::MEMBER_STRIDE
+                + id.instance % crate::scene::MEMBER_STRIDE;
+        }
+        if let Some(&value) = visible.get(&id) {
             part.visible = value;
         }
     }

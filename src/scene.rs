@@ -83,6 +83,9 @@ pub struct Part {
 pub struct Scene {
     /// Runtime layout metadata used to regenerate per-member display movement.
     pub member_placements: Vec<Placement>,
+    /// World-space translations used to place each member's local assembly.
+    pub member_shifts: Vec<Vec3>,
+    pub member_explosion_shifts: Vec<Vec3>,
     /// Upper member -> supporting members, supplied by the validated assembly layout.
     pub member_supports: Vec<Vec<usize>>,
     /// Closed, world-axis envelopes measured from actual vertices on the worker.
@@ -315,6 +318,8 @@ impl Scene {
         }
         let mut scene = Self {
             member_placements: Vec::new(),
+            member_shifts: Vec::new(),
+            member_explosion_shifts: Vec::new(),
             member_supports: Vec::new(),
             member_bounds: Vec::new(),
             sustainer_interior: None,
@@ -853,7 +858,7 @@ mod tests {
 
 /// Source instances occupy [0, MEMBER_STRIDE); combined identities add a member offset.
 pub const MEMBER_STRIDE: u32 = 10_000;
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     pub column: u32,
     pub level: u32,
@@ -973,6 +978,7 @@ impl Scene {
             }
             result.member_bounds.push((closed_lo, closed_hi));
             result.member_placements.push(placement);
+            result.member_shifts.push(shift);
             result
                 .member_interiors
                 .push(scene.sustainer_interior.take());

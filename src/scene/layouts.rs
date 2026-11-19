@@ -3,11 +3,30 @@ use super::{MEMBER_STRIDE, Part, Pose, Scene};
 use glam::{Quat, Vec3};
 use std::sync::Arc;
 
+fn member_band(lo: Vec3) -> i32 {
+    (lo.y * 2.).round() as i32
+}
+
 pub struct LayerLayout {
     pub scene: Scene,
     pub labels: Vec<(String, Vec3)>,
 }
 impl Scene {
+    pub fn member_layer_ranks(&self) -> Vec<usize> {
+        let bands: Vec<_> = self
+            .member_bounds
+            .iter()
+            .map(|(lo, _)| member_band(*lo))
+            .collect();
+        let mut sorted = bands.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        bands
+            .into_iter()
+            .map(|band| sorted.partition_point(|key| *key < band))
+            .collect()
+    }
+
     pub fn layered(&self, gap: f32, names: &[String], zh: bool) -> LayerLayout {
         let mut scene = self.clone();
         let combined = !self.member_bounds.is_empty();
@@ -19,7 +38,7 @@ impl Scene {
                     let m = (p.pose.instance / MEMBER_STRIDE) as usize;
                     self.member_bounds
                         .get(m)
-                        .map_or(0, |(lo, _)| (lo.y * 2.).round() as i32)
+                        .map_or(0, |(lo, _)| member_band(*lo))
                 } else {
                     let path = &p.pose.path;
                     let file = path.rsplit('/').next().unwrap_or("");

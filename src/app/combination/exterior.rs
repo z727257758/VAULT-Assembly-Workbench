@@ -16,6 +16,36 @@ impl App {
             });
         }
     }
+    pub(in crate::app) fn apply_exterior(
+        &mut self,
+        index: usize,
+        exterior: Exterior,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let mut next = self.members.clone();
+        let member = next.get_mut(index).ok_or("Missing accessory member")?;
+        if member.exterior == exterior {
+            return Ok(());
+        }
+        member.exterior = exterior;
+        let saved = CombinationPreset {
+            project_name: self.tower.name.clone(),
+            colors: self.global_colors.clone(),
+            preset: self.member_snapshot(),
+            members: next,
+            active_member: self.active_member,
+            combination_gap: self.combination_gap,
+        };
+        saved.validate(&self.catalog)?;
+        self.record_workflow();
+        self.members = saved.members;
+        self.member_selection.clear();
+        self.combination_move_source = None;
+        self.combination_view = true;
+        self.assembly(ctx);
+        Ok(())
+    }
+
     pub(in crate::app) fn exterior_window(&mut self, ctx: &egui::Context) {
         let Some(mut edit) = self.exterior_edit.take() else {
             return;
@@ -92,27 +122,9 @@ impl App {
             return;
         }
         if apply {
-            let mut next = self.members.clone();
-            next[edit.index].exterior = edit.draft.clone();
-            let saved = CombinationPreset {
-                project_name: self.tower.name.clone(),
-                colors: self.global_colors.clone(),
-                preset: self.member_snapshot(),
-                members: next.clone(),
-                active_member: self.active_member,
-                combination_gap: self.combination_gap,
-            };
-            match saved.validate(&self.catalog) {
-                Ok(()) => {
-                    self.record_workflow();
-                    self.members[edit.index].exterior = edit.draft;
-                    self.member_selection.clear();
-                    self.combination_move_source = None;
-                    self.combination_view = true;
-                    self.assembly(ctx);
-                    return;
-                }
-                Err(e) => edit.error = e,
+            match self.apply_exterior(edit.index, edit.draft.clone(), ctx) {
+                Ok(()) => return,
+                Err(error) => edit.error = error,
             }
         }
         self.exterior_edit = Some(edit);

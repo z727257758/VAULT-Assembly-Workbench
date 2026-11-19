@@ -12,6 +12,7 @@ pub(crate) fn space_combination(
     placements: &[crate::scene::Placement],
 ) -> Result<(), String> {
     if placements.len() < 2 {
+        scene.member_explosion_shifts.clear();
         return Ok(());
     }
     let mut bounds =
@@ -86,6 +87,7 @@ pub(crate) fn space_combination(
         part.pose.travel = (travel + shift).to_array();
         part.pose.travel_frame = Some(assembled.to_scale_rotation_translation().1.to_array());
     }
+    scene.member_explosion_shifts = shifts;
     Ok(())
 }
 

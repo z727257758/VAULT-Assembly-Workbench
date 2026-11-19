@@ -445,13 +445,16 @@ impl App {
         let z = self.zh;
         let names: Vec<_> = self.members.iter().map(|m| m.name.clone()).collect();
         let layout = self.scene.layered(LAYER_GAP, &names, z);
+        let member_offsets = self.layer_reorder_offsets(ctx, LAYER_GAP, 0.);
+        let reordering = self.pending_layer_reorder.is_some() || !member_offsets.is_empty();
         let size = ui.available_size().max(egui::vec2(10., 10.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         navigate(ctx, &response, rect, &mut self.preview_modes.camera);
-        if response.double_clicked() {
+        if !reordering && response.double_clicked() {
             self.preview_modes.camera.fit(&layout.scene, 0.);
         }
-        if response.clicked()
+        if !reordering
+            && response.clicked()
             && let Some(point) = response.interact_pointer_pos()
         {
             let (o, d) = self.preview_modes.camera.ray(point, rect);
@@ -471,6 +474,7 @@ impl App {
             ViewOptions {
                 selected: self.selected,
                 ghost: self.ghost,
+                member_offsets,
                 ..Default::default()
             },
         );

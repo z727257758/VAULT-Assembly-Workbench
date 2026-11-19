@@ -1,5 +1,7 @@
 use super::*;
+mod colors;
 mod layers;
+mod modifications;
 mod roofs;
 pub(super) struct State {
     pub name: String,
@@ -12,6 +14,7 @@ pub(super) struct State {
     card_positions: BTreeMap<u32, f32>,
     reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
+    color_edit: Option<colors::Edit>,
     error: String,
     reset_inserts: bool,
     projects: Vec<Project>,
@@ -37,6 +40,7 @@ impl Default for State {
             card_positions: BTreeMap::new(),
             reorder: None,
             scroll_to_top: true,
+            color_edit: None,
             error: String::new(),
             reset_inserts: false,
             projects: vec![],
@@ -587,6 +591,7 @@ impl App {
         let saved = project.saved;
         self.tower.name = project.name;
         self.tower.rename_draft = None;
+        self.tower.color_edit = None;
         self.members = saved.members;
         self.active_member = saved.active_member;
         self.global_colors = saved.colors;
@@ -836,6 +841,7 @@ impl App {
         let mut next = self.members.clone();
         let level;
         let mut reorder = None;
+        let mut preview_reorder = None;
         match action {
             Action::Resize(width, depth) => {
                 next = resize(&next, &self.catalog, &width, depth, reset)?;
@@ -879,6 +885,38 @@ impl App {
                 level = row.saturating_sub(1);
             }
             Action::Move(from, to) => {
+                if from != to && self.scene_key == "combination" {
+                    let source_order = self
+                        .pending_layer_reorder
+                        .as_ref()
+                        .map(|pending| &pending.sources);
+                    if source_order.is_some()
+                        || self
+                            .scene
+                            .member_placements
+                            .iter()
+                            .zip(&self.members)
+                            .all(|(placement, member)| *placement == member.placement)
+                            && self.scene.member_placements.len() == self.members.len()
+                    {
+                        let mut order: Vec<_> = (0..next.len()).collect();
+                        order.sort_by_key(|&index| {
+                            let p = next[index].placement;
+                            (moved_level(p.level, from, to), p.column)
+                        });
+                        preview_reorder = Some(super::layer_reorder::Pending {
+                            revision: self.preview.revision(),
+                            sources: order
+                                .iter()
+                                .map(|&index| source_order.map_or(index, |sources| sources[index]))
+                                .collect(),
+                            lifted: order
+                                .iter()
+                                .map(|&index| next[index].placement.level == from)
+                                .collect(),
+                        });
+                    }
+                }
                 for m in &mut next {
                     m.placement.level = moved_level(m.placement.level, from, to);
                 }
@@ -1002,7 +1040,19 @@ impl App {
         if boundaries || top_kind_changed {
             roofs::reconcile(&self.members, &mut next)?;
         }
+        let explosion = self.explosion;
+        let dimensions = self.dimensions;
         self.tower_apply(next, level, ctx)?;
+        if let Some(mut pending) = preview_reorder
+            && !self.preview.is_current(pending.revision)
+        {
+            pending.revision = self.preview.revision();
+            self.scene_key = "combination".into();
+            self.explosion = explosion;
+            self.dimensions = dimensions;
+            self.pending_layer_reorder = Some(pending);
+            self.preview.expedite(Instant::now());
+        }
         self.tower.reorder = reorder;
         Ok(())
     }
@@ -1177,6 +1227,10 @@ impl App {
         );
     }
 
+    pub(super) fn tower_colors_dialog(&mut self, ctx: &egui::Context) {
+        colors::dialog(self, ctx);
+    }
+
     pub(super) fn tower_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         self.commit_member();
@@ -1215,6 +1269,12 @@ impl App {
                 }
             };
             let Some(first) = all.first() else { return; };
+            if self.smoke && self.smoke_stage == 4 && std::env::args().any(|arg| arg == "--smoke-build-panel") {
+                layers::set_group(ui, "footprint", false);
+                layers::set_group(ui, "layers", false);
+                layers::set_group(ui, "modifications", true);
+                layers::set_group(ui, "colors", true);
+            }
             let footprint = format!("{}{}", first.width, first.depth);
             if layers::group(ui, "footprint", t(z, "占地", "Footprint"), true, |ui| {
                 ui.label(RichText::new(&footprint).weak());
@@ -1253,37 +1313,10 @@ impl App {
             if layers::group(ui, "modifications", t(z, "改装", "Modifications"), false, |ui| {
                 ui.add(egui::Label::new(RichText::new(modifications).weak()).truncate());
             }) {
-                for row in all.iter().rev() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(format!("{:02}", row.level + 1));
-                        for (column, &index) in row.members.iter().enumerate() {
-                            let p = &self.members[index].preset.selection;
-                            let side = if row.members.len() == 1 { "" } else if column == 0 {
-                                t(z, "左 · ", "Left · ")
-                            } else {
-                                t(z, "右 · ", "Right · ")
-                            };
-                            if ui.button(format!("{side}{}{} · {}", p.width, p.depth, p.height)).clicked() {
-                                action = Some(Action::Accessories(index));
-                            }
-                        }
-                    });
-                }
-                ui.add_space(6.);
+                modifications::show(self, ui, ctx, &mut action);
             }
             ui.separator();
-            let palette = self.global_colors.palette;
-            if layers::group(ui, "colors", t(z, "颜色", "Colors"), false, |ui| {
-                layers::palette(ui, &palette, 4);
-            }) {
-                ui.horizontal(|ui| {
-                    layers::palette(ui, &palette, palette.len());
-                    if ui.button(t(z, "编辑整体配色…", "Edit project colors…")).clicked() {
-                        self.open_global_colors();
-                    }
-                });
-                ui.add_space(6.);
-            }
+            colors::show(self, ui);
             ui.separator();
             self.workflow_undo_ui(ui,ctx);
             ui.add_space(12.);
@@ -2089,7 +2122,11 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if self.busy || self.preview.has_pending() || self.scene.parts.is_empty() {
+        if self.busy
+            || self.preview.has_pending()
+            || self.pending_layer_reorder.is_some()
+            || self.scene.parts.is_empty()
+        {
             return;
         }
         if self.preview_modes.mode == super::preview_modes::Mode::Plates
@@ -2150,8 +2187,34 @@ impl App {
             {
                 return Err("Preview selection did not reveal its layer in the build panel".into());
             }
-            if build_panel_smoke && self.smoke_stage == 3 && self.tower.open_layer != Some(1) {
-                return Err("The moved layer did not stay expanded at its new position".into());
+            if build_panel_smoke && self.smoke_stage == 3 {
+                if self.tower.open_layer != Some(1) {
+                    return Err("The moved layer did not stay expanded at its new position".into());
+                }
+                let motion = self
+                    .layer_reorder
+                    .as_ref()
+                    .ok_or("No 3D layer reorder motion")?;
+                let at_level = |level| {
+                    self.scene
+                        .member_placements
+                        .iter()
+                        .position(|p| p.column == 0 && p.level == level)
+                        .ok_or("Missing animated smoke-test layer")
+                };
+                let lower = at_level(0)?;
+                let upper = at_level(1)?;
+                let start = motion.offsets(motion.start, 0., 0.);
+                let mid = motion.offsets(motion.start + 0.2, 0., 0.);
+                if start.get(lower).is_none_or(|v| v.y <= 0.)
+                    || start.get(upper).is_none_or(|v| v.y >= 0.)
+                    || mid
+                        .get(upper)
+                        .is_none_or(|v| v.z <= start[upper].z || v.y <= start[upper].y)
+                    || !motion.offsets(motion.start + 1., 0., 0.).is_empty()
+                {
+                    return Err("The 3D preview did not interpolate both layers into place".into());
+                }
             }
             if !build_panel_smoke && [2, 12, 15].contains(&self.smoke_stage) {
                 if !self.combination_view
@@ -2212,7 +2275,18 @@ impl App {
                     return Err("Label focus selected the wrong repeated source instance".into());
                 }
             }
-            if self.smoke_stage == 4 {
+            if build_panel_smoke
+                && self.smoke_stage == 4
+                && (!self.members[0].exterior.backbone
+                    || !self
+                        .scene
+                        .parts
+                        .iter()
+                        .any(|part| part.pose.path.contains("Backbone")))
+            {
+                return Err("The inline rear modification did not load a backbone".into());
+            }
+            if !build_panel_smoke && self.smoke_stage == 4 {
                 let layout = self.preview_modes.layout.as_ref().unwrap();
                 let copies: usize = self
                     .members
@@ -2280,11 +2354,24 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
+            } else if build_panel_smoke && self.smoke_stage == 3 {
+                let mut exterior = self.members[0].exterior.clone();
+                exterior.backbone = true;
+                match self.apply_exterior(0, exterior, ctx) {
+                    Ok(()) => {
+                        self.tower.scroll_to_top = true;
+                        self.smoke_stage = 4;
+                    }
+                    Err(error) => {
+                        let _ = std::fs::write(folder.join("smoke-error.txt"), error);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
             } else {
                 if build_panel_smoke {
                     let _ = std::fs::write(
                         folder.join("selection-result.txt"),
-                        "PASS: preview selection reopened and located the bottom layer; moving it upward started a transition and kept the layer expanded at its new position.",
+                        "PASS: preview selection and 3D layer reorder; inline backbone loaded; expanded modification and color cards captured.",
                     );
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

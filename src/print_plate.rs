@@ -244,6 +244,12 @@ impl Config {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorGroup {
+    pub name: String,
+    pub components: std::collections::BTreeSet<String>,
+}
+
 /// Color-only data: applying a theme must not overwrite plate or support settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -253,6 +259,8 @@ pub struct ColorTheme {
     pub roles: std::collections::BTreeMap<String, u32>,
     pub components: std::collections::BTreeMap<String, u32>,
     pub component_text: std::collections::BTreeMap<String, u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ColorGroup>,
 }
 impl Default for ColorTheme {
     fn default() -> Self {
@@ -267,6 +275,7 @@ impl ColorTheme {
             roles: c.role_filaments.clone(),
             components: c.component_filaments.clone(),
             component_text: c.component_text_filaments.clone(),
+            groups: Vec::new(),
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -284,6 +293,20 @@ impl ColorTheme {
             })
         {
             return Err("无效的整体配色 / Invalid overall colors".into());
+        }
+        let mut assigned = std::collections::BTreeSet::new();
+        if self.groups.len() > 64
+            || self.groups.iter().any(|group| {
+                group.name.trim().is_empty()
+                    || group.name.chars().count() > 48
+                    || group.components.is_empty()
+                    || group
+                        .components
+                        .iter()
+                        .any(|key| key.is_empty() || !assigned.insert(key))
+            })
+        {
+            return Err("无效的配色分组 / Invalid color groups".into());
         }
         Ok(())
     }

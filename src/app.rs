@@ -5,6 +5,7 @@ mod combination;
 mod exterior_smoke;
 mod inline_edit;
 mod large_stl_smoke;
+mod layer_reorder;
 mod motion;
 mod orientation;
 mod preview_modes;
@@ -113,7 +114,7 @@ enum Loaded {
         revision: u64,
         finished: bool,
         key: String,
-        result: Result<Scene, String>,
+        result: Result<Box<Scene>, String>,
     },
     Image(Result<(String, egui::ColorImage), String>),
     Collision(Result<crate::collision::Report, String>),
@@ -208,6 +209,8 @@ pub struct App {
     busy: bool,
     preview: crate::preview::Queue<SceneRequest>,
     failed_preview: Option<SceneRequest>,
+    pending_layer_reorder: Option<layer_reorder::Pending>,
+    layer_reorder: Option<layer_reorder::Motion>,
     assembly_view: Option<AssemblyView>,
     status: String,
     zh: bool,
@@ -354,6 +357,8 @@ impl App {
             busy: false,
             preview: Default::default(),
             failed_preview: None,
+            pending_layer_reorder: None,
+            layer_reorder: None,
             assembly_view: None,
             status: String::new(),
             zh,
@@ -446,6 +451,20 @@ impl App {
             ctx.request_repaint();
         });
     }
+    fn layer_reorder_offsets(
+        &self,
+        ctx: &egui::Context,
+        gap: f32,
+        explosion: f32,
+    ) -> Vec<glam::Vec3> {
+        let offsets = self.layer_reorder.as_ref().map_or_else(Vec::new, |motion| {
+            motion.offsets(ctx.input(|input| input.time), gap, explosion)
+        });
+        if !offsets.is_empty() {
+            ctx.request_repaint();
+        }
+        offsets
+    }
     fn start_scene(
         &mut self,
         items: Vec<Bom>,
@@ -472,6 +491,7 @@ impl App {
         } else {
             String::new()
         };
+        self.pending_layer_reorder = None;
         self.preview.schedule(
             SceneRequest {
                 members: if assembly && self.combination_view {
@@ -647,7 +667,7 @@ impl App {
                             revision,
                             finished: false,
                             key: request.key.clone(),
-                            result: Ok(draft),
+                            result: Ok(Box::new(draft)),
                         });
                         ctx.request_repaint();
                     }
@@ -668,7 +688,7 @@ impl App {
                 revision,
                 finished: true,
                 key: request.key,
-                result,
+                result: result.map(Box::new),
             });
             ctx.request_repaint();
         });
@@ -981,8 +1001,11 @@ impl App {
                     if !self.preview.is_current(revision) {
                         continue;
                     }
+                    let reorder = self.pending_layer_reorder.take();
+                    let reorder = reorder
+                        .filter(|pending| pending.revision == revision && key == "combination");
                     let mut s = match result {
-                        Ok(scene) => scene,
+                        Ok(scene) => *scene,
                         Err(e) => {
                             self.status = format!(
                                 "{}: {e}",
@@ -1023,7 +1046,11 @@ impl App {
                         if self.scene_key != "combination" {
                             s.retain_assembly_state(&previous.scene);
                         } else {
-                            combination::retain_visibility(&mut s, &previous.scene);
+                            combination::retain_visibility(
+                                &mut s,
+                                &previous.scene,
+                                reorder.as_ref().map(|pending| pending.sources.as_slice()),
+                            );
                         }
                         self.camera = previous.camera.clone();
                         self.explosion = previous.explosion;
@@ -1102,6 +1129,21 @@ impl App {
                         )
                     {
                         self.status = error;
+                    }
+                    if let Some(pending) = &reorder {
+                        self.layer_reorder = layer_reorder::Motion::new(
+                            pending,
+                            &self.scene,
+                            &s,
+                            self.layer_reorder.as_ref(),
+                            ctx.input(|i| i.time),
+                        );
+                    } else if self
+                        .layer_reorder
+                        .as_ref()
+                        .is_some_and(|motion| motion.revision != revision)
+                    {
+                        self.layer_reorder = None;
                     }
                     self.renderer.upload(&s);
                     self.scene = s;
@@ -2234,7 +2276,11 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let spatial_input = self.explosion == 0.
+                    let member_offsets = self.layer_reorder_offsets(ctx, 0., self.explosion);
+                    let reordering =
+                        self.pending_layer_reorder.is_some() || !member_offsets.is_empty();
+                    let spatial_input = !reordering
+                        && self.explosion == 0.
                         && !self.tower_regular()
                         && self.combination_viewport_actions(ctx, rect);
                     if !spatial_input && response.dragged_by(egui::PointerButton::Primary) {
@@ -2257,6 +2303,7 @@ impl App {
                             (self.camera.zoom * (scroll * 0.002).exp()).clamp(0.05, 50.);
                     }
                     if !spatial_input
+                        && !reordering
                         && response.clicked()
                         && let Some(p) = response.interact_pointer_pos()
                     {
@@ -2274,6 +2321,7 @@ impl App {
                         }
                     }
                     if !spatial_input
+                        && !reordering
                         && self.combination_move_source.is_none()
                         && response.double_clicked()
                         && self.scene_key == "combination"
@@ -2282,7 +2330,7 @@ impl App {
                         && self.selected.is_some()
                     {
                         self.focus_member(ctx);
-                    } else if !spatial_input && response.double_clicked() {
+                    } else if !spatial_input && !reordering && response.double_clicked() {
                         self.camera.fit(
                             &if self.interior_editor_open() {
                                 self.interior_scene()
@@ -2332,6 +2380,7 @@ impl App {
                                 self.selected
                             },
                             ghost: self.ghost,
+                            member_offsets,
                             interior_only: self.interior_editor_open()
                                 && self.scene.assembly
                                 && self.scene_key != "combination",
@@ -2349,7 +2398,7 @@ impl App {
                         egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
                         Color32::WHITE,
                     );
-                    if self.scene_key == "combination" && self.explosion == 0. {
+                    if !reordering && self.scene_key == "combination" && self.explosion == 0. {
                         self.paint_active_member(ui, rect);
                         if !self.inline_edit.open {
                             self.paint_spatial_dimensions(ui, rect);
@@ -3231,6 +3280,7 @@ impl eframe::App for App {
         self.divider_view(ctx);
         self.color_window(ctx);
         self.global_colors_window(ctx);
+        self.tower_colors_dialog(ctx);
         self.renderer.print_colors = self
             .export_options
             .plate

@@ -36,6 +36,11 @@ impl<T> Queue<T> {
         self.revision += 1;
         self.pending = Some((now + delay, value));
     }
+    pub fn expedite(&mut self, now: Instant) {
+        if let Some((due, _)) = &mut self.pending {
+            *due = (*due).min(now);
+        }
+    }
     pub fn take_ready(&mut self, now: Instant) -> Option<(u64, T)> {
         if self.pending.as_ref().is_some_and(|(due, _)| *due <= now) {
             self.pending.take().map(|(_, value)| (self.revision, value))
@@ -45,6 +50,9 @@ impl<T> Queue<T> {
     }
     pub fn cancellation(&self) -> Cancel {
         self.cancel.clone()
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
     pub fn is_current(&self, revision: u64) -> bool {
         self.revision == revision
