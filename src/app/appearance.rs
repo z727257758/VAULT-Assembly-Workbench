@@ -46,7 +46,11 @@ impl Appearance {
         };
         visuals.panel_fill = surface;
         visuals.window_fill = surface;
-        visuals.extreme_bg_color = subtle;
+        visuals.extreme_bg_color = if dark {
+            Color32::from_rgb(43, 50, 46)
+        } else {
+            Color32::from_rgb(226, 232, 228)
+        };
         visuals.faint_bg_color = subtle;
         visuals.hyperlink_color = if dark {
             Color32::from_rgb(127, 209, 159)
@@ -54,11 +58,12 @@ impl Appearance {
             BRAND
         };
         visuals.selection.bg_fill = if dark {
-            Color32::from_rgb(34, 73, 47)
+            Color32::from_rgb(51, 108, 72)
         } else {
-            Color32::from_rgb(230, 242, 234)
+            Color32::from_rgb(136, 193, 155)
         };
         visuals.selection.stroke = egui::Stroke::new(1., text);
+        visuals.slider_trailing_fill = true;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., border);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1., text);
         for widget in [
@@ -69,7 +74,7 @@ impl Appearance {
             widget.corner_radius = egui::CornerRadius::same(6);
             widget.fg_stroke = egui::Stroke::new(1., text);
         }
-        visuals.widgets.inactive.bg_fill = surface;
+        visuals.widgets.inactive.bg_fill = border;
         visuals.widgets.inactive.weak_bg_fill = subtle;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1., border);
         visuals.widgets.hovered.bg_fill = if dark {
@@ -79,14 +84,31 @@ impl Appearance {
         };
         visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., text.gamma_multiply(0.5));
+        visuals.widgets.hovered.fg_stroke.color = visuals.hyperlink_color;
         visuals.widgets.active.bg_fill = visuals.selection.bg_fill;
         visuals.widgets.active.weak_bg_fill = visuals.selection.bg_fill;
+        visuals.widgets.active.fg_stroke.color = if dark {
+            Color32::from_rgb(193, 240, 208)
+        } else {
+            Color32::from_rgb(24, 67, 40)
+        };
         visuals.window_corner_radius = egui::CornerRadius::same(12);
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(8., 8.);
         style.spacing.button_padding = egui::vec2(10., 6.);
         style.spacing.interact_size.y = 32.;
         style.spacing.window_margin = egui::Margin::same(16);
+        // Reserve the resting width so the visible thumb stays clear of the content.
+        style.spacing.scroll = egui::style::ScrollStyle {
+            floating_width: 5.,
+            floating_allocated_width: 5.,
+            dormant_background_opacity: 1.,
+            active_background_opacity: 1.,
+            interact_background_opacity: 1.,
+            dormant_handle_opacity: 0.6,
+            active_handle_opacity: 0.8,
+            ..egui::style::ScrollStyle::floating()
+        };
         for (kind, size) in [
             (egui::TextStyle::Body, 14.),
             (egui::TextStyle::Button, 14.),
