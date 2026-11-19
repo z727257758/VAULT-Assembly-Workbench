@@ -279,6 +279,9 @@ impl App {
                         }
                         if self.preview_modes.mode != Mode::Plates {
                             ui.separator();
+                            if self.scene_key == "combination" && self.combination_view {
+                                self.tower_preview_color_menu(ui);
+                            }
                             if ui.button(t(z, "标牌…", "Label…")).clicked() {
                                 self.open_preview_label(None, ctx);
                             }

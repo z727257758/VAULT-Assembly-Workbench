@@ -268,7 +268,11 @@ impl App {
         if let Some(c) = self
             .members
             .get(self.active_member)
-            .and_then(|m| m.preset.print_config.as_ref())
+            .and_then(|m| match self.active_drawer {
+                Some(drawer) => m.preset.drawers.get(drawer),
+                None => Some(&m.preset),
+            })
+            .and_then(|p| p.print_config.as_ref())
         {
             self.export_options.plate = c.clone();
         }

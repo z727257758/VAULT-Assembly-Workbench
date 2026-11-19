@@ -14,7 +14,7 @@ const MATERIAL: &str = "PETG Basic";
 
 #[derive(Clone, Copy)]
 enum Group {
-    BuiltIn(usize),
+    Bucket,
     Custom(usize),
     New,
 }
@@ -33,7 +33,7 @@ impl Edit {
                 .components
                 .extend(self.keys.iter().cloned().map(|key| (key, slot)));
         }
-        if matches!(self.group, Group::BuiltIn(_)) {
+        if matches!(self.group, Group::Bucket) {
             return;
         }
         for group in &mut theme.groups {
@@ -91,15 +91,26 @@ fn items(app: &App) -> BTreeMap<String, Item> {
     result
 }
 
-fn group_slots(
+#[derive(Default)]
+struct Bucket {
+    keys: BTreeSet<String>,
+    count: u32,
+}
+
+fn color_buckets(
     keys: &BTreeSet<String>,
     items: &BTreeMap<String, Item>,
     config: &Config,
-) -> BTreeSet<u32> {
-    keys.iter()
-        .filter_map(|key| items.get(key))
-        .map(|item| config.slot(&item.path))
-        .collect()
+) -> BTreeMap<u32, Bucket> {
+    let mut buckets = BTreeMap::<_, Bucket>::new();
+    for key in keys {
+        if let Some(item) = items.get(key) {
+            let bucket = buckets.entry(config.slot(&item.path)).or_default();
+            bucket.keys.insert(key.clone());
+            bucket.count += item.count;
+        }
+    }
+    buckets
 }
 
 fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
@@ -140,33 +151,40 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             builtin_keys[builtin(&item.path)].insert(key.clone());
         }
     }
-    let groups: Vec<_> = builtin_keys
+    let groups = builtin_keys
         .into_iter()
-        .enumerate()
-        .filter_map(|(i, keys)| {
-            let (cn, en) = GROUP_LABELS[i];
-            (!keys.is_empty()).then_some((Group::BuiltIn(i), t(z, cn, en).to_owned(), keys))
-        })
+        .zip(GROUP_LABELS)
+        .map(|(keys, (cn, en))| (Group::Bucket, t(z, cn, en).to_owned(), keys))
         .chain(custom.iter().enumerate().map(|(i, group)| {
             (
                 Group::Custom(i),
                 group.name.clone(),
                 group.components.clone(),
             )
-        }))
-        .collect();
-
+        }));
+    let mut rows = Vec::new();
     let mut palette = Vec::new();
-    for (_, _, keys) in &groups {
-        for slot in keys
-            .iter()
-            .filter_map(|key| items.get(key))
-            .map(|item| config.slot(&item.path))
-        {
+    for (index, (group, title, keys)) in groups.enumerate() {
+        let buckets = color_buckets(&keys, &items, &config);
+        let split = buckets.len() > 1;
+        for (slot, bucket) in buckets {
             let rgb = config.palette[(slot - 1) as usize];
             if !palette.contains(&rgb) {
                 palette.push(rgb);
             }
+            let (edit_group, edit_keys) = if split || matches!(group, Group::Bucket) {
+                (Group::Bucket, bucket.keys)
+            } else {
+                (group, keys.clone())
+            };
+            rows.push((
+                (index, slot),
+                edit_group,
+                title.clone(),
+                edit_keys,
+                bucket.count,
+                rgb,
+            ));
         }
     }
     if !layers::group(ui, "colors", t(z, "颜色", "Colors"), false, |ui| {
@@ -174,20 +192,8 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     }) {
         return;
     }
-    for (group, title, keys) in groups {
-        let count = keys
-            .iter()
-            .filter_map(|key| items.get(key))
-            .map(|item| item.count)
-            .sum::<u32>();
-        let slots = group_slots(&keys, &items, &config);
-        let slot = (slots.len() == 1).then(|| *slots.first().unwrap());
-        let rgb = slot.map(|slot| config.palette[(slot - 1) as usize]);
-        let id = match group {
-            Group::BuiltIn(i) => ("built-in-color", i),
-            Group::Custom(i) => ("custom-color", i),
-            Group::New => unreachable!(),
-        };
+    for (id, group, title, keys, count, rgb) in rows {
+        let slot = id.1;
         let response = ui
             .push_id(id, |ui| {
                 let width = ui.available_width();
@@ -211,26 +217,12 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 let dot = egui::pos2(rect.left() + 22., center.y);
                 let radius = 9.5;
                 let stroke = visuals.widgets.noninteractive.bg_stroke;
-                let colors: Vec<_> = slots
-                    .iter()
-                    .map(|slot| config.palette[(*slot - 1) as usize])
-                    .collect();
-                if colors.is_empty() {
-                    painter.circle(dot, radius, Color32::from_gray(140), stroke);
-                } else {
-                    let step = 2. * radius / colors.len() as f32;
-                    for (index, [r, g, b]) in colors.into_iter().enumerate() {
-                        let left = dot.x - radius + step * index as f32;
-                        let stripe =
-                            egui::Rect::from_x_y_ranges(left..=left + step, rect.y_range());
-                        painter.with_clip_rect(stripe).circle_filled(
-                            dot,
-                            radius,
-                            Color32::from_rgb(r, g, b),
-                        );
-                    }
-                    painter.circle_stroke(dot, radius, stroke);
-                }
+                painter.circle(
+                    dot,
+                    radius,
+                    Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+                    stroke,
+                );
                 let body = egui::TextStyle::Body.resolve(ui.style());
                 let weak = visuals.weak_text_color();
                 let material = painter.layout_no_wrap(
@@ -248,11 +240,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                     weak,
                 );
                 right -= material.size().x + 8.;
-                let color_name = match rgb {
-                    Some(rgb) => color_label(rgb, z),
-                    None if count > 0 => t(z, "混合", "Mixed"),
-                    None => "—",
-                };
+                let color_name = color_label(rgb, z);
                 let name = painter.layout_no_wrap(color_name.into(), body.clone(), weak);
                 painter.galley(
                     egui::pos2(right - name.size().x, center.y - name.size().y * 0.5),
@@ -296,7 +284,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 group,
                 name: title,
                 keys,
-                slot,
+                slot: Some(slot),
             });
         }
         ui.add_space(4.);
@@ -324,13 +312,152 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.);
 }
 
+// Assign a catalog component as a whole, matching the existing project color scope.
+fn assign_component(theme: &mut ColorTheme, key: &str, target: Option<usize>, slot: u32) {
+    for (index, group) in theme.groups.iter_mut().enumerate() {
+        if Some(index) == target {
+            group.components.insert(key.to_owned());
+        } else {
+            group.components.remove(key);
+        }
+    }
+    theme.groups.retain(|group| !group.components.is_empty());
+    theme.components.insert(key.to_owned(), slot);
+}
+
+pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
+    let z = app.zh;
+    let part = app.selected.and_then(|index| app.scene.parts.get(index));
+    let ready =
+        part.is_some() && !app.busy && !app.preview.has_pending() && app.export_rx.is_none();
+    let mut assign = None;
+    let mut new = None;
+    let mut follow = false;
+    ui.add_enabled_ui(ready, |ui| {
+        ui.menu_button(t(z, "颜色分组", "Color group"), |ui| {
+            let Some(part) = part else {
+                return;
+            };
+            let path = &part.pose.path;
+            let key = catalog_colors::component(path);
+            let theme = &app.global_colors;
+            let mut config = Config::default();
+            theme.apply(&mut config);
+            let active = config.slot(path);
+            let current = theme
+                .groups
+                .iter()
+                .position(|group| group.components.contains(&key));
+            let (cn, en) = GROUP_LABELS[builtin(path)];
+            let default = t(z, cn, en);
+            ui.strong(workflow::color_component_name(path, z));
+            let choice = |ui: &mut egui::Ui, title: &str, slot: u32, selected: bool| {
+                let rgb = config.palette[(slot - 1) as usize];
+                let [r, g, b] = rgb;
+                let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(12.), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(dot.center(), 5., Color32::from_rgb(r, g, b));
+                ui.selectable_label(selected, format!("{title} · {}", color_label(rgb, z)))
+                    .on_hover_text(config.color_hex(slot))
+                    .clicked()
+            };
+            ui.menu_button(t(z, "按用途分组", "Group by role"), |ui| {
+                for slot in 1..=6 {
+                    ui.horizontal(|ui| {
+                        if choice(ui, default, slot, current.is_none() && active == slot) {
+                            assign = Some((key.clone(), None, slot));
+                            ui.close();
+                        }
+                    });
+                }
+            });
+            let project_items = items(app);
+            for (index, group) in theme.groups.iter().enumerate() {
+                let buckets = color_buckets(&group.components, &project_items, &config);
+                for &slot in buckets.keys() {
+                    ui.horizontal(|ui| {
+                        if choice(
+                            ui,
+                            &group.name,
+                            slot,
+                            current == Some(index) && active == slot,
+                        ) {
+                            assign = Some((key.clone(), Some(index), slot));
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    theme.groups.len() < 64,
+                    egui::Button::new(t(z, "＋ 新建分组…", "＋ New group…")),
+                )
+                .clicked()
+            {
+                new = Some(Edit {
+                    group: Group::New,
+                    name: String::new(),
+                    keys: [key].into(),
+                    slot: Some(active),
+                });
+                ui.close();
+            }
+            if !app.export_options.plate.follow_global_colors
+                && ui
+                    .button(t(
+                        z,
+                        "当前成员跟随整体配色",
+                        "Use project colors for this member",
+                    ))
+                    .clicked()
+            {
+                follow = true;
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text(t(
+            z,
+            "为同类零件设置项目配色分组",
+            "Set the project color group for matching components",
+        ));
+    })
+    .response
+    .on_disabled_hover_text(t(
+        z,
+        "在预览中先选择一个零件",
+        "Select a part in the preview first",
+    ));
+    if follow {
+        app.record_workflow();
+        app.export_options.plate.follow_global_colors = true;
+        app.global_colors.apply(&mut app.export_options.plate);
+        app.commit_member();
+        ui.ctx().request_repaint();
+    }
+    if let Some((key, group, slot)) = assign {
+        let mut theme = app.global_colors.clone();
+        assign_component(&mut theme, &key, group, slot);
+        if let Err(error) = app.apply_global_theme(theme) {
+            app.tower.error = error;
+        }
+        ui.ctx().request_repaint();
+    }
+    if let Some(edit) = new {
+        app.tower.color_edit = Some(edit);
+        ui.ctx().request_repaint();
+    }
+}
+
 pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut edit) = app.tower.color_edit.take() else {
         return;
     };
     let z = app.zh;
     let mut theme = app.global_colors.clone();
-    let modifying_membership = !matches!(edit.group, Group::BuiltIn(_));
+    let modifying_membership = !matches!(edit.group, Group::Bucket);
     let items = modifying_membership.then(|| items(app));
     let mut apply = false;
     let mut cancel = false;
@@ -451,6 +578,55 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_rows_partition_quantities_and_preview_assignment_keeps_other_colors() {
+        let mut theme = ColorTheme::default();
+        let path_a = "Catalog/Runners/Runner Guide.stl";
+        let path_b = "Catalog/Runners/Runner Slide.stl";
+        let a = catalog_colors::component(path_a);
+        let b = catalog_colors::component(path_b);
+        let keys: BTreeSet<_> = [a.clone(), b.clone()].into();
+        let items = [
+            (
+                a.clone(),
+                Item {
+                    path: path_a.into(),
+                    count: 2,
+                },
+            ),
+            (
+                b.clone(),
+                Item {
+                    path: path_b.into(),
+                    count: 4,
+                },
+            ),
+        ]
+        .into();
+        theme.groups.push(ColorGroup {
+            name: "Hardware".into(),
+            components: keys.clone(),
+        });
+        theme.components.extend([(a.clone(), 1), (b.clone(), 2)]);
+        let mut config = Config::default();
+        theme.apply(&mut config);
+        let before = color_buckets(&keys, &items, &config);
+        assert_eq!(before[&1].count, 2);
+        assert_eq!(before[&2].count, 4);
+
+        assign_component(&mut theme, &a, None, 3);
+        theme.apply(&mut config);
+        assert_eq!(theme.groups[0].components, [b.clone()].into());
+        assert_eq!(config.slot(path_a), 3);
+        assert_eq!(config.slot(path_b), 2);
+        assign_component(&mut theme, &a, Some(0), 2);
+        theme.apply(&mut config);
+        let after = color_buckets(&keys, &items, &config);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[&2].count, 6);
+        assert_eq!(theme.groups[0].components, keys);
+    }
 
     #[test]
     fn regrouping_moves_components_and_preserves_color_assignment_in_saved_projects() {

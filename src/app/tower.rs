@@ -1227,6 +1227,10 @@ impl App {
         );
     }
 
+    pub(super) fn tower_preview_color_menu(&mut self, ui: &mut egui::Ui) {
+        colors::preview_menu(self, ui);
+    }
+
     pub(super) fn tower_colors_dialog(&mut self, ctx: &egui::Context) {
         colors::dialog(self, ctx);
     }
