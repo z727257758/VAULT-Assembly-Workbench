@@ -227,10 +227,10 @@ impl App {
             preset,
         );
     }
-    fn close_member_editors(&mut self) {
+    pub(super) fn close_member_editors(&mut self) {
         self.inline_edit = Default::default();
         self.exterior_edit = None;
-        self.gridfinity_open = false;
+        self.close_bin_editor();
         self.label_open = false;
         self.colors_open = false;
         self.gridfinity_editor = Default::default();
@@ -376,7 +376,7 @@ impl App {
         self.tab = 0;
         ctx.request_repaint();
     }
-    fn remember_combination_view(&mut self) {
+    pub(super) fn remember_combination_view(&mut self) {
         if self.scene_key == "combination" {
             self.combination_view_state = Some((
                 self.camera.clone(),

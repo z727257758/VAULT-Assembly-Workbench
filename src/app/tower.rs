@@ -2018,16 +2018,18 @@ impl App {
                 };
                 p.label.enabled = true;
                 p.label.text = format!("{} {}", width, level + 1);
-                let mut colors = p.print_config.clone().unwrap_or_default();
-                colors.preview_colors = true;
-                colors.palette = [
-                    [74, 104, 120],
-                    [234, 151, 73],
-                    [78, 156, 148],
-                    [168, 184, 198],
-                    [136, 109, 173],
-                    [235, 235, 232],
-                ];
+                let mut colors = crate::print_plate::Config {
+                    preview_colors: true,
+                    palette: [
+                        [74, 104, 120],
+                        [234, 151, 73],
+                        [78, 156, 148],
+                        [168, 184, 198],
+                        [136, 109, 173],
+                        [235, 235, 232],
+                    ],
+                    ..Default::default()
+                };
                 colors.set_part_slot(crate::label::PATH, 2);
                 colors.set_text_slot(crate::label::PATH, 6);
                 p.print_config = Some(colors);

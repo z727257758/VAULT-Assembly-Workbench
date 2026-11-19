@@ -422,24 +422,58 @@ impl App {
         }
     }
     fn open_preview_label(&mut self, target: Option<PrintPart>, ctx: &egui::Context) {
+        self.tab = 0;
+        self.tower.print_list = false;
         self.preview_modes.mode = Mode::Assembly;
         if let Some(info) = &target
-            && self.combination_view
+            && !self.members.is_empty()
         {
-            self.tower_edit_slot(info.member, info.drawer, ctx);
+            // A print job for one already-selected subdrawer has no nested drawer index.
+            let drawer = if !self.combination_view && info.member == self.active_member {
+                info.drawer.or(self.active_drawer)
+            } else {
+                info.drawer
+            };
+            if inline_edit::target_preset(
+                &self.members,
+                crate::scene::Target {
+                    member: info.member,
+                    drawer,
+                },
+            )
+            .is_none()
+            {
+                self.status = t(
+                    self.zh,
+                    "打印零件对应的抽屉已不存在",
+                    "This print part's drawer is no longer in the project",
+                )
+                .into();
+                return;
+            }
+            self.tower_edit_slot(info.member, drawer, ctx);
         } else if self.combination_view {
             self.focus_member(ctx);
         }
         if let Some(target) = target
             && target.path.starts_with(crate::gridfinity::PREFIX)
-            && let Some(bin) = self
+        {
+            if let Some(bin) = self
                 .gridfinity
                 .bins
                 .iter()
                 .find(|b| b.path() == target.path || b.label_path() == target.path)
-        {
-            self.gridfinity_selected = Some(bin.id);
-            self.gridfinity_open = true;
+            {
+                self.gridfinity_selected = Some(bin.id);
+                self.open_bin_editor(ctx);
+            } else {
+                self.status = t(
+                    self.zh,
+                    "当前抽屉中找不到打印板上的盒子",
+                    "This bin is no longer in the drawer",
+                )
+                .into();
+            }
         } else {
             self.label_open = true;
         }

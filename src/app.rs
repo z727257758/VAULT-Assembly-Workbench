@@ -1,5 +1,8 @@
 mod animation;
 mod appearance;
+mod bin_editor_smoke;
+mod bin_view;
+mod bin_workspace;
 mod color_preview;
 mod combination;
 mod exterior_smoke;
@@ -189,6 +192,8 @@ pub struct App {
     box_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
     gridfinity: crate::gridfinity::Layout,
     gridfinity_open: bool,
+    bin_view: bin_view::State,
+    bin_editor_smoke: bin_editor_smoke::State,
     gridfinity_editor: crate::gridfinity_editor::Editor,
     gridfinity_selected: Option<u32>,
     gridfinity_error: Option<String>,
@@ -334,6 +339,8 @@ impl App {
             box_state: None,
             gridfinity: Default::default(),
             gridfinity_open: false,
+            bin_view: Default::default(),
+            bin_editor_smoke: Default::default(),
             gridfinity_editor: Default::default(),
             gridfinity_selected: None,
             gridfinity_error: None,
@@ -782,7 +789,9 @@ impl App {
                 .any(|b| b.enabled && b.path.contains("/Gridfinity Baseplate/"))
         {
             self.gridfinity.bins.clear();
-            self.gridfinity_open = false;
+            if self.gridfinity_open {
+                self.close_bin_editor();
+            }
         }
         self.gridfinity.baseplate = self
             .bom
@@ -811,6 +820,9 @@ impl App {
         if self.inline_edit.open {
             self.focus_preview_path(path, ctx);
             return;
+        }
+        if self.combination_view {
+            self.remember_combination_view();
         }
         self.combination_view = false;
         let name = crate::accessories::info(&path, self.zh)
@@ -872,6 +884,7 @@ impl App {
             match result {
                 Loaded::Preset(result) => self.apply_loaded_project(*result, ctx),
                 Loaded::Catalog(Ok(c)) => {
+                    self.close_member_editors();
                     self.preview_modes = Default::default();
                     self.last_model_root = c.root.clone();
                     self.catalog = c;
@@ -946,6 +959,9 @@ impl App {
                     }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
                         self.setup_motion_smoke(ctx);
+                    }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-bin-editor") {
+                        self.setup_bin_editor_smoke(ctx);
                     }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
@@ -2192,6 +2208,10 @@ impl App {
             )
             .show(ctx, |ui| {
                 appearance::paint_stage(ui, ui.max_rect());
+                if self.gridfinity_open && self.assembly_kind == AssemblyKind::Drawer {
+                    self.bin_workspace(ui);
+                    return;
+                }
                 self.stage_controls(ctx, ui.max_rect());
                 self.inline_editor_ui(ctx, ui.max_rect());
                 if self.preview_modes_ui(ui, ctx) {
@@ -2611,7 +2631,6 @@ impl App {
                     colors,
                 } = saved;
 
-                self.active_drawer = None;
                 let p = members
                     .get(active_member)
                     .map(|m| m.preset.clone())
@@ -2693,6 +2712,8 @@ impl App {
                             return;
                         }
                     };
+                    self.close_member_editors();
+                    self.active_drawer = None;
                     if let Some(config) = p.print_config {
                         self.export_options.plate = config;
                     } else {
@@ -2749,9 +2770,6 @@ impl App {
                     self.box_state = None;
                     self.layout_cache.clear();
                     self.sustainer_layout_cache.clear();
-                    self.gridfinity_open = false;
-                    self.label_open = false;
-                    self.selected = None;
                     self.assembly(ctx);
                     self.status = format!(
                         "{} {excluded}",
@@ -2784,166 +2802,6 @@ impl App {
             .into());
         }
         Ok(())
-    }
-    fn gridfinity_window(&mut self, ctx: &egui::Context) {
-        if self.assembly_kind == AssemblyKind::Sustainer {
-            return;
-        }
-        if !self.gridfinity_open {
-            self.gridfinity_editor.cancel();
-            return;
-        }
-        let mut open = true;
-        let mut draft = self.gridfinity.clone();
-        let mut selected = self.gridfinity_selected;
-        let mut preview = None;
-        let mut focus = false;
-        let mut action_error = None;
-        let Ok(grid) = crate::gridfinity::grid_for(&self.selection, &self.gridfinity.baseplate)
-        else {
-            self.gridfinity_open = false;
-            return;
-        };
-        let max = crate::gridfinity::max_units(&self.selection).unwrap_or(3);
-        egui::Window::new(t(self.zh, "Gridfinity 盒子编辑", "Gridfinity bin editor"))
-            .open(&mut open)
-            .default_width(820.)
-            .default_height((ctx.content_rect().height()-120.).max(420.))
-            .max_height((ctx.content_rect().height() - 120.).max(300.))
-            .vscroll(true)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.label(format!(
-                    "{} × {} 格 · {} · 自动盒高 {} U / {} mm（另含堆叠边）",
-                    grid[0],
-                    grid[1],
-                    self.selection.height,
-                    max,
-                    max * 7
-                ));
-                ui.small("使用 Gridfinity Rebuilt 标准底脚与堆叠边；盒子与收纳隔板互斥。");
-                self.gridfinity_editor.shared_ui(ui,&mut draft,&self.selection);
-                ui.horizontal_wrapped(|ui| {
-                    let add = ui.add(
-                        egui::Button::new("添加盒子 / 拖入").sense(egui::Sense::click_and_drag()),
-                    );
-                    if add.drag_started_by(egui::PointerButton::Primary) {
-                        self.gridfinity_editor.start_stamp(&draft, &self.selection);
-                    }
-                    if add.clicked() {
-                        match draft.add(&self.selection, None) {
-                            Ok(id) => selected = Some(id),
-                            Err(e) => action_error = Some(e),
-                        }
-                    }
-                    if ui
-                        .add_enabled(selected.is_some(), egui::Button::new("复制"))
-                        .clicked()
-                    {
-                        let template = draft.bins.iter().find(|b| Some(b.id) == selected).cloned();
-                        match draft.add(&self.selection, template) {
-                            Ok(id) => selected = Some(id),
-                            Err(e) => action_error = Some(e),
-                        }
-                    }
-                    if ui
-                        .add_enabled(selected.is_some(), egui::Button::new("删除"))
-                        .clicked()
-                    {
-                        draft.bins.retain(|b| Some(b.id) != selected);
-                        selected = None;
-                    }
-                    if ui.button("特写底板与盒子").clicked() {
-                        focus = true;
-                    }
-                    if ui.button("取消选择").clicked() {
-                        selected = None;
-                    }
-                });
-                ui.small("俯视：上方为抽屉后部；双击盒内或选中后直接输入标签，F2 也可编辑。输入后自动启用标签文字。");
-                let available=ui.available_width();
-                let preview_width=(available*0.32).clamp(180.,240.).min(available-100.);
-                let grid_width=(available-preview_width-16.).min(grid[0] as f32*58.);
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(egui::vec2(grid_width,0.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                        self.gridfinity_editor.canvas(ui,&mut draft,&self.selection,&mut selected);
-                    });
-                    ui.add_space(8.);
-                    ui.allocate_ui_with_layout(egui::vec2(preview_width,0.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                        self.gridfinity_editor.selected_preview(ui,&draft,selected,&self.export_options.plate,self.label_font);
-                    });
-                });
-                if let Some(b) = draft.bins.iter_mut().find(|b| Some(b.id) == selected) {
-                    ui.separator();
-                    ui.strong(format!("盒子 {} · 位置、宽度和文本", b.id));
-                    ui.horizontal(|ui| {
-                        for (axis,name) in ["起始列","起始行"].iter().enumerate() {
-                            let mut n=b.cell[axis]+1;ui.label(*name);ui.add(egui::DragValue::new(&mut n).range(1..=grid[axis]));b.cell[axis]=n-1;
-                        }
-                        ui.label("宽度（格）");ui.add(egui::DragValue::new(&mut b.span[0]).range(1..=grid[0]));
-                    });
-                    if b.tab {
-                        ui.strong("本盒标签文本（单独设置）");
-                        ui.checkbox(&mut b.label.enabled,"标签文字");
-                        if b.label.enabled {
-                            ui.add(egui::TextEdit::multiline(&mut b.label.text).desired_rows(2).char_limit(48).hint_text("最多两行"));
-                            crate::label::stroke_check_ui(ui,&b.label.with_font(self.label_font));
-                        }
-                    }
-                    if ui.button("特写此盒子").clicked() {preview=Some(b.path());}
-                }
-                // Any newly entered script requiring a larger minimum font size raises
-                // the shared size for the whole layout, never an individual override.
-                for b in draft.bins.iter().filter(|b|b.label.active()) {draft.shared.size=draft.shared.size.max(b.label.min_size());}
-                draft.sync_shared();
-                if let Some(e) = &self.gridfinity_error {
-                    ui.colored_label(Color32::LIGHT_RED, e);
-                }
-                if self.busy || self.preview.has_pending() {
-                    ui.spinner();
-                    ui.label("正在后台更新；最多并行生成两个盒体，修改文字复用盒体。");
-                }
-                if crate::gridfinity::executable(&self.home).is_none() {
-                    ui.colored_label(
-                        Color32::LIGHT_RED,
-                        "未找到 OpenSCAD；请运行 tools/setup-gridfinity.ps1。",
-                    );
-                }
-            });
-        self.gridfinity_open = open;
-        if !open {
-            self.gridfinity_editor.cancel();
-        }
-        self.gridfinity_selected = selected;
-        if let Some(e) = action_error {
-            self.gridfinity_error = Some(e);
-        }
-        if draft != self.gridfinity {
-            match draft.validate(&self.selection) {
-                Ok(()) => {
-                    self.gridfinity = draft;
-                    self.gridfinity_error = None;
-                    self.assembly(ctx);
-                }
-                Err(e) => self.gridfinity_error = Some(e),
-            }
-        }
-        if let Some(path) = preview {
-            self.single(path, ctx);
-        }
-        if focus && self.combination_view {
-            self.inline_edit.pending_focus = true;
-        } else if focus {
-            for p in &mut self.scene.parts {
-                p.visible = p.pose.path.contains("/Boxes/")
-                    || p.pose.path.contains("/Gridfinity Baseplate/")
-                    || p.pose.path.starts_with(crate::gridfinity::PREFIX);
-            }
-            self.explosion = 0.;
-            self.camera.fit(&self.scene, 0.);
-            self.camera.yaw = 0.4;
-            self.camera.pitch = 1.1;
-        }
     }
     fn label_window(&mut self, ctx: &egui::Context) {
         if !self.label_open {
@@ -3259,6 +3117,12 @@ impl App {
     }
 }
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+        if self.smoke && std::env::args().any(|arg| arg == "--smoke-bin-editor") {
+            self.bin_editor_smoke_input(input);
+        }
+    }
+
     fn on_exit(&mut self) {
         self.tower_flush();
         if let Err(error) = self.renderer.wait_idle() {
@@ -3270,13 +3134,16 @@ impl eframe::App for App {
         self.poll(ctx);
         self.tower_tick(ctx);
         self.animation_tick(ctx);
-        if self.inline_edit.open
-            && (self.tab != 0 || self.tower.print_list || self.preview_modes.special())
-        {
-            self.close_inline_editor(ctx);
-        }
         self.workspace_toolbar(ctx);
         self.left(ctx);
+        if self.tab != 0 || self.tower.print_list || self.preview_modes.special() {
+            if self.gridfinity_open {
+                self.close_bin_editor();
+            }
+            if self.inline_edit.open {
+                self.close_inline_editor(ctx);
+            }
+        }
         self.divider_view(ctx);
         self.color_window(ctx);
         self.global_colors_window(ctx);
@@ -3318,7 +3185,6 @@ impl eframe::App for App {
         self.combination_spec_window(ctx);
         self.exterior_window(ctx);
         self.label_window(ctx);
-        self.gridfinity_window(ctx);
         if self.sustainer_divider_editor.show(
             ctx,
             &self.catalog,
@@ -3368,6 +3234,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
             self.motion_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-bin-editor") {
+            self.bin_editor_smoke(ctx);
             return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {

@@ -4,6 +4,11 @@ use crate::{
     gridfinity::{self, Bin, Layout},
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+
+mod gestures;
+mod keyboard;
+pub use gestures::{DragPreview, GridView};
+
 #[derive(Clone)]
 enum Gesture {
     Draw([i32; 2]),
@@ -15,6 +20,8 @@ enum Gesture {
 struct Drag {
     base: Layout,
     specification: Selection,
+    view: GridView,
+    preview: Option<DragPreview>,
     bin: Bin,
     start: [f32; 2],
     gesture: Gesture,
@@ -38,15 +45,6 @@ impl Candidate {
         next.bins.sort_by_key(|b| b.id);
         next.validate(s)?;
         Ok(next)
-    }
-    fn rect(&self, rect: Rect, cell: f32) -> Rect {
-        Rect::from_min_size(
-            rect.min + Vec2::new(self.cell[0] as f32 * cell, self.cell[1] as f32 * cell),
-            Vec2::new(
-                self.bin.span[0] as f32 * cell,
-                self.bin.span[1] as f32 * cell,
-            ),
-        )
     }
 }
 impl Drag {
@@ -142,10 +140,8 @@ impl Editor {
         let before = settings.clone();
         let grid = gridfinity::grid_for(s, &layout.baseplate).unwrap_or([1, 1]);
         let max = gridfinity::max_units(s).unwrap_or(3);
-        ui.strong("所有小盒统一配置");
-        ui.small("修改立即作用于全部小盒，新增小盒自动沿用；位置、宽度和标签文本逐盒保留。");
         ui.add_enabled_ui(!self.active(), |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("统一深度（格）");
                 ui.add(egui::DragValue::new(&mut settings.depth_cells).range(1..=grid[1]));
                 ui.checkbox(&mut settings.auto_height, "自动高度");
@@ -167,7 +163,7 @@ impl Editor {
                 }
             });
             if settings.tab {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut settings.style, crate::label::Style::Raised, "凸字");
                     ui.radio_value(&mut settings.style, crate::label::Style::Engraved, "凹字");
                     ui.radio_value(&mut settings.style, crate::label::Style::Flat, "平面分色");
@@ -193,7 +189,7 @@ impl Editor {
                 if settings.style == crate::label::Style::Flat {
                     ui.small("文字与底板齐平；选择不同的文字耗材槽，导出 3MF 保留分色。");
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("文字偏移 X / Y mm");
                     for offset in &mut settings.offset {
                         ui.add(egui::DragValue::new(offset).speed(0.1).range(-10. ..=10.));
@@ -386,6 +382,8 @@ impl Editor {
                 self.drag = Some(Drag {
                     base: layout.clone(),
                     specification: s.clone(),
+                    view: GridView::Plan,
+                    preview: None,
                     bin,
                     start: [0.; 2],
                     gesture: Gesture::Stamp,
@@ -404,29 +402,6 @@ impl Editor {
             Vec2::new(b.span[0] as f32 * cell, b.span[1] as f32 * cell),
         )
     }
-    fn edges(r: Rect, p: Pos2) -> [i8; 2] {
-        let mut edges = [0; 2];
-        for (a, edge) in edges.iter_mut().enumerate().take(1) {
-            let v = if a == 0 { p.x } else { p.y };
-            let lo = if a == 0 { r.left() } else { r.top() };
-            let hi = if a == 0 { r.right() } else { r.bottom() };
-            if (v - lo).abs() <= 8. {
-                *edge = -1;
-            } else if (v - hi).abs() <= 8. {
-                *edge = 1;
-            }
-        }
-        edges
-    }
-    fn cursor(edges: [i8; 2]) -> egui::CursorIcon {
-        match edges {
-            [0, 0] => egui::CursorIcon::Grab,
-            [0, _] => egui::CursorIcon::ResizeVertical,
-            [_, 0] => egui::CursorIcon::ResizeHorizontal,
-            [a, b] if a == b => egui::CursorIcon::ResizeNwSe,
-            _ => egui::CursorIcon::ResizeNeSw,
-        }
-    }
     pub fn canvas(
         &mut self,
         ui: &mut egui::Ui,
@@ -435,7 +410,7 @@ impl Editor {
         selected: &mut Option<u32>,
     ) -> Rect {
         let grid = gridfinity::grid_for(s, &layout.baseplate).unwrap_or([1, 1]);
-        let cell = (ui.available_width() / grid[0] as f32).min(58.);
+        let cell = ui.available_width().max(1.) / grid[0] as f32;
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(cell * grid[0] as f32, cell * grid[1] as f32),
             egui::Sense::click_and_drag(),
@@ -450,14 +425,6 @@ impl Editor {
                     || !i.focused,
             )
         });
-        if self.drag.as_ref().is_some_and(|d| {
-            d.base != *layout
-                || d.specification.width != s.width
-                || d.specification.depth != s.depth
-                || d.specification.height != s.height
-        }) {
-            self.drag = None;
-        }
         if cancel {
             self.drag = None;
             if ui.input(|i| {
@@ -481,143 +448,150 @@ impl Editor {
             && response.drag_started_by(egui::PointerButton::Primary)
             && let Some(p) = press.filter(|p| rect.contains(*p))
         {
-            let at = Self::point(rect, cell, p);
-            // Selected edge handles take precedence over a neighboring bin.
-            let chosen = layout.bins.iter().find(|b| {
-                Some(b.id) == *selected
-                    && Self::bin_rect(b, rect, cell).expand(4.).contains(p)
-                    && Self::edges(Self::bin_rect(b, rect, cell), p) != [0, 0]
-            });
-            let hit = chosen.or_else(|| {
-                layout
-                    .bins
-                    .iter()
-                    .find(|b| Self::bin_rect(b, rect, cell).contains(p))
-            });
-            let entry = if let Some(bin) = hit {
-                let edge = if Some(bin.id) == *selected {
-                    Self::edges(Self::bin_rect(bin, rect, cell), p)
-                } else {
-                    [0, 0]
-                };
-                Ok((
-                    bin.clone(),
-                    if edge == [0, 0] {
-                        Gesture::Move
-                    } else {
-                        Gesture::Resize(edge)
-                    },
-                ))
-            } else {
-                Self::fresh(layout).map(|b| (b, Gesture::Draw(at.map(|v| v.floor() as i32))))
-            };
-            match entry {
-                Ok((bin, gesture)) => {
-                    self.drag = Some(Drag {
-                        base: layout.clone(),
-                        specification: s.clone(),
-                        bin,
-                        start: at,
-                        gesture,
-                    });
-                    self.error = None;
-                }
-                Err(e) => self.error = Some(e),
-            }
+            self.begin_grid_drag(
+                GridView::Plan,
+                layout,
+                s,
+                selected,
+                Self::point(rect, cell, p),
+                8. / cell,
+            );
         }
+        self.update_grid_drag(
+            GridView::Plan,
+            layout,
+            s,
+            selected,
+            pointer
+                .filter(|p| rect.contains(*p))
+                .map(|p| Self::point(rect, cell, p)),
+            released,
+        );
         let painter = ui.painter_at(rect);
-        for y in 0..grid[1] {
-            for x in 0..grid[0] {
-                let r = Rect::from_min_size(
-                    rect.min + Vec2::new(x as f32 * cell, y as f32 * cell),
-                    Vec2::splat(cell),
-                );
-                painter.rect_stroke(
-                    r,
-                    2.,
-                    Stroke::new(1., Color32::DARK_GRAY),
-                    egui::StrokeKind::Inside,
-                );
-            }
+        let visuals = ui.visuals();
+        let accent = visuals.hyperlink_color;
+        let (grid_line, bin_fill, bin_front) = if visuals.dark_mode {
+            (
+                Color32::from_gray(75),
+                Color32::from_gray(99),
+                Color32::from_gray(77),
+            )
+        } else {
+            (
+                Color32::from_gray(191),
+                Color32::from_gray(180),
+                Color32::from_gray(149),
+            )
+        };
+        painter.rect_filled(rect, 5., visuals.extreme_bg_color);
+        let grid_stroke = Stroke::new(1., grid_line);
+        painter.rect_stroke(rect, 5., grid_stroke, egui::StrokeKind::Inside);
+        for column in 1..grid[0] {
+            let x = rect.left() + column as f32 * cell;
+            painter.vline(x, rect.y_range(), grid_stroke);
+        }
+        for row in 1..grid[1] {
+            let y = rect.top() + row as f32 * cell;
+            painter.hline(rect.x_range(), y, grid_stroke);
         }
         for b in &layout.bins {
             let r = Self::bin_rect(b, rect, cell);
-            let fill = if Some(b.id) == *selected {
-                Color32::from_rgb(54, 117, 139)
+            let is_selected = Some(b.id) == *selected;
+            let (fill, front) = if is_selected {
+                (visuals.selection.bg_fill, accent)
             } else {
-                Color32::from_rgb(72, 79, 91)
+                (bin_fill, bin_front)
             };
-            painter.rect_filled(r.shrink(3.), 4., fill);
-            let name = if b.label.active() {
-                b.label.text.replace('\n', " / ")
-            } else {
-                format!("盒子 {}", b.id)
-            };
+            let body = r.shrink(2.);
+            let front_height = (cell * 0.09).clamp(2., 7.).min(body.height().max(0.));
+            let front_top = body.bottom() - front_height;
+            painter.rect_filled(body, 5., fill);
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(body.left(), front_top), body.max),
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: 5,
+                    se: 5,
+                },
+                front,
+            );
+            painter.rect_stroke(
+                body,
+                5.,
+                if is_selected {
+                    Stroke::new(2., accent)
+                } else {
+                    Stroke::new(1., bin_front)
+                },
+                egui::StrokeKind::Inside,
+            );
             if self.inline.as_ref().is_none_or(|edit| edit.id != b.id) {
-                painter.text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    egui::FontId::proportional(13.),
-                    Color32::WHITE,
-                );
-            }
-            if Some(b.id) == *selected {
-                for p in [r.left_center(), r.right_center()] {
-                    painter.rect_filled(
-                        Rect::from_center_size(p, Vec2::splat(7.)),
-                        1.,
-                        Color32::LIGHT_BLUE,
+                let text_area =
+                    Rect::from_min_max(body.min, Pos2::new(body.right(), front_top)).shrink(3.);
+                let text = painter.with_clip_rect(painter.clip_rect().intersect(text_area));
+                let center = text_area.center();
+                let show_label =
+                    b.label.active() && text_area.width() >= 32. && text_area.height() >= 30.;
+                let offset = if show_label { 8. } else { 0. };
+                if let Ok(units) = gridfinity::units(b, s) {
+                    text.text(
+                        center - Vec2::new(0., offset),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{units}U"),
+                        egui::FontId::proportional((text_area.width() * 0.48).clamp(9., 14.)),
+                        visuals.text_color(),
+                    );
+                }
+                if show_label {
+                    text.text(
+                        center + Vec2::new(0., offset),
+                        egui::Align2::CENTER_CENTER,
+                        b.label.text.replace('\n', " / "),
+                        egui::FontId::proportional(12.),
+                        visuals.text_color(),
                     );
                 }
             }
+            if Some(b.id) == *selected {
+                for p in [r.left_center(), r.right_center()] {
+                    painter.rect_filled(Rect::from_center_size(p, Vec2::splat(7.)), 1., accent);
+                }
+            }
         }
-        if let (Some(drag), Some(p)) = (&self.drag, pointer) {
-            let candidate = drag.candidate(Self::point(rect, cell, p));
-            let next = if rect.contains(p) {
-                candidate.layout(&drag.base, s)
+        if let Some(candidate) = self.drag_preview() {
+            let color = if candidate.valid {
+                accent
             } else {
-                Err("请在底板网格内释放，已保留原布局".into())
+                visuals.error_fg_color
             };
-            let color = if next.is_ok() {
-                Color32::from_rgb(80, 220, 145)
-            } else {
-                Color32::LIGHT_RED
-            };
-            let r = candidate.rect(rect, cell).shrink(2.);
+            let r = Rect::from_min_size(
+                rect.min + Vec2::new(candidate.cell[0] as f32, candidate.cell[1] as f32) * cell,
+                Vec2::new(candidate.span[0] as f32, candidate.span[1] as f32) * cell,
+            )
+            .shrink(2.);
             painter.rect_filled(r, 3., color.gamma_multiply(0.25));
             painter.rect_stroke(r, 3., Stroke::new(2.5, color), egui::StrokeKind::Inside);
-            painter.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("{} × {}", candidate.bin.span[0], candidate.bin.span[1]),
-                egui::FontId::proportional(16.),
-                color,
-            );
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            if released {
-                match next {
-                    Ok(next) => {
-                        *selected = Some(candidate.bin.id);
-                        *layout = next;
-                        self.error = None;
-                    }
-                    Err(e) => self.error = Some(e),
-                }
-                self.drag = None;
+            if r.width() >= 40. && r.height() >= 42. {
+                painter
+                    .with_clip_rect(painter.clip_rect().intersect(r.shrink(3.)))
+                    .text(
+                        r.min + Vec2::splat(5.),
+                        egui::Align2::LEFT_TOP,
+                        format!("{} × {}", candidate.span[0], candidate.span[1]),
+                        egui::FontId::proportional(11.),
+                        color,
+                    );
             }
-        } else if released {
-            self.drag = None;
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
         }
         if response.clicked()
             && !cancel
             && let Some(p) = pointer
         {
-            *selected = layout
-                .bins
-                .iter()
-                .find(|b| Self::bin_rect(b, rect, cell).contains(p))
-                .map(|b| b.id);
+            *selected = Self::hit_bin(layout, Self::point(rect, cell, p));
             self.error = None;
             response.request_focus();
         }
@@ -628,8 +602,10 @@ impl Editor {
                     .iter()
                     .any(|b| Self::bin_rect(b, rect, cell).shrink(8.).contains(p))
             });
-        let f2 = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2));
         let keyboard_on_canvas = ui.memory(|m| m.focused().is_none_or(|id| id == response.id));
+        self.grid_keyboard(&response, layout, s, selected);
+        let f2 = keyboard_on_canvas
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2));
         let typing = keyboard_on_canvas
             && ui.input(|i| {
                 i.events
@@ -649,35 +625,28 @@ impl Editor {
             && response.hovered()
             && let Some(p) = pointer
         {
-            let hit = layout
+            let at = Self::point(rect, cell, p);
+            let resizing = layout
                 .bins
                 .iter()
-                .find(|b| Self::bin_rect(b, rect, cell).contains(p));
-            ui.ctx()
-                .set_cursor_icon(hit.map_or(egui::CursorIcon::Crosshair, |b| {
-                    Self::cursor(if Some(b.id) == *selected {
-                        Self::edges(Self::bin_rect(b, rect, cell), p)
-                    } else {
-                        [0, 0]
-                    })
-                }));
+                .any(|bin| Some(bin.id) == *selected && Self::width_edge(bin, at, 8. / cell) != 0);
+            let cursor = if resizing {
+                egui::CursorIcon::ResizeHorizontal
+            } else if Self::hit_bin(layout, at).is_some() {
+                egui::CursorIcon::Grab
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+            ui.ctx().set_cursor_icon(cursor);
         }
-        // Constant-height feedback prevents the canvas and controls shifting during gestures.
-        ui.label(
-            egui::RichText::new(self.error.as_deref().unwrap_or(if self.inline.is_some() {
-                "Enter 确认，Shift+Enter 换行；点击其他位置确认，Esc 取消。"
-            } else if self.drag.is_some() {
-                "绿色可放置，红色冲突；松开确认，Esc / 右键取消。"
-            } else {
-                "双击或选中后输入标签；空白拖框确定宽度，拖左右边改宽，深度由统一配置决定。"
-            }))
-            .small()
-            .color(if self.error.is_some() {
-                Color32::LIGHT_RED
-            } else {
-                Color32::GRAY
-            }),
-        );
+        ui.vertical_centered(|ui| {
+            ui.weak("前");
+        });
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        } else if self.inline.is_some() {
+            ui.small("Enter 确认，Shift+Enter 换行，Esc 取消。");
+        }
         rect
     }
 }
@@ -685,6 +654,58 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plan_shows_actual_bin_height_and_clips_text_to_each_box() {
+        for (panel_width, dark, auto_height, show_name) in [
+            (285., false, true, true),
+            (285., true, false, true),
+            (90., false, true, false),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let s = Selection::default();
+            let mut layout = Layout::default();
+            layout.shared.auto_height = auto_height;
+            layout.shared.height_units = 3;
+            layout.add(&s, None).unwrap();
+            let name = "M3 × 10 mounting screws";
+            layout.bins[0].label.text = name.into();
+            layout.bins[0].label.enabled = true;
+            let mut editor = Editor::default();
+            let mut box_rect = Rect::NOTHING;
+            let frame = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        Pos2::ZERO,
+                        Vec2::new(panel_width, 480.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let board = editor.canvas(ui, &mut layout, &s, &mut None);
+                        box_rect = Editor::bin_rect(&layout.bins[0], board, board.width() / 3.);
+                    });
+                },
+            );
+            let height = if auto_height { "4U" } else { "3U" };
+            let text_clip = |needle: &str| {
+                frame.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(t) if t.galley.text() == needle => Some(shape.clip_rect),
+                    _ => None,
+                })
+            };
+            assert!(box_rect.contains_rect(text_clip(height).unwrap()));
+            assert_eq!(text_clip(name).is_some(), show_name);
+            if let Some(clip) = text_clip(name) {
+                assert!(box_rect.contains_rect(clip));
+            }
+        }
+    }
     #[test]
     fn selected_preview_tracks_inline_draft_without_changing_layout() {
         let mut layout = Layout::default();
@@ -827,7 +848,7 @@ mod tests {
         fn frame(&mut self, events: Vec<egui::Event>) {
             self.time += 0.016;
             let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600., 500.))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(284., 500.))),
                 time: Some(self.time),
                 events,
                 focused: true,
@@ -851,7 +872,11 @@ mod tests {
             });
         }
         fn pos(&self, x: f32, y: f32) -> Pos2 {
-            self.canvas.min + Vec2::new(x * 58., y * 58.)
+            self.canvas.min + Vec2::new(x, y) * self.cell_width()
+        }
+        fn cell_width(&self) -> f32 {
+            let grid = gridfinity::grid_for(&Selection::default(), &self.layout.baseplate).unwrap();
+            self.canvas.width() / grid[0] as f32
         }
         fn press(&mut self, p: Pos2) {
             self.frame(vec![
@@ -930,6 +955,43 @@ mod tests {
         assert_eq!(h.layout.bins[0].cell, before.bins[0].cell);
         assert_eq!(h.layout.bins[0].span, before.bins[0].span);
         assert_eq!(h.layout.bins[1], before.bins[1]);
+    }
+    #[test]
+    fn focused_grid_shortcuts_validate_edits_and_leave_inline_text_alone() {
+        use egui::{Key, Modifiers};
+        let mut h = Harness::new();
+        let s = Selection::default();
+        h.layout.add(&s, None).unwrap();
+        h.layout.add(&s, None).unwrap();
+        h.frame(vec![]);
+        let center = h.pos(0.5, 0.5);
+        h.press(center);
+        h.release(center);
+        h.frame(vec![]);
+        h.frame(vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(h.selected, Some(2));
+        h.frame(vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        assert_eq!(h.layout.bins[1].cell, [1, 1]);
+        h.frame(vec![key(Key::ArrowRight, Modifiers::SHIFT)]);
+        assert_eq!(h.layout.bins[1].span, [2, 1]);
+        h.frame(vec![key(Key::D, Modifiers::CTRL)]);
+        assert_eq!(h.selected, Some(3));
+        assert_eq!(h.layout.bins.len(), 3);
+        let before = h.layout.clone();
+        h.frame(vec![key(Key::ArrowLeft, Modifiers::NONE)]);
+        assert_eq!(h.layout, before);
+        assert!(h.editor.error.is_some());
+        h.frame(vec![key(Key::Delete, Modifiers::NONE)]);
+        assert_eq!(h.layout.bins.len(), 2);
+        h.frame(vec![key(Key::F2, Modifiers::NONE)]);
+        assert!(h.editor.inline.is_some());
+        let before_text = h.layout.clone();
+        h.frame(vec![
+            key(Key::Delete, Modifiers::NONE),
+            key(Key::ArrowLeft, Modifiers::NONE),
+        ]);
+        assert_eq!(h.layout, before_text);
+        assert!(h.editor.inline.is_some());
     }
     #[test]
     fn inline_type_to_replace_cancel_click_away_and_blank() {
@@ -1070,7 +1132,7 @@ mod tests {
         assert_eq!(h.layout.bins[0].cell, [1, 1]);
         assert_eq!(h.layout.bins[0].label, b.label);
         let corner = h.pos(2., 2.) - Vec2::splat(2.);
-        let enlarged = corner + Vec2::splat(58.);
+        let enlarged = corner + Vec2::splat(h.cell_width());
         h.press(corner);
         h.move_to(enlarged);
         h.release(enlarged);
@@ -1115,8 +1177,9 @@ mod tests {
         assert_eq!(h.layout.bins[0].cell, [0, 0]);
         let edge = h.pos(2., 1.) - Vec2::new(2., 0.);
         h.press(edge);
-        h.move_to(edge + Vec2::new(58., 50.));
-        h.release(edge + Vec2::new(58., 50.));
+        let delta = Vec2::new(h.cell_width(), 50.);
+        h.move_to(edge + delta);
+        h.release(edge + delta);
         assert_eq!(h.layout.bins[0].span, [3, 2]);
         assert_eq!(h.layout.shared.depth_cells, 2);
         let clone = h.layout.bins[0].clone();
@@ -1137,14 +1200,14 @@ mod tests {
         h.frame(vec![]);
         let before = h.layout.clone();
         let edge = h.pos(1., 0.5) - Vec2::new(2., 0.);
-        let drop = edge + Vec2::new(116., 0.);
+        let drop = edge + Vec2::new(2. * h.cell_width(), 0.);
         h.press(edge);
         h.move_to(drop);
         h.release(drop);
         assert_eq!(h.layout, before);
         assert!(h.editor.error.is_some());
         let left = h.pos(0., 0.5) + Vec2::new(2., 0.);
-        let drop = left + Vec2::new(58., 0.);
+        let drop = left + Vec2::new(h.cell_width(), 0.);
         h.press(left);
         h.move_to(drop);
         h.release(drop);

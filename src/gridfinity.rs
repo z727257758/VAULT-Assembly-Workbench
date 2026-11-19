@@ -852,7 +852,7 @@ pub fn generate_many(
     Ok(indices.into_iter().map(|i| meshes[i].clone()).collect())
 }
 // Recover socket centers from opposing vertical faces, independent of handles or asymmetric bounds.
-fn centers(mesh: &Mesh, axis: usize, count: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn centers(mesh: &Mesh, axis: usize, count: usize) -> Result<Vec<f32>, String> {
     let mut levels = BTreeMap::<i32, f32>::new();
     for tri in mesh.vertices.chunks_exact(3) {
         let a = Vec3::from(tri[0].position);

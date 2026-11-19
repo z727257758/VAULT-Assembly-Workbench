@@ -252,18 +252,29 @@ impl App {
         if target_preset(&self.members, target).is_none() {
             return;
         }
+        self.tab = 0;
+        self.tower.print_list = false;
+        self.preview_modes.mode = preview_modes::Mode::Assembly;
         if self.inline_edit.open && self.inline_edit.target == Some(target) {
+            if self.gridfinity_open {
+                self.close_bin_editor();
+            }
             self.inline_edit.pending_focus = true;
             self.inline_edit.path = None;
             ctx.request_repaint();
             return;
         }
         self.finish_member_edit();
-        let overview = self
-            .inline_edit
-            .overview
-            .take()
-            .unwrap_or_else(|| (self.camera.clone(), self.ghost));
+        let need_assembly = !self.combination_view || self.scene_key != "combination";
+        let overview = if self.inline_edit.open {
+            self.inline_edit.overview.take()
+        } else if need_assembly {
+            self.combination_view_state
+                .as_ref()
+                .map(|(camera, _, _, ghost)| (camera.clone(), *ghost))
+        } else {
+            Some((self.camera.clone(), self.ghost))
+        };
         let viewport = self.inline_edit.viewport;
         let key = self.scene_key.clone();
         let baseline = self.workflow_snapshot();
@@ -277,19 +288,17 @@ impl App {
         self.scene_key = key;
         self.explosion = 0.;
         self.dimensions = false;
-        self.preview_modes.mode = preview_modes::Mode::Assembly;
-        self.tab = 0;
         self.tower
             .reveal_layer(self.members[member].placement.level);
         self.inline_edit = State {
             open: true,
             target: Some(target),
-            overview: Some(overview),
+            overview,
             pending_focus: true,
             viewport,
             ..Default::default()
         };
-        if self.scene_key != "combination" {
+        if need_assembly {
             self.assembly(ctx);
         }
         ctx.request_repaint();
@@ -309,6 +318,10 @@ impl App {
         if let Some((camera, ghost)) = overview {
             self.camera = camera;
             self.ghost = ghost;
+        } else if self.scene_key == "combination" {
+            self.camera = Camera::default();
+            self.camera.fit(&self.scene, self.explosion);
+            self.ghost = false;
         }
         ctx.request_repaint();
     }
@@ -746,7 +759,7 @@ impl App {
                             )
                             .clicked()
                         {
-                            self.gridfinity_open = true;
+                            self.open_bin_editor(ctx);
                         }
                         if !self.gridfinity.bins.is_empty()
                             && ui.button(t(z, "移除全部", "Remove all")).clicked()

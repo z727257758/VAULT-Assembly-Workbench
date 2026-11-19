@@ -355,6 +355,19 @@ impl Renderer {
         camera: &Camera,
         options: ViewOptions,
     ) -> egui::TextureId {
+        self.render_with_materials(index, size, scene, camera, options, &[])
+    }
+
+    /// Display material overrides apply only to the specified parts in this pass.
+    pub fn render_with_materials(
+        &mut self,
+        index: usize,
+        size: [u32; 2],
+        scene: &Scene,
+        camera: &Camera,
+        options: ViewOptions,
+        materials: &[Option<[f32; 4]>],
+    ) -> egui::TextureId {
         let ViewOptions {
             explosion,
             selected,
@@ -375,22 +388,28 @@ impl Renderer {
             ),
         );
         for (i, p) in scene.parts.iter().enumerate() {
-            let print_colors = self.print_colors.as_ref().map(|default| {
-                let member = (p.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
-                let drawer = ((p.pose.instance % crate::scene::MEMBER_STRIDE)
-                    / crate::constraints::tower::DRAWER_STRIDE)
-                    as usize;
-                drawer
-                    .checked_sub(1)
-                    .and_then(|d| {
-                        self.drawer_colors
-                            .get(member)
-                            .and_then(|colors| colors.get(d))
-                    })
-                    .or_else(|| self.member_colors.get(member))
-                    .unwrap_or(default)
-            });
-            let mut color = print_colors.map_or(p.color, |c| c.color(&p.pose.path));
+            let material = materials.get(i).copied().flatten();
+            let print_colors = self
+                .print_colors
+                .as_ref()
+                .filter(|_| material.is_none())
+                .map(|default| {
+                    let member = (p.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
+                    let drawer = ((p.pose.instance % crate::scene::MEMBER_STRIDE)
+                        / crate::constraints::tower::DRAWER_STRIDE)
+                        as usize;
+                    drawer
+                        .checked_sub(1)
+                        .and_then(|d| {
+                            self.drawer_colors
+                                .get(member)
+                                .and_then(|colors| colors.get(d))
+                        })
+                        .or_else(|| self.member_colors.get(member))
+                        .unwrap_or(default)
+                });
+            let mut color =
+                material.unwrap_or_else(|| print_colors.map_or(p.color, |c| c.color(&p.pose.path)));
             if colliding.contains(&i) {
                 color = [0.95, 0.30, 0.32, 1.];
             }
