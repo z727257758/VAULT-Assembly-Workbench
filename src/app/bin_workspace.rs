@@ -105,6 +105,23 @@ impl App {
                 if let Some(drawer) = self.active_drawer {
                     ui.weak(format!("{} {}", t(z, "子抽屉", "Drawer"), drawer + 1));
                 }
+                let opacity_control = |ui: &mut egui::Ui| {
+                    let label = ui.label(t(z, "外部零件不透明度", "Exterior part opacity"));
+                    ui.spacing_mut().slider_width = (ui.available_width() - 56.).clamp(32., 160.);
+                    if ui
+                        .add(egui::Slider::new(&mut self.bin_exterior_opacity, 20..=50).suffix("%"))
+                        .labelled_by(label.id)
+                        .changed()
+                    {
+                        ui.ctx().request_repaint();
+                    }
+                };
+                let inline_width = if z { 220. } else { 245. };
+                if ui.available_width() >= inline_width {
+                    ui.horizontal(opacity_control);
+                } else {
+                    ui.vertical(opacity_control);
+                }
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("bin-properties")

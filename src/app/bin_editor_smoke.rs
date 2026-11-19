@@ -5,7 +5,7 @@ use crate::gridfinity::{Bin, Layout};
 use crate::scene::Target;
 use egui::{Event, Pos2, RawInput, Rect};
 use glam::{Mat4, Vec3};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const DRAWER: Target = Target {
     member: 0,
@@ -25,6 +25,7 @@ struct Entry {
     camera: Mat4,
     drawer_offset: f32,
     poses: HashMap<PartId, Mat4>,
+    opacities: HashMap<PartId, f32>,
 }
 
 #[derive(Default)]
@@ -118,6 +119,10 @@ impl App {
                         ..Default::default()
                     })
                     .collect();
+                drawer.gridfinity.shared.detachable_label = true;
+                drawer.gridfinity.shared.depth = 0.4;
+                drawer.gridfinity.bins[0].label.enabled = true;
+                drawer.gridfinity.bins[0].label.text = "M3".into();
                 drawer.gridfinity.sync_shared();
                 drawer.gridfinity.validate(&drawer.selection)?;
                 drawer.gridfinity.sync_bom(&mut drawer.bom);
@@ -266,10 +271,13 @@ impl App {
         {
             return Err("Gridfinity editing changed the stored drawer extension".into());
         }
-        let edited_bin = self.gridfinity.bins[0].path();
+        let moved_meshes = [
+            self.gridfinity.bins[0].path(),
+            self.gridfinity.bins[0].label_path(),
+        ];
         if self.scene.parts.len() != entry.poses.len()
             || self.scene.parts.iter().any(|part| {
-                !(DRAWER.contains(part) && part.pose.path == edited_bin)
+                !(DRAWER.contains(part) && moved_meshes.contains(&part.pose.path))
                     && entry
                         .poses
                         .get(&PartId::of(part))
@@ -279,6 +287,9 @@ impl App {
             return Err("An assembly part outside the edited bin changed pose".into());
         }
         if matches!(stage, 6 | 9) {
+            if self.bin_smoke_opacities(&self.scene)? != entry.opacities {
+                return Err("Done did not restore the original assembly material opacities".into());
+            }
             if !entry
                 .camera
                 .abs_diff_eq(self.camera.matrix(central.aspect_ratio()), 0.0001)
@@ -292,6 +303,12 @@ impl App {
             .rendered
             .as_ref()
             .ok_or("Missing rendered assembly")?;
+        let exterior_alpha = match stage {
+            1 | 2 => 0.20,
+            3 | 4 => 0.50,
+            _ => 0.30,
+        };
+        self.check_bin_smoke_materials(drawn, exterior_alpha)?;
         let plan = self.bin_editor_smoke.plan_rect.ok_or("Missing plan view")?;
         let done = self
             .bin_editor_smoke
@@ -337,8 +354,9 @@ impl App {
             return Err("The editor omitted parts of the surrounding assembly".into());
         }
         for (actual, wanted) in drawn.parts.iter().zip(&expected.parts) {
-            let candidate =
-                matches!(stage, 1 | 4) && DRAWER.contains(wanted) && wanted.pose.path == edited_bin;
+            let candidate = matches!(stage, 1 | 4)
+                && DRAWER.contains(wanted)
+                && moved_meshes.contains(&wanted.pose.path);
             if PartId::of(actual) != PartId::of(wanted)
                 || (wanted.visible && !actual.visible)
                 || (!candidate
@@ -352,6 +370,55 @@ impl App {
                     PartId::of(wanted)
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn bin_smoke_opacities(&self, scene: &Scene) -> Result<HashMap<PartId, f32>, String> {
+        let alphas = self.renderer.part_opacities();
+        if alphas.len() != scene.parts.len() {
+            return Err(format!(
+                "Renderer submitted {} materials for {} assembly parts",
+                alphas.len(),
+                scene.parts.len()
+            ));
+        }
+        Ok(scene
+            .parts
+            .iter()
+            .map(PartId::of)
+            .zip(alphas.iter().copied())
+            .collect())
+    }
+
+    fn check_bin_smoke_materials(&self, scene: &Scene, exterior: f32) -> Result<(), String> {
+        let alphas = self.bin_smoke_opacities(scene)?;
+        let mut opaque = HashSet::from([self.gridfinity.baseplate.clone()]);
+        for bin in &self.gridfinity.bins {
+            opaque.insert(bin.path());
+            opaque.insert(bin.label_path());
+        }
+        let mut visible_opaque = HashSet::new();
+        for part in scene.parts.iter().filter(|part| part.visible) {
+            let expected = if DRAWER.contains(part) && opaque.contains(&part.pose.path) {
+                visible_opaque.insert(&part.pose.path);
+                1.
+            } else {
+                exterior
+            };
+            let id = PartId::of(part);
+            let actual = alphas[&id];
+            if !actual.is_finite() || (actual - expected).abs() > 0.0001 {
+                return Err(format!(
+                    "Submitted opacity {actual} for {id:?}, expected {expected}"
+                ));
+            }
+        }
+        if visible_opaque.len() != opaque.len() {
+            return Err(
+                "The selected baseplate, bin bodies and detachable labels must all be visible"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -385,6 +452,16 @@ impl App {
                 let central = ctx.available_rect();
                 let sidebar = sidebar_rect(ctx)?;
                 let motion = AssemblyRules::mechanism(&self.scene, DRAWER)?;
+                for category in ["/Boxes/", "/Facades/"] {
+                    if !self
+                        .scene
+                        .parts
+                        .iter()
+                        .any(|p| p.visible && DRAWER.contains(p) && p.pose.path.contains(category))
+                    {
+                        return Err(format!("Missing visible exterior test part {category}"));
+                    }
+                }
                 if motion.value <= motion.min
                     || motion.value >= motion.max
                     || !self
@@ -402,6 +479,7 @@ impl App {
                     sidebar,
                     camera: self.camera.matrix(central.aspect_ratio()),
                     drawer_offset: motion.value,
+                    opacities: self.bin_smoke_opacities(&self.scene)?,
                     poses: self
                         .scene
                         .parts
@@ -492,6 +570,7 @@ impl App {
             };
             match stage {
                 0 => {
+                    self.bin_exterior_opacity = 20;
                     let from = self
                         .bin_view
                         .project_cell([0.5, 0.5])
@@ -509,13 +588,18 @@ impl App {
                         .ok_or("Missing 3D drop position")?;
                     self.bin_editor_smoke.release(to);
                 }
-                2 => self
-                    .bin_editor_smoke
-                    .drag(plan_point(1.5, 0.5), plan_point(1.5, 1.5), true),
+                2 => {
+                    self.bin_exterior_opacity = 50;
+                    self.bin_editor_smoke
+                        .drag(plan_point(1.5, 0.5), plan_point(1.5, 1.5), true);
+                }
                 3 => self
                     .bin_editor_smoke
                     .drag(plan_point(1.5, 1.5), plan_point(2.5, 2.5), false),
-                4 => self.bin_editor_smoke.release(plan_point(2.5, 2.5)),
+                4 => {
+                    self.bin_exterior_opacity = 30;
+                    self.bin_editor_smoke.release(plan_point(2.5, 2.5));
+                }
                 5 | 8 => {
                     let done = self
                         .bin_editor_smoke
@@ -529,7 +613,7 @@ impl App {
                 }
                 6 => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(NARROW)),
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: The build sidebar kept its width. The complete assembly showed only the selected drawer opening along its joint. 3D and plan drags moved the same bin by two 42 mm steps. Overlap was rejected. At 1050 x 700 all cell centers fit the model view. Done restored the camera and drawer extension at both sizes, with the edited layout retained.").map_err(|e| e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: The build sidebar kept its width. The complete assembly showed only the selected drawer opening along its joint. The selected baseplate, bins and labels stayed opaque with exterior opacity at 30%, 20% and 50%. 3D and plan drags moved the same bin by two 42 mm steps. Overlap was rejected. At 1050 x 700 all cell centers fit the model view. Done restored the assembly opacities, camera and drawer extension at both sizes, with the edited layout retained.").map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return Ok(());

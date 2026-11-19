@@ -108,6 +108,12 @@ pub struct ViewOptions {
     pub member_offsets: Vec<Vec3>,
 }
 
+#[derive(Clone, Copy)]
+pub enum MaterialOverride {
+    Color([f32; 4]),
+    Opacity(f32),
+}
+
 pub struct Renderer {
     pub print_colors: Option<crate::print_plate::Config>,
     pub member_colors: Vec<crate::print_plate::Config>,
@@ -115,6 +121,8 @@ pub struct Renderer {
     pub state: egui_wgpu::RenderState,
     pipeline: wgpu::RenderPipeline,
     ghost_pipeline: wgpu::RenderPipeline,
+    exterior_depth_pipeline: wgpu::RenderPipeline,
+    part_opacities: Vec<f32>,
     camera: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -123,6 +131,10 @@ pub struct Renderer {
     targets: Vec<Option<Target>>,
 }
 impl Renderer {
+    pub fn part_opacities(&self) -> &[f32] {
+        &self.part_opacities
+    }
+
     /// Drain submitted work before native teardown releases the GPU resources.
     pub fn wait_idle(&self) -> Result<(), String> {
         self.state
@@ -178,7 +190,7 @@ impl Renderer {
             bind_group_layouts: &[&camera_layout, &object_layout],
             push_constant_ranges: &[],
         });
-        let make_pipeline = |ghost: bool| {
+        let make_pipeline = |depth_write_enabled, write_mask| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("VAULT scene"),
                 layout: Some(&pipeline_layout),
@@ -198,7 +210,7 @@ impl Renderer {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: !ghost,
+                    depth_write_enabled,
                     depth_compare: wgpu::CompareFunction::LessEqual,
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -213,7 +225,7 @@ impl Renderer {
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask,
                     })],
                     compilation_options: Default::default(),
                 }),
@@ -221,8 +233,9 @@ impl Renderer {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(false);
-        let ghost_pipeline = make_pipeline(true);
+        let pipeline = make_pipeline(true, wgpu::ColorWrites::ALL);
+        let ghost_pipeline = make_pipeline(false, wgpu::ColorWrites::ALL);
+        let exterior_depth_pipeline = make_pipeline(true, wgpu::ColorWrites::empty());
         Self {
             print_colors: None,
             member_colors: Vec::new(),
@@ -230,6 +243,8 @@ impl Renderer {
             state,
             pipeline,
             ghost_pipeline,
+            exterior_depth_pipeline,
+            part_opacities: Vec::new(),
             camera,
             camera_bind,
             object_layout,
@@ -366,7 +381,7 @@ impl Renderer {
         scene: &Scene,
         camera: &Camera,
         options: ViewOptions,
-        materials: &[Option<[f32; 4]>],
+        materials: &[MaterialOverride],
     ) -> egui::TextureId {
         let ViewOptions {
             explosion,
@@ -387,29 +402,34 @@ impl Renderer {
                     .to_cols_array(),
             ),
         );
+        self.part_opacities.clear();
         for (i, p) in scene.parts.iter().enumerate() {
-            let material = materials.get(i).copied().flatten();
-            let print_colors = self
-                .print_colors
-                .as_ref()
-                .filter(|_| material.is_none())
-                .map(|default| {
-                    let member = (p.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
-                    let drawer = ((p.pose.instance % crate::scene::MEMBER_STRIDE)
-                        / crate::constraints::tower::DRAWER_STRIDE)
-                        as usize;
-                    drawer
-                        .checked_sub(1)
-                        .and_then(|d| {
-                            self.drawer_colors
-                                .get(member)
-                                .and_then(|colors| colors.get(d))
-                        })
-                        .or_else(|| self.member_colors.get(member))
-                        .unwrap_or(default)
-                });
+            let material = materials.get(i);
+            let tint = match material {
+                Some(MaterialOverride::Color(color)) => Some(*color),
+                _ => None,
+            };
+            let print_colors =
+                self.print_colors
+                    .as_ref()
+                    .filter(|_| tint.is_none())
+                    .map(|default| {
+                        let member = (p.pose.instance / crate::scene::MEMBER_STRIDE) as usize;
+                        let drawer = ((p.pose.instance % crate::scene::MEMBER_STRIDE)
+                            / crate::constraints::tower::DRAWER_STRIDE)
+                            as usize;
+                        drawer
+                            .checked_sub(1)
+                            .and_then(|d| {
+                                self.drawer_colors
+                                    .get(member)
+                                    .and_then(|colors| colors.get(d))
+                            })
+                            .or_else(|| self.member_colors.get(member))
+                            .unwrap_or(default)
+                    });
             let mut color =
-                material.unwrap_or_else(|| print_colors.map_or(p.color, |c| c.color(&p.pose.path)));
+                tint.unwrap_or_else(|| print_colors.map_or(p.color, |c| c.color(&p.pose.path)));
             if colliding.contains(&i) {
                 color = [0.95, 0.30, 0.32, 1.];
             }
@@ -419,6 +439,10 @@ impl Renderer {
             if ghost && ghost_shell(&p.pose.path) {
                 color[3] = 0.22;
             }
+            if let Some(MaterialOverride::Opacity(opacity)) = material {
+                color[3] = opacity.clamp(0., 1.);
+            }
+            self.part_opacities.push(color[3]);
             let mut model = p.pose.matrix(explosion);
             if let Some(offset) =
                 member_offsets.get((p.pose.instance / crate::scene::MEMBER_STRIDE) as usize)
@@ -468,19 +492,33 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &self.camera_bind, &[]);
-            for transparent in [false, true] {
-                pass.set_pipeline(if transparent {
-                    &self.ghost_pipeline
-                } else {
-                    &self.pipeline
-                });
+            // Blend only the nearest exterior surface over the solid bins. The back
+            // walls and hardware behind it would otherwise accumulate opacity.
+            let exterior_depth = materials
+                .iter()
+                .any(|m| matches!(m, MaterialOverride::Opacity(_)));
+            let has_transparency = self.part_opacities.iter().any(|&a| a < 1.);
+            for (pipeline, transparent, enabled) in [
+                (&self.pipeline, false, true),
+                (
+                    &self.exterior_depth_pipeline,
+                    true,
+                    exterior_depth && has_transparency,
+                ),
+                (&self.ghost_pipeline, true, has_transparency),
+            ] {
+                if !enabled {
+                    continue;
+                }
+                pass.set_pipeline(pipeline);
                 for (i, p) in scene.parts.iter().enumerate() {
                     let visible = if interior_only {
                         crate::dividers::interior_part(&p.pose.path)
                     } else {
                         p.visible
                     };
-                    if !visible || (ghost && ghost_shell(&p.pose.path)) != transparent {
+                    let opacity = self.part_opacities[i];
+                    if !visible || opacity <= 0. || (opacity < 1.) != transparent {
                         continue;
                     }
                     let mesh = &self.meshes[&p.mesh_key()];

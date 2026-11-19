@@ -5,6 +5,7 @@ use crate::{
     gridfinity::{self, Bin, Layout},
     gridfinity_editor::{Editor, GridView},
     mesh::Mesh,
+    render::MaterialOverride,
     scene::{Part, Target},
 };
 use glam::Vec3;
@@ -386,26 +387,15 @@ impl App {
                 move_display_part(&mut scene.parts[i], shift);
             }
         }
-        let materials: Vec<_> = scene
-            .parts
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                if i == drawer_index {
-                    Some([0.60, 0.64, 0.65, 1.])
-                } else if i == plate_index {
-                    Some([0.77, 0.80, 0.79, 1.])
-                } else if target.contains(p)
-                    && p.pose.path.starts_with("generated/gridfinity/Cullenect-")
-                {
-                    Some([0.98, 0.98, 0.96, 1.])
-                } else if target.contains(p) && p.pose.path.starts_with(gridfinity::PREFIX) {
-                    Some([0.99, 0.95, 0.86, 1.])
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let opacity = self.bin_exterior_opacity as f32 / 100.;
+        let mut materials = vec![MaterialOverride::Opacity(opacity); scene.parts.len()];
+        materials[plate_index] = MaterialOverride::Color([0.77, 0.80, 0.79, 1.]);
+        for bin in &state.bins {
+            materials[bin.body] = MaterialOverride::Color([0.99, 0.95, 0.86, 1.]);
+            if let Some(i) = bin.label {
+                materials[i] = MaterialOverride::Color([0.98, 0.98, 0.96, 1.]);
+            }
+        }
         let dpi = ui
             .ctx()
             .pixels_per_point()
