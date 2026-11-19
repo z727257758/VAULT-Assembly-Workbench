@@ -36,6 +36,21 @@ impl App {
                 return;
             }
         }
+        let drawer = &mut self.members[1].preset.drawers[1];
+        let Some(plate) = self
+            .catalog
+            .accessories(&drawer.selection)
+            .into_iter()
+            .find(|entry| {
+                entry.path.contains("/Gridfinity Baseplate/") && !entry.name.contains("Handle")
+            })
+        else {
+            self.animation.smoke.error =
+                Some("Missing standard baseplate for the test drawer".into());
+            return;
+        };
+        drawer.gridfinity.baseplate = plate.path.clone();
+        Catalog::set_accessory(&mut drawer.bom, plate.path, true, 1);
         self.restore_member(2);
         self.combination_view = true;
         self.smoke_stage = 0;
@@ -44,6 +59,17 @@ impl App {
     }
     fn smoke_mechanism(&self, member: usize, drawer: Option<usize>) -> Result<Mechanism, String> {
         AssemblyRules::mechanism(&self.scene, Target { member, drawer })
+    }
+    fn smoke_toggle(&mut self, expected: &Mechanism, ctx: &egui::Context) -> Result<(), String> {
+        let selected = AssemblyRules::mechanism(&self.scene, self.motion_target())?;
+        if selected.child != expected.child {
+            return Err("The editor motion target changed".into());
+        }
+        let goal = self
+            .motion_goals(&selected)
+            .toggle
+            .ok_or("Editor motion button is disabled")?;
+        self.animate_joint_to(&selected.child, goal, ctx)
     }
     pub(in crate::app) fn motion_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -130,8 +156,11 @@ impl App {
             }
             let lid = self.smoke_mechanism(2, None)?;
             match self.smoke_stage {
-                1 if lid.value != 0. || !(0.01..0.99).contains(&lid.latch) => {
-                    return Err("Lid lifted before lock release".into());
+                1 if lid.value != 0.
+                    || !(0.01..0.99).contains(&lid.latch)
+                    || self.motion_goals(&lid).toggle != Some(lid.min) =>
+                {
+                    return Err("Lid release must allow immediate reversal before lifting".into());
                 }
                 2 if !(30. ..70.).contains(&lid.value) || lid.latch < 0.999 => {
                     return Err("Incorrect mid-opening pose".into());
@@ -216,11 +245,11 @@ impl App {
                 3 => {
                     self.tower_edit_slot(1, Some(1), ctx);
                     let m = self.smoke_mechanism(1, Some(1))?;
-                    self.animate_joint_to(&m.child, m.max, ctx)?;
+                    self.smoke_toggle(&m, ctx)?;
                 }
                 5 => {
                     let m = self.smoke_mechanism(1, Some(1))?;
-                    self.animate_joint_to(&m.child, m.min, ctx)?;
+                    self.smoke_toggle(&m, ctx)?;
                     let lid = self.smoke_mechanism(2, None)?;
                     self.animate_joint_to(&lid.child, 0., ctx)?;
                 }
@@ -242,10 +271,30 @@ impl App {
                     {
                         return Err("Rejected motion changed the scene".into());
                     }
+                    self.tower_edit_slot(0, None, ctx);
+                    if self.motion_goals(&lid).toggle.is_some() {
+                        return Err("Supporting lid offered an opening action".into());
+                    }
+                    AssemblyRules::apply_motion_sample(
+                        &mut self.scene,
+                        &lid.child,
+                        MotionSample {
+                            value: lid.min,
+                            latch: 0.5,
+                        },
+                    )?;
+                    self.smoke_toggle(&lid, ctx)?;
+                    for _ in 0..3 {
+                        self.advance_motion(0.1, ctx);
+                    }
+                    if self.smoke_mechanism(0, None)?.latch > 0.001 {
+                        return Err("Supporting lid did not finish re-latching".into());
+                    }
                 }
                 7 => {
+                    self.tower_edit_slot(1, Some(0), ctx);
                     let m = self.smoke_mechanism(1, Some(0))?;
-                    self.animate_joint_to(&m.child, m.max, ctx)?;
+                    self.smoke_toggle(&m, ctx)?;
                     self.advance_motion(0.1, ctx);
                     let before = self.smoke_mechanism(1, Some(0))?.value;
                     self.preview_modes.mode = preview_modes::Mode::Layers;
@@ -259,7 +308,7 @@ impl App {
                     if value <= before {
                         return Err("Motion did not resume in the assembly view".into());
                     }
-                    self.animate_joint_to(&m.child, 0., ctx)?;
+                    self.smoke_toggle(&m, ctx)?;
                     if (value - self.smoke_mechanism(1, Some(0))?.value).abs() > 0.001 {
                         return Err("Reversing motion jumped the model".into());
                     }

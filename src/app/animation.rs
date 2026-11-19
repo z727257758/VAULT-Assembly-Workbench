@@ -15,6 +15,20 @@ pub(super) struct State {
     suspended: bool,
     smoke: smoke::State,
 }
+
+struct MotionGoals {
+    can_open: bool,
+    can_close: bool,
+    toggle: Option<f32>,
+}
+
+fn motion_labels(kind: MotionKind, zh: bool) -> (&'static str, &'static str) {
+    match kind {
+        MotionKind::Drawer => (t(zh, "拉出", "Pull out"), t(zh, "推回", "Push in")),
+        MotionKind::Lid => (t(zh, "开盖", "Open lid"), t(zh, "合盖", "Close lid")),
+    }
+}
+
 impl App {
     pub(super) fn layer_motion_ui(
         &mut self,
@@ -80,6 +94,79 @@ impl App {
                 member: 0,
                 drawer: None,
             }
+        }
+    }
+
+    fn motion_goals(&self, m: &Mechanism) -> MotionGoals {
+        let plan = self
+            .animation
+            .tracks
+            .iter()
+            .map(|track| &track.plan)
+            .find(|plan| plan.mechanism.child == m.child);
+        let goal = plan.map_or(m.value, |plan| plan.goal);
+        let can_open = !(m.kind == MotionKind::Lid && m.supports_upper) && m.max > goal + 0.001;
+        let can_close = goal > m.min + 0.001 || (plan.is_none() && m.latch > 0.001);
+        let toggle = match (can_open, can_close) {
+            (true, true) if plan.is_some_and(|plan| plan.goal < plan.mechanism.value) => {
+                Some(m.max)
+            }
+            (_, true) => Some(m.min),
+            (true, false) => Some(m.max),
+            (false, false) => None,
+        };
+        MotionGoals {
+            can_open,
+            can_close,
+            toggle,
+        }
+    }
+
+    pub(super) fn inline_motion_toggle_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let z = self.zh;
+        let mechanism = if self.busy || self.preview.has_pending() {
+            Err(t(z, "正在更新预览…", "Updating preview…").to_owned())
+        } else if self.scene_key != "combination" {
+            Err(t(z, "装配预览尚未就绪", "Assembly preview is unavailable").to_owned())
+        } else {
+            AssemblyRules::mechanism(&self.scene, self.motion_target())
+        };
+        let m = match mechanism {
+            Ok(m) => m,
+            Err(reason) => {
+                let label = match self.assembly_kind {
+                    AssemblyKind::Drawer => t(z, "抽屉开合", "Drawer motion"),
+                    AssemblyKind::Sustainer => t(z, "箱盖开合", "Lid motion"),
+                };
+                ui.add_enabled(false, egui::Button::new(label))
+                    .on_disabled_hover_text(reason);
+                return;
+            }
+        };
+        let goal = self.motion_goals(&m).toggle;
+        let (open, close) = motion_labels(m.kind, z);
+        let label = if goal == Some(m.min) { close } else { open };
+        let response = ui.add_enabled(goal.is_some(), egui::Button::new(label));
+        if let Some(goal) = goal {
+            if response.clicked()
+                && let Err(error) = self.animate_joint_to(&m.child, goal, ctx)
+            {
+                self.status = error;
+            }
+        } else {
+            response.on_disabled_hover_text(if m.kind == MotionKind::Lid && m.supports_upper {
+                t(
+                    z,
+                    "支承上层，箱盖保持闭合。",
+                    "Supporting an upper member; lid stays closed.",
+                )
+            } else {
+                t(
+                    z,
+                    "此关节没有可用行程",
+                    "No travel is available for this joint",
+                )
+            });
         }
     }
 
@@ -287,30 +374,18 @@ impl App {
         };
         let z = self.zh;
         let blocked = m.kind == MotionKind::Lid && m.supports_upper;
-        let track = self
-            .animation
-            .tracks
-            .iter()
-            .find(|track| track.plan.mechanism.child == m.child);
-        let goal = track.map_or(m.value, |track| track.plan.goal);
-        let (open, close) = if m.kind == MotionKind::Lid {
-            (t(z, "开盖", "Open lid"), t(z, "合盖", "Close lid"))
-        } else {
-            (t(z, "拉出", "Pull out"), t(z, "推回", "Push in"))
-        };
+        let goals = self.motion_goals(&m);
+        let (open, close) = motion_labels(m.kind, z);
         let mut requested = None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!blocked && m.max > goal + 0.001, egui::Button::new(open))
+                .add_enabled(goals.can_open, egui::Button::new(open))
                 .clicked()
             {
                 requested = Some(m.max);
             }
             if ui
-                .add_enabled(
-                    goal > m.min + 0.001 || (track.is_none() && m.latch > 0.001),
-                    egui::Button::new(close),
-                )
+                .add_enabled(goals.can_close, egui::Button::new(close))
                 .clicked()
             {
                 requested = Some(m.min);

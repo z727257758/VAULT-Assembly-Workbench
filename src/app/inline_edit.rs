@@ -6,6 +6,47 @@ use glam::Vec3;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn option_values_align_and_wrap_inside_the_editor() {
+        let ctx = egui::Context::default();
+        appearance::Appearance::Light.apply(&ctx);
+        for width in [265., 335.] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 480.));
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        assert!((ui.available_width() - width).abs() < 1.);
+                        let right = ui.max_rect().right();
+                        let mut input = egui::Rect::NOTHING;
+                        let key = option_row(ui, "Label text", |ui| {
+                            input = ui.text_edit_singleline(&mut String::new()).rect;
+                        });
+                        let mut buttons = Vec::new();
+                        let next_key = option_row(ui, "Dividers", |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for label in ["Configure dividers…", "Remove all dividers"] {
+                                    buttons.push(ui.button(label).rect);
+                                }
+                            });
+                        });
+                        assert!(key.rect.right() < input.left() && input.right() <= right + 1.);
+                        assert!((input.left() - buttons[0].left()).abs() < 1.);
+                        assert!(next_key.rect.top() >= input.bottom());
+                        assert!(buttons.iter().all(|b| b.right() <= right + 1.));
+                        if width == 265. {
+                            assert!(buttons[1].top() >= buttons[0].bottom(), "{buttons:?}");
+                        }
+                    });
+            });
+        }
+    }
+
     #[test]
     fn saving_a_subdrawer_preserves_its_sibling_and_housing() {
         let preset: Preset = toml::from_str(
@@ -113,6 +154,31 @@ impl State {
         self.path = None;
     }
 }
+
+fn option_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    add_value: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let key_width = (ui.available_width() * 0.28).min(92.);
+    ui.horizontal_top(|ui| {
+        let label = ui.allocate_ui_with_layout(
+            egui::vec2(key_width, ui.spacing().interact_size.y),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(key_width);
+                ui.add(egui::Label::new(key).wrap())
+            },
+        );
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width());
+            add_value(ui);
+        });
+        label.inner
+    })
+    .inner
+}
+
 pub(super) fn target_preset(members: &[Member], target: Target) -> Option<&Preset> {
     let preset = &members.get(target.member)?.preset;
     match target.drawer {
@@ -329,6 +395,8 @@ impl App {
                     .inner_margin(14.)
                     .show(ui, |ui| {
                         ui.set_width(width);
+                        // The editor can grow as more options become visible above the view toolbar.
+                        ui.set_max_height((rect.bottom() - ui.max_rect().top() - 70.).max(0.));
                         ui.horizontal(|ui| {
                             ui.strong(format!(
                                 "{}{} · {}",
@@ -345,10 +413,7 @@ impl App {
                                             "Finish editing and view project",
                                         ))
                                         .clicked();
-                                    if ui.small_button(t(z, "特写", "Focus")).clicked() {
-                                        self.inline_edit.pending_focus = true;
-                                        self.inline_edit.path = None;
-                                    }
+                                    self.inline_motion_toggle_ui(ui, ctx);
                                 },
                             );
                         });
@@ -359,7 +424,6 @@ impl App {
                         ui.separator();
                         egui::ScrollArea::vertical()
                             .id_salt("inline-member-scroll")
-                            .max_height((rect.height() - 250.).max(180.))
                             .show(ui, |ui| {
                                 self.inline_contents_ui(ui, ctx);
                             });
@@ -373,18 +437,19 @@ impl App {
         let z = self.zh;
         {
             let mut kind = self.assembly_kind;
-            ui.horizontal(|ui| {
-                let label = ui.label(t(z, "类型", "Type"));
-                if self.active_drawer.is_some() {
-                    label.on_hover_text(t(
-                        z,
-                        "类型切换应用于整个共用外壳单元",
-                        "Type changes apply to the entire shared housing",
-                    ));
-                }
-                ui.selectable_value(&mut kind, AssemblyKind::Drawer, t(z, "抽屉", "Drawer"));
-                ui.selectable_value(&mut kind, AssemblyKind::Sustainer, t(z, "翻盖箱", "Box"));
+            let label = option_row(ui, t(z, "类型", "Type"), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(&mut kind, AssemblyKind::Drawer, t(z, "抽屉", "Drawer"));
+                    ui.selectable_value(&mut kind, AssemblyKind::Sustainer, t(z, "翻盖箱", "Box"));
+                });
             });
+            if self.active_drawer.is_some() {
+                label.on_hover_text(t(
+                    z,
+                    "类型切换应用于整个共用外壳单元",
+                    "Type changes apply to the entire shared housing",
+                ));
+            }
             if kind != self.assembly_kind {
                 let member = self.active_member;
                 let drawer = self.active_drawer;
@@ -400,19 +465,23 @@ impl App {
                 return;
             }
         }
-        self.motion_controls_ui(ui, ctx);
         if self.assembly_kind == AssemblyKind::Sustainer {
             let before = self.sustainer_options;
             if matches!(self.selection.width.as_str(), "L" | "XL") {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(t(z, "箱体", "Body"));
-                    for (body, cn, en) in [
-                        (SustainerBody::Flat, "平底", "Flat"),
-                        (SustainerBody::Dividers, "隔板槽", "Dividers"),
-                        (SustainerBody::Sealed, "密封分区", "Sealed"),
-                    ] {
-                        ui.selectable_value(&mut self.sustainer_options.body, body, t(z, cn, en));
-                    }
+                option_row(ui, t(z, "箱体", "Body"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (body, cn, en) in [
+                            (SustainerBody::Flat, "平底", "Flat"),
+                            (SustainerBody::Dividers, "隔板槽", "Dividers"),
+                            (SustainerBody::Sealed, "密封分区", "Sealed"),
+                        ] {
+                            ui.selectable_value(
+                                &mut self.sustainer_options.body,
+                                body,
+                                t(z, cn, en),
+                            );
+                        }
+                    });
                 });
             }
             if before != self.sustainer_options {
@@ -430,30 +499,34 @@ impl App {
         }
         self.inserts_ui(ui, ctx);
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(t(z, "标签", "Label"));
-            if ui.small_button(t(z, "样式…", "Style…")).clicked() {
+        let label = self.label.clone();
+        option_row(ui, t(z, "标签文字", "Label text"), |ui| {
+            if ui
+                .horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.label.text)
+                            .hint_text(t(z, "输入标签文字", "Enter label text"))
+                            .char_limit(48)
+                            .desired_width(ui.available_width()),
+                    )
+                })
+                .inner
+                .changed()
+            {
+                self.label.enabled = !self.label.text.trim().is_empty();
+                if let Err(error) = self.label.validate() {
+                    self.label = label;
+                    self.status = error;
+                } else {
+                    self.assembly(ctx);
+                }
+            }
+        });
+        option_row(ui, t(z, "标签样式", "Label style"), |ui| {
+            if ui.button(t(z, "编辑…", "Edit…")).clicked() {
                 self.label_open = true;
             }
         });
-        let label = self.label.clone();
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut self.label.text)
-                    .hint_text(t(z, "输入标签文字", "Label text"))
-                    .char_limit(48)
-                    .desired_width(f32::INFINITY),
-            )
-            .changed()
-        {
-            self.label.enabled = !self.label.text.trim().is_empty();
-            if let Err(error) = self.label.validate() {
-                self.label = label;
-                self.status = error;
-            } else {
-                self.assembly(ctx);
-            }
-        }
         ui.small(t(
             z,
             "修改自动保留在当前组合中。",
@@ -477,30 +550,25 @@ impl App {
                 ));
             }
             ui.add_enabled_ui(supported, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button(t(z, "配置收纳隔板…", "Configure dividers…"))
-                        .clicked()
-                    {
-                        self.sustainer_divider_editor.open = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.sustainer_dividers.items.is_empty(),
-                            egui::Button::new(t(z, "移除全部隔板", "Remove all dividers")),
-                        )
-                        .clicked()
-                    {
-                        self.sustainer_dividers.items.clear();
-                        self.sustainer_divider_editor.reset();
-                        self.assembly(ctx);
-                    }
+                option_row(ui, t(z, "收纳隔板", "Dividers"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(self.sustainer_dividers.items.len().to_string());
+                        if ui.button(t(z, "配置…", "Configure…")).clicked() {
+                            self.sustainer_divider_editor.open = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.sustainer_dividers.items.is_empty(),
+                                egui::Button::new(t(z, "移除全部", "Remove all")),
+                            )
+                            .clicked()
+                        {
+                            self.sustainer_dividers.items.clear();
+                            self.sustainer_divider_editor.reset();
+                            self.assembly(ctx);
+                        }
+                    });
                 });
-                ui.label(format!(
-                    "{} {}",
-                    self.sustainer_dividers.items.len(),
-                    t(z, "块收纳隔板", "storage dividers")
-                ));
             });
         }
         if self.assembly_kind == AssemblyKind::Drawer {
@@ -531,24 +599,25 @@ impl App {
                 .filter(|e| e.path.contains("/Gridfinity Baseplate/"))
                 .min_by_key(|e| e.path.contains("Handle"))
                 .map(|e| e.path.clone());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(t(z, "内部", "Interior"));
+            option_row(ui, t(z, "内部", "Interior"), |ui| {
                 // Gridfinity is a baseplate on the flat floor, not a third interior type.
                 let mut interior = mode == 2;
-                ui.selectable_value(&mut interior, false, t(z, "平底", "Flat"));
-                ui.add_enabled_ui(crate::dividers::Grid::new(&self.selection).is_ok(), |ui| {
-                    ui.selectable_value(&mut interior, true, t(z, "分隔板", "Dividers"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(&mut interior, false, t(z, "平底", "Flat"));
+                    ui.add_enabled_ui(crate::dividers::Grid::new(&self.selection).is_ok(), |ui| {
+                        ui.selectable_value(&mut interior, true, t(z, "分隔板", "Dividers"));
+                    });
                 });
                 if interior != (mode == 2) {
                     mode = if interior { 2 } else { 0 };
                 }
             });
-            ui.add_enabled_ui(mode != 2 && baseplate.is_some(), |ui| {
+            option_row(ui, t(z, "底板", "Baseplate"), |ui| {
                 let mut enabled = mode == 1;
                 if ui
-                    .checkbox(
-                        &mut enabled,
-                        t(z, "Gridfinity 底板", "Gridfinity baseplate"),
+                    .add_enabled(
+                        mode != 2 && baseplate.is_some(),
+                        egui::Checkbox::new(&mut enabled, "Gridfinity"),
                     )
                     .changed()
                 {
@@ -587,27 +656,22 @@ impl App {
             );
             }
             if mode == 2 {
-                ui.horizontal_wrapped(|ui| {
-                    let label = if self.divider_layout.items.is_empty() {
-                        t(z, "添加收纳隔板", "Add storage dividers")
-                    } else {
-                        t(z, "编辑收纳隔板", "Edit storage dividers")
-                    };
-                    if ui.button(label).clicked() {
-                        self.divider_editor.open = true;
-                    }
-                    if ui
-                        .button(t(z, "移除收纳隔板", "Remove storage dividers"))
-                        .clicked()
-                    {
-                        self.remove_dividers(ctx);
-                    }
+                option_row(ui, t(z, "收纳隔板", "Dividers"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(self.divider_layout.items.len().to_string());
+                        let label = if self.divider_layout.items.is_empty() {
+                            t(z, "添加…", "Add…")
+                        } else {
+                            t(z, "编辑…", "Edit…")
+                        };
+                        if ui.button(label).clicked() {
+                            self.divider_editor.open = true;
+                        }
+                        if ui.button(t(z, "移除", "Remove")).clicked() {
+                            self.remove_dividers(ctx);
+                        }
+                    });
                 });
-                ui.label(format!(
-                    "{} {}",
-                    self.divider_layout.items.len(),
-                    t(z, "块收纳隔板", "storage dividers")
-                ));
             }
             if mode == 1 {
                 let plates: Vec<_> = self
@@ -632,19 +696,20 @@ impl App {
                     .map(|b| b.path.clone())
                     .unwrap_or_default();
                 let mut chosen = current.clone();
-                ui.label(t(z, "底板类型", "Baseplate type"));
-                egui::ComboBox::from_id_salt("gridfinity-baseplate-type")
-                    .width(ui.available_width())
-                    .selected_text(variant_name(&current))
-                    .show_ui(ui, |ui| {
-                        for plate in &plates {
-                            ui.selectable_value(
-                                &mut chosen,
-                                plate.path.clone(),
-                                variant_name(&plate.path),
-                            );
-                        }
-                    });
+                option_row(ui, t(z, "底板类型", "Plate type"), |ui| {
+                    egui::ComboBox::from_id_salt("gridfinity-baseplate-type")
+                        .width(ui.available_width())
+                        .selected_text(variant_name(&current))
+                        .show_ui(ui, |ui| {
+                            for plate in &plates {
+                                ui.selectable_value(
+                                    &mut chosen,
+                                    plate.path.clone(),
+                                    variant_name(&plate.path),
+                                );
+                            }
+                        });
+                });
                 if chosen != current {
                     let mut candidate = self.gridfinity.clone();
                     candidate.baseplate = chosen.clone();
@@ -662,40 +727,35 @@ impl App {
                 if let Ok(grid) =
                     crate::gridfinity::grid_for(&self.selection, &self.gridfinity.baseplate)
                 {
-                    ui.small(format!(
-                        "{} × {} {} · {}",
-                        grid[0],
-                        grid[1],
-                        t(z, "格", "cells"),
-                        t(z, "底板随抽屉规格匹配", "Baseplate follows drawer size")
-                    ));
+                    option_row(ui, t(z, "网格尺寸", "Grid size"), |ui| {
+                        ui.label(format!("{} × {} {}", grid[0], grid[1], t(z, "格", "cells")));
+                        ui.small(t(z, "底板随抽屉规格匹配", "Baseplate follows drawer size"));
+                    });
                 }
                 if let Some(error) = &self.gridfinity_error {
                     ui.colored_label(Color32::LIGHT_RED, error);
                 }
                 ui.add_space(6.);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            crate::gridfinity::grid(&self.selection).is_ok(),
-                            egui::Button::new(t(z, "编辑 Gridfinity 盒子", "Edit Gridfinity bins")),
-                        )
-                        .clicked()
-                    {
-                        self.gridfinity_open = true;
-                    }
-                    if !self.gridfinity.bins.is_empty()
-                        && ui.button(t(z, "移除全部盒子", "Remove all bins")).clicked()
-                    {
-                        self.gridfinity.bins.clear();
-                        self.assembly(ctx);
-                    }
+                option_row(ui, t(z, "收纳盒", "Bins"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(self.gridfinity.bins.len().to_string());
+                        if ui
+                            .add_enabled(
+                                crate::gridfinity::grid(&self.selection).is_ok(),
+                                egui::Button::new(t(z, "编辑…", "Edit…")),
+                            )
+                            .clicked()
+                        {
+                            self.gridfinity_open = true;
+                        }
+                        if !self.gridfinity.bins.is_empty()
+                            && ui.button(t(z, "移除全部", "Remove all")).clicked()
+                        {
+                            self.gridfinity.bins.clear();
+                            self.assembly(ctx);
+                        }
+                    });
                 });
-                ui.label(format!(
-                    "{} {}",
-                    self.gridfinity.bins.len(),
-                    t(z, "个盒子", "bins")
-                ));
                 ui.small(t(
                     z,
                     "盒高默认随层高配置，可在编辑器中调整。",
