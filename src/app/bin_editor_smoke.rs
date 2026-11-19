@@ -11,6 +11,10 @@ const DRAWER: Target = Target {
     member: 0,
     drawer: Some(1),
 };
+const SIBLING: Target = Target {
+    member: 0,
+    drawer: Some(0),
+};
 const NARROW: egui::Vec2 = egui::vec2(1050., 700.);
 
 fn sidebar_rect(ctx: &egui::Context) -> Result<Rect, String> {
@@ -20,6 +24,7 @@ fn sidebar_rect(ctx: &egui::Context) -> Result<Rect, String> {
 }
 
 struct Entry {
+    window_size: egui::Vec2,
     central: Rect,
     sidebar: Rect,
     camera: Mat4,
@@ -423,6 +428,115 @@ impl App {
         Ok(())
     }
 
+    fn smoke_draw_bins(&mut self, ctx: &egui::Context, folder: &Path) -> Result<(), String> {
+        let stage = self.smoke_stage;
+        let added = usize::from((stage - 10).min(2));
+        let depth = if stage == 13 { 1 } else { 2 };
+        let expected = [([0, 2], [1, 2]), ([0, 0], [2, depth])];
+        let [original, other] = self.bin_editor_smoke.initial_layouts.as_ref().unwrap();
+        let mut other = other.clone();
+        other.bins[0].cell = [1, 1];
+        if self.inline_edit.target != Some(SIBLING)
+            || self.members[0].preset.drawers[1].gridfinity != other
+            || self.gridfinity != self.members[0].preset.drawers[0].gridfinity
+            || self.gridfinity.shared != original.shared
+            || self.gridfinity.bins.len() != original.bins.len() + added
+            || !self.gridfinity.bins.starts_with(&original.bins)
+        {
+            return Err(format!(
+                "Stage {stage} changed existing bins, shared defaults or the expected count"
+            ));
+        }
+        for (bin, (cell, span)) in self.gridfinity.bins[original.bins.len()..]
+            .iter()
+            .zip(expected)
+        {
+            if (bin.cell, bin.span) != (cell, span) {
+                return Err(format!(
+                    "Expected bin at {cell:?} with span {span:?}, got {:?} {:?}",
+                    bin.cell, bin.span
+                ));
+            }
+            let path = bin.path();
+            let mesh = &self
+                .scene
+                .parts
+                .iter()
+                .find(|p| SIBLING.contains(p) && p.visible && p.pose.path == path)
+                .ok_or_else(|| format!("Missing new bin mesh {path}"))?
+                .mesh;
+            let size = mesh.max - mesh.min;
+            for (length, cells) in [(size.x, span[0]), (size.z, span[1])] {
+                if (length - (42. * cells as f32 - 0.5)).abs() > 0.15 {
+                    return Err(format!(
+                        "Wrong physical dimensions for {path}: {size:?} mm, expected {span:?} cells"
+                    ));
+                }
+            }
+        }
+        // The preview confirms that each mesh is seated on its measured baseplate cells.
+        let window_size = self.bin_editor_smoke.entry.as_ref().unwrap().window_size;
+        if !self.bin_view.shows_layout(&self.gridfinity)
+            || (ctx.content_rect().size() - window_size).length() > 1.
+        {
+            return Ok(());
+        }
+        if stage >= 12 && self.gridfinity_selected != self.gridfinity.bins.last().map(|bin| bin.id)
+        {
+            return Err("The diagonal bin lost selection before or during resizing".into());
+        }
+        match stage {
+            10 | 13 => {
+                let rect = self
+                    .bin_editor_smoke
+                    .plan_rect
+                    .ok_or("Missing plan for vertical draw")?;
+                let [cols, rows] =
+                    crate::gridfinity::grid_for(&self.selection, &self.gridfinity.baseplate)?;
+                let (col, from, to) = if stage == 10 {
+                    (0.5, 3.5, 2.5)
+                } else {
+                    (1., 0.98, 1.98)
+                };
+                let point = |row: f32| {
+                    rect.min
+                        + egui::vec2(
+                            rect.width() * col / cols as f32,
+                            rect.height() * row / rows as f32,
+                        )
+                };
+                self.bin_editor_smoke.drag(point(from), point(to), true);
+            }
+            11 | 12 => {
+                let (from, to) = if stage == 11 {
+                    ([1.5, 1.5], [0.5, 0.5])
+                } else {
+                    if !self.capture_bin_smoke(ctx, &folder.join("drawn-bins.png"))? {
+                        return Ok(());
+                    }
+                    ([1., 1.98], [1., 0.98])
+                };
+                let from = self
+                    .bin_view
+                    .project_cell(from)
+                    .ok_or("Missing 3D drag origin")?;
+                let to = self
+                    .bin_view
+                    .project_cell(to)
+                    .ok_or("Missing 3D drag endpoint")?;
+                self.bin_editor_smoke.drag(from, to, true);
+            }
+            _ => {
+                std::fs::write(folder.join("smoke-result.txt"), "PASS: The build sidebar kept its width. The complete assembly showed only the selected drawer opening along its joint. The selected baseplate, bins and labels stayed opaque with exterior opacity at 30%, 20% and 50%. 3D and plan drags moved the same bin by two 42 mm steps. Overlap was rejected. At 1050 x 700 all cell centers fit the model view. Done restored the assembly opacities, camera and drawer extension at both sizes, with the edited layout retained. A vertical plan drag created a 1x2 bin and a diagonal 3D drag created a 2x2 bin at the expected sockets. Dragging its front edge in 3D resized it to 2x1 and dragging the plan edge restored 2x2. Mesh dimensions matched at each step, with the earlier bins and shared defaults retained.").map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return Ok(());
+            }
+        }
+        self.smoke_stage += 1;
+        Ok(())
+    }
+
     pub(super) fn bin_editor_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(16));
         let folder = self.home.join("output/bin-editor-ui");
@@ -437,6 +551,9 @@ impl App {
             }
             if !self.bin_editor_smoke.inputs.is_empty() || self.busy || self.preview.has_pending() {
                 return Ok(());
+            }
+            if self.smoke_stage >= 10 {
+                return self.smoke_draw_bins(ctx, &folder);
             }
             if self.bin_editor_smoke.entry.is_none() {
                 if self.inline_edit.target != Some(DRAWER)
@@ -475,6 +592,7 @@ impl App {
                     );
                 }
                 self.bin_editor_smoke.entry = Some(Entry {
+                    window_size: ctx.content_rect().size(),
                     central,
                     sidebar,
                     camera: self.camera.matrix(central.aspect_ratio()),
@@ -613,10 +731,10 @@ impl App {
                 }
                 6 => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(NARROW)),
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: The build sidebar kept its width. The complete assembly showed only the selected drawer opening along its joint. The selected baseplate, bins and labels stayed opaque with exterior opacity at 30%, 20% and 50%. 3D and plan drags moved the same bin by two 42 mm steps. Overlap was rejected. At 1050 x 700 all cell centers fit the model view. Done restored the assembly opacities, camera and drawer extension at both sizes, with the edited layout retained.").map_err(|e| e.to_string())?;
-                    let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    return Ok(());
+                    let window_size = self.bin_editor_smoke.entry.as_ref().unwrap().window_size;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(window_size));
+                    self.tower_edit_slot(SIBLING.member, SIBLING.drawer, ctx);
+                    self.open_bin_editor(ctx);
                 }
             }
             self.smoke_stage += 1;

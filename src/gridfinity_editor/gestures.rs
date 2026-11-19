@@ -17,13 +17,43 @@ pub struct DragPreview {
     pub valid: bool,
 }
 
+impl Drag {
+    fn preview_at(&mut self, at: [f32; 2], on_board: bool) -> Result<Layout, String> {
+        let candidate = self.candidate(at);
+        let next = if on_board {
+            candidate.layout(&self.base, &self.specification)
+        } else {
+            Err("请在底板网格内释放，已保留原布局".into())
+        };
+        self.preview = Some(DragPreview {
+            id: candidate.bin.id,
+            cell: candidate.cell,
+            span: candidate.bin.span,
+            valid: next.is_ok(),
+        });
+        next
+    }
+}
+
 impl Editor {
     pub fn drag_preview(&self) -> Option<&DragPreview> {
         self.drag.as_ref()?.preview.as_ref()
     }
 
+    pub fn resizing(&self, view: GridView) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| drag.view == view && matches!(drag.gesture, Gesture::Resize(_)))
+    }
+
     fn inside_grid(at: [f32; 2], grid: [u32; 2]) -> bool {
         (0..2).all(|axis| (0.0..grid[axis] as f32).contains(&at[axis]))
+    }
+
+    fn on_resize_boundary(at: [f32; 2], grid: [u32; 2]) -> bool {
+        // Screen projection can put an outer handle just beyond the exact plate edge.
+        const EPSILON: f32 = 0.003;
+        (0..2).all(|axis| (-EPSILON..=grid[axis] as f32 + EPSILON).contains(&at[axis]))
     }
 
     pub fn hit_bin(layout: &Layout, at: [f32; 2]) -> Option<u32> {
@@ -39,21 +69,35 @@ impl Editor {
             .map(|bin| bin.id)
     }
 
-    pub(super) fn width_edge(bin: &Bin, at: [f32; 2], margin: f32) -> i8 {
+    pub fn resize_edges(bin: &Bin, at: [f32; 2], margin: f32) -> [i8; 2] {
         let margin = margin.clamp(0., 0.25);
         if margin == 0. {
-            return 0;
+            return [0, 0];
         }
-        let [x, y] = bin.cell.map(|cell| cell as f32);
-        if !(y - margin * 0.5..=y + bin.span[1] as f32 + margin * 0.5).contains(&at[1]) {
-            return 0;
+        let lo = bin.cell.map(|v| v as f32);
+        let hi: [f32; 2] = std::array::from_fn(|i| lo[i] + bin.span[i] as f32);
+        if (0..2).any(|i| !(lo[i] - margin..=hi[i] + margin).contains(&at[i])) {
+            return [0, 0];
         }
-        if (at[0] - x).abs() <= margin {
-            -1
-        } else if (at[0] - x - bin.span[0] as f32).abs() <= margin {
-            1
-        } else {
-            0
+        std::array::from_fn(|i| {
+            if (at[i] - lo[i]).abs() <= margin {
+                -1
+            } else if (at[i] - hi[i]).abs() <= margin {
+                1
+            } else {
+                0
+            }
+        })
+    }
+
+    pub fn resize_cursor(edges: [i8; 2]) -> Option<egui::CursorIcon> {
+        use egui::CursorIcon;
+        match edges {
+            [0, 0] => None,
+            [0, _] => Some(CursorIcon::ResizeVertical),
+            [_, 0] => Some(CursorIcon::ResizeHorizontal),
+            [x, y] if x == y => Some(CursorIcon::ResizeNwSe),
+            _ => Some(CursorIcon::ResizeNeSw),
         }
     }
 
@@ -66,32 +110,37 @@ impl Editor {
         at: [f32; 2],
         edge_margin: f32,
     ) {
-        if self.active()
-            || !gridfinity::grid_for(s, &layout.baseplate)
-                .is_ok_and(|grid| Self::inside_grid(at, grid))
-        {
+        if self.active() {
             return;
         }
+        let Ok(grid) = gridfinity::grid_for(s, &layout.baseplate) else {
+            return;
+        };
         let selected_edge = layout
             .bins
             .iter()
             .filter(|bin| Some(bin.id) == *selected)
             .find_map(|bin| {
-                let edge = Self::width_edge(bin, at, edge_margin);
-                (edge != 0).then_some((bin, edge))
+                let edges = Self::resize_edges(bin, at, edge_margin);
+                (edges != [0, 0]).then_some((bin, edges))
             });
+        if !(Self::inside_grid(at, grid)
+            || selected_edge.is_some() && Self::on_resize_boundary(at, grid))
+        {
+            return;
+        }
         let hit = selected_edge.or_else(|| {
             let id = Self::hit_bin(layout, at)?;
-            Some((layout.bins.iter().find(|bin| bin.id == id)?, 0))
+            Some((layout.bins.iter().find(|bin| bin.id == id)?, [0, 0]))
         });
-        let (bin, gesture) = if let Some((bin, edge)) = hit {
+        let (bin, gesture) = if let Some((bin, edges)) = hit {
             *selected = Some(bin.id);
             (
                 bin.clone(),
-                if edge == 0 {
+                if edges == [0, 0] {
                     Gesture::Move
                 } else {
-                    Gesture::Resize([edge, 0])
+                    Gesture::Resize(edges)
                 },
             )
         } else {
@@ -103,7 +152,7 @@ impl Editor {
                 }
             }
         };
-        self.drag = Some(Drag {
+        let mut drag = Drag {
             view,
             preview: None,
             base: layout.clone(),
@@ -111,7 +160,9 @@ impl Editor {
             bin,
             start: at,
             gesture,
-        });
+        };
+        let _ = drag.preview_at(at, true);
+        self.drag = Some(drag);
         self.error = None;
     }
 
@@ -138,19 +189,17 @@ impl Editor {
             self.drag = None;
             return;
         }
-        let grid = gridfinity::grid_for(s, &layout.baseplate);
-        let next = if let Some(at) =
-            at.filter(|p| grid.as_ref().is_ok_and(|g| Self::inside_grid(*p, *g)))
+        let next = if let Ok(grid) = gridfinity::grid_for(s, &layout.baseplate)
+            && let Some(at) = at.filter(|p| p.iter().all(|v| v.is_finite()))
         {
-            let candidate = drag.candidate(at);
-            let next = candidate.layout(&drag.base, s);
-            drag.preview = Some(DragPreview {
-                id: candidate.bin.id,
-                cell: candidate.cell,
-                span: candidate.bin.span,
-                valid: next.is_ok(),
+            let resizing = matches!(drag.gesture, Gesture::Resize(_));
+            let on_board =
+                Self::inside_grid(at, grid) || resizing && Self::on_resize_boundary(at, grid);
+            let point = std::array::from_fn(|axis| {
+                let end = grid[axis] as f32;
+                at[axis].clamp(0., if resizing { end } else { end.next_down() })
             });
-            next
+            drag.preview_at(point, on_board)
         } else {
             if let Some(preview) = &mut drag.preview {
                 preview.valid = false;

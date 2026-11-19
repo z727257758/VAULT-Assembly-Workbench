@@ -30,15 +30,34 @@ impl State {
             edit.editor.cancel();
             return;
         }
-        let cell_pixels = view
-            .screen([0., 0.], 0.)
+        let origin = view.screen([0., 0.], 0.);
+        let cell_pixels = origin
             .distance(view.screen([1., 0.], 0.))
+            .min(origin.distance(view.screen([0., 1.], 0.)))
             .max(1.);
         let margin = (7. / cell_pixels).min(0.22);
+        let selected_rim = self.bins.iter().find(|b| Some(b.id) == *edit.selected);
+        let height = selected_rim.map(|b| b.height);
+        let selected_bin = edit
+            .layout
+            .bins
+            .iter()
+            .find(|b| Some(b.id) == *edit.selected);
+        let rim_edge = |p| {
+            let at = view.cell_at(p, height?)?;
+            let edges = Editor::resize_edges(selected_bin?, at, margin);
+            (edges != [0, 0]).then_some((at, edges))
+        };
+        let hover_edge = pointer
+            .and_then(rim_edge)
+            .and_then(|(_, edges)| Editor::resize_cursor(edges));
         if response.drag_started_by(egui::PointerButton::Primary)
-            && let Some((at, _)) = press
-                .filter(|p| view.rect.contains(*p))
-                .and_then(|p| self.hit(view, p))
+            && let Some((at, edge_margin)) =
+                press.filter(|p| view.rect.contains(*p)).and_then(|p| {
+                    rim_edge(p)
+                        .map(|(at, _)| (at, margin))
+                        .or_else(|| self.hit(view, p).map(|(at, _)| (at, 0.)))
+                })
         {
             response.request_focus();
             edit.editor.begin_grid_drag(
@@ -47,16 +66,19 @@ impl State {
                 edit.selection,
                 edit.selected,
                 at,
-                margin,
+                edge_margin,
             );
             self.dragging = true;
         }
-        // Snap to the surface under the pointer: a free socket is on the
-        // baseplate, even when the gesture began on a tall bin's rim.
-        let grid_point = pointer
-            .filter(|p| view.rect.contains(*p))
-            .and_then(|p| self.hit(view, p))
-            .map(|(at, _)| at);
+        // Rim handles resize in their own plane. Placement uses the surface
+        // under the pointer, including a free socket on the baseplate.
+        let grid_point = pointer.filter(|p| view.rect.contains(*p)).and_then(|p| {
+            if edit.editor.resizing(GridView::Scene) {
+                view.cell_at(p, height?)
+            } else {
+                self.hit(view, p).map(|(at, _)| at)
+            }
+        });
         edit.editor.update_grid_drag(
             GridView::Scene,
             edit.layout,
@@ -76,21 +98,14 @@ impl State {
             edit.editor.error = None;
         }
         if response.hovered()
+            && let Some(cursor) = hover_edge
+        {
+            ui.ctx().set_cursor_icon(cursor);
+        } else if response.hovered()
             && let Some((at, _)) = pointer.and_then(|p| self.hit(view, p))
         {
             let hit = Editor::hit_bin(edit.layout, at);
-            let edge = edit
-                .layout
-                .bins
-                .iter()
-                .find(|b| Some(b.id) == hit && hit == *edit.selected)
-                .is_some_and(|b| {
-                    (at[0] - b.cell[0] as f32).abs() <= margin
-                        || (at[0] - (b.cell[0] + b.span[0]) as f32).abs() <= margin
-                });
-            ui.ctx().set_cursor_icon(if edge {
-                egui::CursorIcon::ResizeHorizontal
-            } else if hit.is_some() {
+            ui.ctx().set_cursor_icon(if hit.is_some() {
                 egui::CursorIcon::Grab
             } else {
                 egui::CursorIcon::Crosshair
@@ -134,7 +149,8 @@ impl State {
                 top.to_vec(),
                 egui::Stroke::new(2., accent),
             ));
-            for handle in [top[0].lerp(top[3], 0.5), top[1].lerp(top[2], 0.5)] {
+            for i in 0..4 {
+                let handle = top[i].lerp(top[(i + 1) % 4], 0.5);
                 painter.circle(handle, 3.5, accent, egui::Stroke::new(1., Color32::WHITE));
             }
         }

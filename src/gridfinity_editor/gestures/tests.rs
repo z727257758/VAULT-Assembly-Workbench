@@ -98,3 +98,34 @@ fn collision_outside_and_concurrent_changes_never_overwrite_layout() {
     assert_eq!(layout.bins[0].cell, [0, 0]);
     assert_eq!(layout.bins[0].label.text, "Changed elsewhere");
 }
+
+#[test]
+fn outer_handles_allow_projection_roundoff_while_creation_stays_inside_the_grid() {
+    let s = Selection::default();
+    for view in [GridView::Scene, GridView::Plan] {
+        let mut editor = Editor::default();
+        let mut selected = None;
+        let mut layout = Layout::default();
+        let corner = [3.001, 3.001];
+        editor.begin_grid_drag(view, &layout, &s, &mut selected, corner, 0.);
+        assert!(!editor.active());
+        layout.bins.push(Bin {
+            cell: [1, 1],
+            span: [2, 2],
+            ..Default::default()
+        });
+        selected = Some(1);
+        editor.begin_grid_drag(view, &layout, &s, &mut selected, corner, 0.1);
+        assert!(editor.resizing(view));
+        editor.update_grid_drag(view, &mut layout, &s, &mut selected, Some([2., 2.]), true);
+        assert_eq!(layout.bins[0].span, [1, 1]);
+        editor.begin_grid_drag(view, &layout, &s, &mut selected, [2., 2.], 0.1);
+        editor.update_grid_drag(view, &mut layout, &s, &mut selected, Some(corner), true);
+        assert_eq!(layout.bins[0].span, [2, 2]);
+        let saved = layout.clone();
+        editor.begin_grid_drag(view, &layout, &s, &mut selected, [2., 3.], 0.1);
+        editor.update_grid_drag(view, &mut layout, &s, &mut selected, Some([2., 3.02]), true);
+        assert_eq!(layout, saved);
+        assert!(editor.error.is_some());
+    }
+}

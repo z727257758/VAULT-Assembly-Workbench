@@ -4,7 +4,7 @@ use super::*;
 enum Action {
     Cycle(bool),
     Move([i32; 2]),
-    Width(i32),
+    Resize(usize, i32),
     Duplicate,
     Delete,
 }
@@ -21,8 +21,10 @@ impl Action {
         }
         Some(match (key, modifiers.shift) {
             (Key::Tab, backwards) => Self::Cycle(backwards),
-            (Key::ArrowLeft, true) => Self::Width(-1),
-            (Key::ArrowRight, true) => Self::Width(1),
+            (Key::ArrowLeft, true) => Self::Resize(0, -1),
+            (Key::ArrowRight, true) => Self::Resize(0, 1),
+            (Key::ArrowUp, true) => Self::Resize(1, -1),
+            (Key::ArrowDown, true) => Self::Resize(1, 1),
             (Key::ArrowLeft, false) => Self::Move([-1, 0]),
             (Key::ArrowRight, false) => Self::Move([1, 0]),
             (Key::ArrowUp, false) => Self::Move([0, -1]),
@@ -120,8 +122,9 @@ impl Editor {
                     *cell += delta;
                 }
             }
-            Action::Width(delta) => {
-                candidate.bin.span[0] = candidate.bin.span[0].saturating_add_signed(delta).max(1);
+            Action::Resize(axis, delta) => {
+                candidate.bin.span[axis] =
+                    candidate.bin.span[axis].saturating_add_signed(delta).max(1);
             }
             Action::Duplicate => {
                 *selected = Some(layout.add(s, Some(candidate.bin))?);

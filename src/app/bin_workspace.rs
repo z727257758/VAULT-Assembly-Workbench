@@ -290,9 +290,17 @@ impl App {
                         }
                         ui.end_row();
                     }
-                    ui.label(t(z, "宽度", "Width"));
-                    ui.add(egui::DragValue::new(&mut bin.span[0]).range(1..=grid[0]));
-                    ui.end_row();
+                    for (axis, name) in [
+                        t(z, "宽度（格）", "Width (cells)"),
+                        t(z, "深度（格）", "Depth (cells)"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        ui.label(name);
+                        ui.add(egui::DragValue::new(&mut bin.span[axis]).range(1..=grid[axis]));
+                        ui.end_row();
+                    }
                 });
             if bin.tab {
                 ui.checkbox(&mut bin.label.enabled, t(z, "标签文字", "Label text"));
@@ -326,9 +334,9 @@ impl App {
                 .shared_ui(ui, layout, &self.selection);
         });
         ui.collapsing(t(z, "操作说明", "How to edit"), |ui| {
-            ui.label(t(z, "在空格拖动可添加盒子。拖动盒内可移动，选中后拖动左右边缘可改宽。", "Drag on an empty cell to add a bin. Drag a bin to move it, or drag its selected side edges to change its width."));
-            ui.label(t(z, "深度和高度在统一配置中调整。双击简图中的盒子可编辑标签。", "Change depth and height in shared settings. Double-click a bin in the plan to edit its label."));
-            ui.small(t(z, "Tab 切换盒子 · 方向键移动 · Shift + 左右改宽 · Ctrl + D 复制 · Delete 删除", "Tab cycles bins · Arrows move · Shift + Left/Right resizes · Ctrl + D duplicates · Delete removes"));
+            ui.label(t(z, "从空格拖到对角格，新盒会占满框选的行和列。选中盒子后，拖动盒内可移动，拖动边缘可调整宽度或深度。", "Drag across empty cells to create a bin covering the selected rows and columns. Drag a selected bin to move it, or drag its edges to resize it."));
+            ui.label(t(z, "双击简图中的盒子可编辑标签。", "Double-click a bin in the plan to edit its label."));
+            ui.small(t(z, "Tab 切换盒子 · 方向键移动 · Shift + 方向键调整宽深 · Ctrl + D 复制 · Delete 删除", "Tab cycles bins · Arrows move · Shift + arrows resize · Ctrl + D duplicates · Delete removes"));
         });
     }
 }

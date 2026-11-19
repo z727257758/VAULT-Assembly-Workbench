@@ -60,7 +60,7 @@ impl Bin {
         format!("{PREFIX}Gridfinity-{}.stl", self.id)
     }
 }
-/// One persistent configuration for all bins; only X span, placement and text vary.
+/// Shared height and styling, plus the default depth for new bins.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SharedConfig {
@@ -99,8 +99,12 @@ impl SharedConfig {
             offset: b.label.offset,
         }
     }
+    /// Initialize a new bin with the current styling and default depth.
     pub fn apply(&self, b: &mut Bin) {
         b.span[1] = self.depth_cells;
+        self.apply_properties(b);
+    }
+    fn apply_properties(&self, b: &mut Bin) {
         b.auto_height = self.auto_height;
         b.height_units = self.height_units;
         b.scoop = self.scoop;
@@ -121,17 +125,32 @@ pub struct Layout {
 }
 impl<'de> Deserialize<'de> for Layout {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct SavedBin {
+            span: Option<[u32; 2]>,
+            #[serde(flatten)]
+            bin: Bin,
+        }
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct Saved {
             baseplate: String,
-            bins: Vec<Bin>,
+            bins: Vec<SavedBin>,
             shared: Option<SharedConfig>,
         }
         let saved = Saved::deserialize(deserializer)?;
+        let default_depth = saved.shared.as_ref().map_or(1, |s| s.depth_cells);
+        let bins = saved
+            .bins
+            .into_iter()
+            .map(|mut entry| {
+                entry.bin.span = entry.span.unwrap_or([1, default_depth]);
+                entry.bin
+            })
+            .collect();
         let mut layout = Self {
             baseplate: saved.baseplate,
-            bins: saved.bins,
+            bins,
             shared: saved.shared.clone().unwrap_or_default(),
         };
         if saved.shared.is_none() {
@@ -187,7 +206,7 @@ pub fn units(b: &Bin, s: &Selection) -> Result<u32, String> {
 impl Layout {
     pub fn sync_shared(&mut self) {
         for bin in &mut self.bins {
-            self.shared.apply(bin);
+            self.shared.apply_properties(bin);
         }
     }
     pub fn apply_label_font(&mut self, font: Option<crate::label::Font>) {
@@ -198,8 +217,8 @@ impl Layout {
             }
         }
     }
-    /// Migrate old presets from the lowest ID; shrinking to minimum existing depth
-    /// preserves placement and avoids introducing overlaps while unifying them.
+    /// Legacy presets use the lowest ID's styling and the smallest depth as the
+    /// default for new bins. Each saved footprint remains in its original cells.
     pub fn adopt_shared(&mut self) {
         if let Some(first) = self.bins.iter().min_by_key(|b| b.id) {
             self.shared = SharedConfig::from_bin(first);
@@ -214,6 +233,22 @@ impl Layout {
         self.sync_shared();
     }
     pub fn set_shared(&mut self, settings: SharedConfig, s: &Selection) -> Result<(), String> {
+        let uniform_depth = settings.depth_cells != self.shared.depth_cells;
+        self.update_shared(settings, s, uniform_depth)
+    }
+    pub fn set_uniform_depth(&mut self, depth: u32, s: &Selection) -> Result<(), String> {
+        let settings = SharedConfig {
+            depth_cells: depth,
+            ..self.shared.clone()
+        };
+        self.update_shared(settings, s, true)
+    }
+    fn update_shared(
+        &mut self,
+        settings: SharedConfig,
+        s: &Selection,
+        uniform_depth: bool,
+    ) -> Result<(), String> {
         let grid = grid_for(s, &self.baseplate)?;
         if settings.depth_cells == 0 || settings.depth_cells > grid[1] {
             return Err("统一深度超出抽屉网格".into());
@@ -235,6 +270,11 @@ impl Layout {
             return Err("统一可拆标牌刻深不能超过 0.4 mm".into());
         }
         let mut next = self.clone();
+        if uniform_depth {
+            for bin in &mut next.bins {
+                bin.span[1] = settings.depth_cells;
+            }
+        }
         next.shared = settings;
         next.sync_shared();
         next.validate(s)?;
@@ -277,8 +317,11 @@ impl Layout {
     }
     pub fn add(&mut self, s: &Selection, template: Option<Bin>) -> Result<u32, String> {
         let g = grid_for(s, &self.baseplate)?;
-        let mut b = template.unwrap_or_default();
-        self.shared.apply(&mut b);
+        let mut b = template.unwrap_or_else(|| Bin {
+            span: [1, self.shared.depth_cells],
+            ..Bin::default()
+        });
+        self.shared.apply_properties(&mut b);
         b.id = self
             .bins
             .iter()
@@ -1104,7 +1147,47 @@ mod tests {
         assert_eq!(layout.bins.last().unwrap().span[1], 2);
     }
     #[test]
-    fn old_presets_unify_settings_and_preserve_text_and_positions() {
+    fn mixed_footprints_survive_style_changes_copy_and_persistence() {
+        let s = Selection::default();
+        let mut layout = Layout::default();
+        layout.add(&s, None).unwrap();
+        layout.bins[0].span = [2, 3];
+        layout.add(&s, None).unwrap();
+        layout
+            .set_shared(
+                SharedConfig {
+                    scoop: false,
+                    ..layout.shared.clone()
+                },
+                &s,
+            )
+            .unwrap();
+        layout.sync_shared();
+        let restored: Layout = toml::from_str(&toml::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(restored, layout);
+        assert_eq!(restored.bins[0].span, [2, 3]);
+        assert_eq!(restored.bins[1].span, [1, 1]);
+        assert!(restored.bins.iter().all(|b| !b.scoop));
+        let mut copy = Layout::default();
+        copy.add(&s, Some(restored.bins[0].clone())).unwrap();
+        assert_eq!(copy.bins[0].span, [2, 3]);
+        assert!(copy.bins[0].scoop);
+        // Preview geometry and the SCAD used for exact preview/export use the same footprint.
+        let bin = &restored.bins[0];
+        let mesh = proxy(bin, &s).unwrap();
+        assert_eq!(mesh.max.x - mesh.min.x, 83.5);
+        assert_eq!(mesh.max.z - mesh.min.z, 125.5);
+        assert!(
+            script(Path::new("."), bin, &s)
+                .unwrap()
+                .contains("new_bin([2,3],")
+        );
+        layout.set_uniform_depth(1, &s).unwrap();
+        assert_eq!(layout.bins[0].span, [2, 1]);
+        assert_eq!(layout.bins[1].span, [1, 1]);
+    }
+    #[test]
+    fn old_presets_recover_defaults_and_preserve_footprints_text_and_positions() {
         let data = r#"
 [[bins]]
 id=2
@@ -1135,12 +1218,19 @@ depth=0.2
         assert_eq!(layout.bins[0].label.text, "second");
         assert!(!layout.bins[0].label.enabled);
         assert_eq!(layout.bins[1].label.text, "M3");
-        assert!(
-            layout
-                .bins
-                .iter()
-                .all(|b| SharedConfig::from_bin(b) == layout.shared)
-        );
+        assert_eq!(layout.bins[0].span, [1, 1]);
+        assert_eq!(layout.bins[1].span, [1, 2]);
+        for b in &layout.bins {
+            assert_eq!(
+                SharedConfig::from_bin(b),
+                SharedConfig {
+                    depth_cells: b.span[1],
+                    ..layout.shared.clone()
+                }
+            );
+        }
+        let no_span: Layout = toml::from_str("[shared]\ndepth_cells=2\n[[bins]]\nid=1").unwrap();
+        assert_eq!(no_span.bins[0].span, [1, 2]);
         assert_eq!(
             layout,
             toml::from_str(&toml::to_string(&layout).unwrap()).unwrap()
@@ -1749,6 +1839,9 @@ depth=0.2
         )
         .translate(D3::new(0., 0., -1000.));
         for (bins, meshes) in bins.chunks_exact(2).zip(meshes.chunks_exact(2)) {
+            let [width, depth] = bins[1].span.map(|cells| cells as f32 * 42. - 0.5);
+            assert!((meshes[1].size.x - width).abs() < 0.05);
+            assert!((meshes[1].size.y - depth).abs() < 0.05);
             let plain = crate::label::solid(&meshes[0]).unwrap();
             let curved = crate::label::solid(&meshes[1]).unwrap();
             assert!((meshes[0].min - meshes[1].min).length() < 0.005);

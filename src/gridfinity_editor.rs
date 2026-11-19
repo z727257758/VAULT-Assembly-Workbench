@@ -58,10 +58,8 @@ impl Drag {
         match self.gesture {
             Gesture::Draw(start) => {
                 let end = p.map(|v| v.floor() as i32);
-                lo[0] = start[0].min(end[0]);
-                lo[1] = start[1];
-                b.span[0] = (start[0] - end[0]).unsigned_abs() + 1;
-                // Depth belongs to the layout's shared configuration.
+                lo = std::array::from_fn(|axis| start[axis].min(end[axis]));
+                b.span = std::array::from_fn(|axis| start[axis].abs_diff(end[axis]) + 1);
             }
             Gesture::Stamp => {
                 lo = p.map(|v| v.floor() as i32);
@@ -140,10 +138,18 @@ impl Editor {
         let before = settings.clone();
         let grid = gridfinity::grid_for(s, &layout.baseplate).unwrap_or([1, 1]);
         let max = gridfinity::max_units(s).unwrap_or(3);
+        let mut apply_depth = false;
         ui.add_enabled_ui(!self.active(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("统一深度（格）");
                 ui.add(egui::DragValue::new(&mut settings.depth_cells).range(1..=grid[1]));
+                if layout
+                    .bins
+                    .iter()
+                    .any(|bin| bin.span[1] != settings.depth_cells)
+                {
+                    apply_depth = ui.small_button("应用到全部").clicked();
+                }
                 ui.checkbox(&mut settings.auto_height, "自动高度");
                 if !settings.auto_height {
                     ui.label("高度 U");
@@ -199,6 +205,8 @@ impl Editor {
         });
         if settings != before {
             self.shared_error = layout.set_shared(settings, s).err();
+        } else if apply_depth {
+            self.shared_error = layout.set_uniform_depth(settings.depth_cells, s).err();
         }
         if let Some(error) = &self.shared_error {
             ui.colored_label(Color32::LIGHT_RED, format!("统一配置未修改：{error}"));
@@ -446,7 +454,7 @@ impl Editor {
             && self.drag.is_none()
             && self.inline.is_none()
             && response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(p) = press.filter(|p| rect.contains(*p))
+            && let Some(p) = press
         {
             self.begin_grid_drag(
                 GridView::Plan,
@@ -463,7 +471,7 @@ impl Editor {
             s,
             selected,
             pointer
-                .filter(|p| rect.contains(*p))
+                .filter(|p| ui.clip_rect().contains(*p))
                 .map(|p| Self::point(rect, cell, p)),
             released,
         );
@@ -553,8 +561,13 @@ impl Editor {
                     );
                 }
             }
-            if Some(b.id) == *selected {
-                for p in [r.left_center(), r.right_center()] {
+            if is_selected {
+                for p in [
+                    r.left_center(),
+                    r.right_center(),
+                    r.center_top(),
+                    r.center_bottom(),
+                ] {
                     painter.rect_filled(Rect::from_center_size(p, Vec2::splat(7.)), 1., accent);
                 }
             }
@@ -626,17 +639,18 @@ impl Editor {
             && let Some(p) = pointer
         {
             let at = Self::point(rect, cell, p);
-            let resizing = layout
+            let resize = layout
                 .bins
                 .iter()
-                .any(|bin| Some(bin.id) == *selected && Self::width_edge(bin, at, 8. / cell) != 0);
-            let cursor = if resizing {
-                egui::CursorIcon::ResizeHorizontal
-            } else if Self::hit_bin(layout, at).is_some() {
-                egui::CursorIcon::Grab
-            } else {
-                egui::CursorIcon::Crosshair
-            };
+                .find(|bin| Some(bin.id) == *selected)
+                .and_then(|bin| Self::resize_cursor(Self::resize_edges(bin, at, 8. / cell)));
+            let cursor = resize.unwrap_or_else(|| {
+                if Self::hit_bin(layout, at).is_some() {
+                    egui::CursorIcon::Grab
+                } else {
+                    egui::CursorIcon::Crosshair
+                }
+            });
             ui.ctx().set_cursor_icon(cursor);
         }
         ui.vertical_centered(|ui| {
@@ -974,6 +988,10 @@ mod tests {
         assert_eq!(h.layout.bins[1].cell, [1, 1]);
         h.frame(vec![key(Key::ArrowRight, Modifiers::SHIFT)]);
         assert_eq!(h.layout.bins[1].span, [2, 1]);
+        h.frame(vec![key(Key::ArrowDown, Modifiers::SHIFT)]);
+        assert_eq!(h.layout.bins[1].span, [2, 2]);
+        h.frame(vec![key(Key::ArrowUp, Modifiers::SHIFT)]);
+        assert_eq!(h.layout.bins[1].span, [2, 1]);
         h.frame(vec![key(Key::D, Modifiers::CTRL)]);
         assert_eq!(h.selected, Some(3));
         assert_eq!(h.layout.bins.len(), 3);
@@ -1090,8 +1108,8 @@ mod tests {
         );
         h.release(end);
         assert_eq!(h.layout.bins.len(), 1);
-        assert_eq!(h.layout.bins[0].cell, [0, 2]);
-        assert_eq!(h.layout.bins[0].span, [3, 1]);
+        assert_eq!(h.layout.bins[0].cell, [0, 1]);
+        assert_eq!(h.layout.bins[0].span, [3, 2]);
         assert_eq!(h.canvas, initial_rect);
         let button = h.button.center();
         let drop = h.pos(1.5, 0.5);
@@ -1109,6 +1127,71 @@ mod tests {
         h.release(drop);
         assert_eq!(h.layout, before);
         assert!(h.editor.error.is_some());
+    }
+    #[test]
+    fn pointer_drag_creates_the_full_rectangle_in_each_direction() {
+        for (start, end) in [
+            ([0.5, 0.5], [1.5, 2.5]),
+            ([1.5, 0.5], [0.5, 2.5]),
+            ([0.5, 2.5], [1.5, 0.5]),
+            ([1.5, 2.5], [0.5, 0.5]),
+        ] {
+            let mut h = Harness::new();
+            let from = h.pos(start[0], start[1]);
+            let to = h.pos(end[0], end[1]);
+            h.press(from);
+            h.move_to(to);
+            assert_eq!(
+                h.editor.drag_preview(),
+                Some(&DragPreview {
+                    id: 1,
+                    cell: [0, 0],
+                    span: [2, 3],
+                    valid: true
+                })
+            );
+            assert!(h.layout.bins.is_empty());
+            h.release(to);
+            assert_eq!(h.layout.bins.len(), 1);
+            assert_eq!(h.layout.bins[0].cell, [0, 0]);
+            assert_eq!(h.layout.bins[0].span, [2, 3]);
+            assert_eq!(h.selected, Some(1));
+        }
+    }
+
+    #[test]
+    fn occupied_cell_inside_drawn_rectangle_or_outside_release_preserves_layout() {
+        let mut h = Harness::new();
+        h.layout.bins = vec![Bin {
+            cell: [1, 1],
+            ..Default::default()
+        }];
+        let saved = h.layout.clone();
+        let start = h.pos(0.5, 0.5);
+        let end = h.pos(2.5, 2.5);
+        h.press(start);
+        h.move_to(end);
+        assert_eq!(
+            h.editor.drag_preview(),
+            Some(&DragPreview {
+                id: 2,
+                cell: [0, 0],
+                span: [3, 3],
+                valid: false
+            })
+        );
+        h.release(end);
+        assert!(h.editor.error.is_some());
+        assert_eq!(h.layout, saved);
+
+        let outside = h.pos(0.5, 3.12);
+        h.press(start);
+        h.move_to(outside);
+        assert!(!h.editor.drag_preview().unwrap().valid);
+        h.release(outside);
+        assert!(h.editor.error.is_some());
+        assert_eq!(h.layout, saved);
+        assert!(h.selected.is_none());
     }
     #[test]
     fn actual_pointer_move_resize_cancel_and_preserve_label() {
@@ -1136,7 +1219,7 @@ mod tests {
         h.press(corner);
         h.move_to(enlarged);
         h.release(enlarged);
-        assert_eq!(h.layout.bins[0].span, [2, 1]);
+        assert_eq!(h.layout.bins[0].span, [2, 2]);
         let before = h.layout.clone();
         let start = h.pos(1.5, 1.5);
         let outside = h.canvas.min - Vec2::splat(30.);
@@ -1157,7 +1240,7 @@ mod tests {
         assert_eq!(h.layout, before);
     }
     #[test]
-    fn shared_depth_is_inherited_by_canvas_draw_and_not_individually_resized() {
+    fn drawn_depth_survives_shared_sync_and_side_resize_while_stamp_uses_default_depth() {
         let mut h = Harness::new();
         h.layout
             .set_shared(
@@ -1173,17 +1256,23 @@ mod tests {
         h.press(start);
         h.move_to(end);
         h.release(end);
-        assert_eq!(h.layout.bins[0].span, [2, 2]);
+        assert_eq!(h.layout.bins[0].span, [2, 3]);
         assert_eq!(h.layout.bins[0].cell, [0, 0]);
-        let edge = h.pos(2., 1.) - Vec2::new(2., 0.);
-        h.press(edge);
-        let delta = Vec2::new(h.cell_width(), 50.);
-        h.move_to(edge + delta);
-        h.release(edge + delta);
-        assert_eq!(h.layout.bins[0].span, [3, 2]);
+        h.layout.sync_shared();
+        assert_eq!(h.layout.bins[0].span, [2, 3]);
+        let left = h.pos(0.03, 1.5);
+        let smaller = h.pos(1.03, 1.5);
+        h.press(left);
+        h.move_to(smaller);
+        h.release(smaller);
+        assert_eq!(h.layout.bins[0].span, [1, 3]);
+        let stamp = h.button.center();
+        let socket = h.pos(0.5, 0.5);
+        h.press(stamp);
+        h.move_to(socket);
+        h.release(socket);
+        assert_eq!(h.layout.bins[1].span, [1, 2]);
         assert_eq!(h.layout.shared.depth_cells, 2);
-        let clone = h.layout.bins[0].clone();
-        assert_eq!(gridfinity::SharedConfig::from_bin(&clone), h.layout.shared);
     }
     #[test]
     fn actual_pointer_resize_conflict_and_single_cell_minimum() {
