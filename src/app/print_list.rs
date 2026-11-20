@@ -4,7 +4,6 @@ use super::*;
 pub(super) struct RowChanges {
     pub changed: bool,
     pub toggle: Option<(String, bool, u32)>,
-    pub preview: Option<String>,
 }
 
 pub(super) fn rows<'a>(
@@ -12,7 +11,6 @@ pub(super) fn rows<'a>(
     items: impl Iterator<Item = &'a mut Bom>,
     selection: &Selection,
     zh: bool,
-    details: Option<&Catalog>,
 ) -> RowChanges {
     let mut edits = RowChanges::default();
     for item in items {
@@ -23,7 +21,8 @@ pub(super) fn rows<'a>(
             item.normalize_print(selection);
             let name = crate::accessories::info(&item.path, zh)
                 .map_or_else(|| item.name().to_owned(), |info| info.name);
-            let checkbox = |ui: &mut egui::Ui| {
+            let mut qty = item.qty;
+            ui.horizontal_wrapped(|ui| {
                 let mut enabled = item.enabled;
                 let response = ui.add_enabled(!locked, egui::Checkbox::new(&mut enabled, name));
                 if response.changed() {
@@ -38,9 +37,6 @@ pub(super) fn rows<'a>(
                 } else {
                     response.on_hover_text(&item.path);
                 }
-            };
-            let mut qty = item.qty;
-            let mut quantity = |ui: &mut egui::Ui| {
                 edits.changed |= ui
                     .add_enabled(
                         !locked && rule != crate::catalog::PrintRule::FacadeCaps,
@@ -48,34 +44,7 @@ pub(super) fn rows<'a>(
                     )
                     .on_hover_text(t(zh, "源 STL 文件份数", "Source STL copies"))
                     .changed();
-            };
-            if let Some(catalog) = details {
-                checkbox(ui);
-                ui.horizontal(|ui| {
-                    ui.small(group_label(zh, &item.group));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(t(zh, "预览", "Preview")).clicked() {
-                            edits.preview = Some(item.path.clone());
-                        }
-                        quantity(ui);
-                        ui.small(t(zh, "份数", "Copies"));
-                    });
-                });
-                if catalog.resolve(&item.path).is_none()
-                    && !item.path.starts_with(crate::gridfinity::PREFIX)
-                {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        t(zh, "源文件缺失", "Source file missing"),
-                    );
-                }
-                ui.separator();
-            } else {
-                ui.horizontal_wrapped(|ui| {
-                    checkbox(ui);
-                    quantity(ui);
-                });
-            }
+            });
             item.qty = qty;
         });
     }

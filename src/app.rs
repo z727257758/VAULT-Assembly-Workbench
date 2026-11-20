@@ -209,8 +209,6 @@ pub struct App {
     sustainer_options: SustainerOptions,
     sustainer_angle: f32,
     drawer_extension: f32,
-    drawer_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
-    box_state: Option<(Selection, Vec<Bom>, SustainerOptions)>,
     gridfinity: crate::gridfinity::Layout,
     gridfinity_open: bool,
     bin_exterior_opacity: u32,
@@ -260,7 +258,6 @@ pub struct App {
     export_last: Option<PathBuf>,
     label: crate::label::Config,
     label_open: bool,
-    other_label: crate::label::Config,
     image: Option<(String, egui::TextureHandle)>,
     smoke: bool,
     smoke_start: Instant,
@@ -361,8 +358,6 @@ impl App {
             sustainer_options: Default::default(),
             sustainer_angle: 0.,
             drawer_extension: 0.,
-            drawer_state: None,
-            box_state: None,
             gridfinity: Default::default(),
             gridfinity_open: false,
             bin_exterior_opacity: 30,
@@ -423,7 +418,6 @@ impl App {
             export_last: None,
             label: Default::default(),
             label_open: false,
-            other_label: Default::default(),
             image: None,
             smoke,
             smoke_start: Instant::now(),
@@ -934,14 +928,11 @@ impl App {
                     self.sustainer_layout_cache.clear();
                     self.sustainer_divider_editor = Default::default();
                     self.label = Default::default();
-                    self.other_label = Default::default();
                     self.gridfinity = Default::default();
                     self.layout_cache.clear();
                     self.divider_editor.reset();
                     self.assembly_view = None;
                     self.scene_key.clear();
-                    self.drawer_state = None;
-                    self.box_state = None;
                     self.bom = match self.configured_bom(&[]) {
                         Ok(b) => b,
                         Err(e) => {
@@ -1407,223 +1398,145 @@ impl App {
             .default_width(400.)
             .width_range(360. ..=560.)
             .resizable(true)
-            .frame(ui_style::panel_frame(&ctx.style(), egui::Margin::symmetric(20, 16)))
+            .frame(ui_style::panel_frame(
+                &ctx.style(),
+                egui::Margin::symmetric(20, 16),
+            ))
             .show(ctx, |ui| {
                 self.workspace_header(ui, ctx);
-                if self.combination_view && self.tab==0 {self.tower_panel(ui,ctx);return;}
-                if self.combination_view { self.tower_footer_panel(ui, ctx); } else { self.member_footer_panel(ui); }
-                egui::ScrollArea::vertical().id_salt(("configuration-panel-scroll", self.tab, self.tower.print_list)).auto_shrink([false, false]).show(ui, |ui| {
                 if self.tab == 0 {
-                    if self.tower.print_list { self.member_print_list(ui, ctx); return; }
-                    if self.combination_view {return;}
-                    self.inserts_ui(ui,ctx);
-                    if self.assembly_kind==AssemblyKind::Drawer {self.motion_controls_ui(ui,ctx); }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong(t(z,"标签文字","Label text"));
-                        if ui.button(t(z,"编辑标签…","Edit label…")).clicked() {self.label_open=true;}
-                    });
-                    if self.label.active() {ui.label(self.label.text.replace(char::from(10)," / "));}
-                    else {ui.small(t(z,"原始空白标签","Original blank label"));}
-                    ui.separator();
-                    ui.add_space(8.);
-                    egui::CollapsingHeader::new(t(z,"结构与装配选项","Structure & assembly options")).show(ui, |ui| {
-                    self.combination_controls(ui,ctx);
-                    let previous_selection=self.selection.clone();
-                    let before = (
-                        self.selection.width.clone(),
-                        self.selection.depth,
-                        self.selection.height.clone(),
-                        self.selection.hidden_key,
-                        self.assembly_kind,
-                        self.sustainer_options,
-                    );
-                    ui.add_enabled_ui(!self.catalog.root.as_os_str().is_empty(), |ui| {
-                        ui.strong(t(z,"装配规格（在整体页修改）","Specification (edit in overall assembly)"));
-                        ui.label(format!("{} · {}{} / {}",self.assembly_kind.label(z),self.selection.width,self.selection.depth,self.selection.height));
-                        if ui.button(t(z,"返回整体页修改尺寸…","Change size in overall assembly…")).clicked() {
-                            self.show_combination(ctx);
-                            self.edit_member_size();
-                            return;
-                        }
-                        ui.add_space(8.);
-                        if self.assembly_kind==AssemblyKind::Drawer {
-                            ui.checkbox(&mut self.selection.hidden_key,t(z,"隐藏钥匙（两件方案）","Hidden key (two-file option)"));
-                        } else {
-                            self.sustainer_options=self.sustainer_options.normalized(&self.selection);
-                            if matches!(self.selection.width.as_str(),"L"|"XL") {
-                                ui.label(t(z,"箱体类型","Body type"));
-                                egui::ComboBox::from_id_salt("sustainer-body").selected_text(match self.sustainer_options.body {
-                                    SustainerBody::Flat=>t(z,"平底","Flat"),SustainerBody::Dividers=>t(z,"隔板槽","Dividers"),SustainerBody::Sealed=>t(z,"密封分区","Sealed"),
-                                }).show_ui(ui,|ui| {
-                                    for (kind,label) in [(SustainerBody::Flat,t(z,"平底","Flat")),(SustainerBody::Dividers,t(z,"隔板槽","Dividers")),(SustainerBody::Sealed,t(z,"密封分区","Sealed"))] {
-                                        ui.selectable_value(&mut self.sustainer_options.body,kind,label);
+                    self.tower_panel(ui, ctx);
+                    return;
+                }
+                self.tower_footer_panel(ui, ctx);
+                egui::ScrollArea::vertical()
+                    .id_salt(("configuration-panel-scroll", self.tab))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t(
+                            z,
+                            "搜索名称、用途或路径…",
+                            "Search name, purpose or path…",
+                        )));
+                        if self.tab == 1 {
+                            egui::ComboBox::from_id_salt("category")
+                                .selected_text(
+                                    [
+                                        t(z, "全部", "All"),
+                                        t(z, "抽屉", "Drawers"),
+                                        t(z, "工具箱", "Sustainers"),
+                                        t(z, "改装 / 安装", "Modifications"),
+                                        t(z, "资料", "References"),
+                                    ][self.category],
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in [
+                                        t(z, "全部", "All"),
+                                        t(z, "抽屉", "Drawers"),
+                                        t(z, "工具箱", "Sustainers"),
+                                        t(z, "改装 / 安装", "Modifications"),
+                                        t(z, "资料", "References"),
+                                    ]
+                                    .iter()
+                                    .enumerate()
+                                    {
+                                        ui.selectable_value(&mut self.category, i, *name);
                                     }
                                 });
-                            }
-                            ui.add_enabled_ui(self.selection.depth>=6,|ui| {ui.checkbox(&mut self.sustainer_options.split_roof,t(z,"分体顶盖","Split roof"));});
                         }
-                        let after = (
-                            self.selection.width.clone(),
-                            self.selection.depth,
-                            self.selection.height.clone(),
-                            self.selection.hidden_key,
-                            self.assembly_kind,
-                            self.sustainer_options,
-                        );
-                        if before != after {
-                            self.divider_editor.open=false;
-                            self.close_sustainer_divider_editor();
-                            let mut old=self.bom.clone();
-                            if before.4!=self.assembly_kind {
-                                std::mem::swap(&mut self.label,&mut self.other_label);
-                                let saved=Some((previous_selection.clone(),self.bom.clone(),before.5));
-                                let target=if before.4==AssemblyKind::Drawer {self.drawer_state=saved;self.box_state.clone()}else{self.box_state=saved;self.drawer_state.clone()};
-                                if let Some((selection,bom,options))=target {self.selection=selection;old=bom;if self.assembly_kind==AssemblyKind::Sustainer {self.sustainer_options=options;}} else {old.clear();}
-                                self.explosion=0.;
-                                if self.assembly_kind==AssemblyKind::Sustainer {self.sustainer_options=self.sustainer_options.normalized(&self.selection);}
-                            }
-                            let validation=if self.assembly_kind==AssemblyKind::Drawer {self.gridfinity.validate(&self.selection)}else{Ok(())};
-                            match validation.and_then(|_|self.configured_bom(&old)) {
-                                Ok(next)=>{self.bom=next;self.assembly(ctx);}
-                                Err(e)=>{
-                                    self.selection=previous_selection;
-                                    if self.assembly_kind!=before.4 {std::mem::swap(&mut self.label,&mut self.other_label);}
-                                    self.assembly_kind=before.4;self.sustainer_options=before.5;
-                                    self.status=e;
-                                }
-                            }
-                        }
-                        ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().weak());
-                    });
-                    if self.assembly_kind==AssemblyKind::Sustainer {
-                        if !self.combination_view && !self.scene.mating_checks.is_empty() {
-                            let results:Vec<_>=self.scene.mating_checks.iter().map(|c|c.evaluate(&self.scene)).filter(|r|r.active).collect();
-                            let passed=results.iter().filter(|r|r.within_tolerance).count();
-                            ui.colored_label(if passed==results.len(){ui.visuals().hyperlink_color}else{ui.visuals().warn_fg_color},
-                                format!("{} {passed}/{}",t(z,"孔轴 / 安装面核对","Axis / seating checks"),results.len()));
-                            ui.small(t(z,"按源件几何定位，尚未实物确认。","Positioned from source geometry; physical confirmation pending."));
-                            if passed<results.len() {
-                                egui::CollapsingHeader::new(t(z,"查看配合偏差","Mating discrepancies")).show(ui,|ui| {
-                                    for r in results.iter().filter(|r|!r.within_tolerance) {
-                                        ui.small(format!("{}: {:.3} mm / {:.2}°",r.label,r.error_mm,r.angle_degrees));
-                                    }
-                                });
-                            }
-                            for note in crate::sustainer::review_notes(&self.scene,z) {ui.small(note);}
-                        }
-                        ui.small(t(z,"开盖预览先松开卡扣；仅展示状态，未验证机械行程。螺钉未建模。","Lid preview releases the clasps first. States are illustrative; mechanical travel is unverified. Screws are not modeled."));
-                        self.motion_controls_ui(ui,ctx);
-
-                    }
-                    });
-                } else {
-                    ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t(
-                        z,
-                        "搜索名称、用途或路径…",
-                        "Search name, purpose or path…",
-                    )));
-                    if self.tab == 1 {
-                        egui::ComboBox::from_id_salt("category")
-                            .selected_text(
-                                [
-                                    t(z, "全部", "All"),
-                                    t(z, "抽屉", "Drawers"),
-                                    t(z, "工具箱", "Sustainers"),
-                                    t(z, "改装 / 安装", "Modifications"),
-                                    t(z, "资料", "References"),
-                                ][self.category],
+                        let q = self.query.to_lowercase();
+                        let combinable: Vec<String> = self
+                            .catalog
+                            .bom(&self.selection)
+                            .into_iter()
+                            .map(|b| b.path)
+                            .chain(
+                                self.catalog
+                                    .accessories(&self.selection)
+                                    .into_iter()
+                                    .map(|e| e.path),
                             )
-                            .show_ui(ui, |ui| {
-                                for (i, name) in [
-                                    t(z, "全部", "All"),
-                                    t(z, "抽屉", "Drawers"),
-                                    t(z, "工具箱", "Sustainers"),
-                                    t(z, "改装 / 安装", "Modifications"),
-                                    t(z, "资料", "References"),
-                                ]
-                                .iter()
-                                .enumerate()
-                                {
-                                    ui.selectable_value(&mut self.category, i, *name);
+                            .collect();
+                        let mut folders: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+                        let mut count = 0;
+                        for e in &self.catalog.entries {
+                            let search = crate::accessories::info(&e.path, z).map_or_else(
+                                || e.path.clone(),
+                                |m| format!("{} {} {} {}", e.path, m.name, m.group, m.description),
+                            );
+                            if !search.to_lowercase().contains(&q) {
+                                continue;
+                            }
+                            if self.tab == 2 && e.name.to_lowercase().ends_with(".stl") {
+                                continue;
+                            }
+                            if self.tab == 1 && self.category != 0 && e.category != self.category {
+                                continue;
+                            }
+                            count += 1;
+                            folders
+                                .entry(
+                                    e.path
+                                        .rsplit_once('/')
+                                        .map(|p| p.0)
+                                        .unwrap_or("References")
+                                        .into(),
+                                )
+                                .or_default()
+                                .push((e.name.clone(), e.path.clone()));
+                        }
+                        ui.label(format!("{} {}", count, t(z, "个文件", "files")));
+                        let mut open = None;
+                        let mut add = None;
+                        egui::ScrollArea::vertical()
+                            .id_salt("catalog")
+                            .show(ui, |ui| {
+                                for (folder, files) in folders {
+                                    egui::CollapsingHeader::new(format!(
+                                        "{} ({})",
+                                        folder,
+                                        files.len()
+                                    ))
+                                    .default_open(!q.is_empty() || self.tab == 2)
+                                    .show(ui, |ui| {
+                                        for (name, path) in files {
+                                            ui.horizontal(|ui| {
+                                                if name.to_lowercase().ends_with(".stl")
+                                                    && combinable.contains(&path)
+                                                    && ui.small_button("+").clicked()
+                                                {
+                                                    add = Some(path.clone());
+                                                }
+                                                let meta = crate::accessories::info(&path, z);
+                                                let label = meta
+                                                    .as_ref()
+                                                    .map_or(name.as_str(), |m| m.name.as_str());
+                                                let tooltip = meta.as_ref().map_or_else(
+                                                    || path.clone(),
+                                                    |m| format!("{}\n{}", m.description, path),
+                                                );
+                                                if ui
+                                                    .selectable_label(false, label)
+                                                    .on_hover_text(tooltip)
+                                                    .clicked()
+                                                {
+                                                    open = Some(path);
+                                                }
+                                            });
+                                        }
+                                    });
                                 }
                             });
-                    }
-                    let q = self.query.to_lowercase();
-                    let combinable: Vec<String> = self.catalog.bom(&self.selection).into_iter().map(|b|b.path)
-                        .chain(self.catalog.accessories(&self.selection).into_iter().map(|e|e.path)).collect();
-                    let mut folders: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-                    let mut count = 0;
-                    for e in &self.catalog.entries {
-                        let search = crate::accessories::info(&e.path,z).map_or_else(||e.path.clone(),
-                            |m|format!("{} {} {} {}",e.path,m.name,m.group,m.description));
-                        if !search.to_lowercase().contains(&q) {
-                            continue;
+                        if let Some(path) = open {
+                            self.open_asset(&path, ctx);
                         }
-                        if self.tab == 2 && e.name.to_lowercase().ends_with(".stl") {
-                            continue;
+                        if let Some(path) = add {
+                            self.add_to_bom(path, ctx);
                         }
-                        if self.tab == 1 && self.category != 0 && e.category != self.category {
-                            continue;
-                        }
-                        count += 1;
-                        folders
-                            .entry(
-                                e.path
-                                    .rsplit_once('/')
-                                    .map(|p| p.0)
-                                    .unwrap_or("References")
-                                    .into(),
-                            )
-                            .or_default()
-                            .push((e.name.clone(), e.path.clone()));
-                    }
-                    ui.label(format!("{} {}", count, t(z, "个文件", "files")));
-                    let mut open = None;
-                    let mut add = None;
-                    egui::ScrollArea::vertical()
-                        .id_salt("catalog")
-                        .show(ui, |ui| {
-                            for (folder, files) in folders {
-                                egui::CollapsingHeader::new(format!(
-                                    "{} ({})",
-                                    folder,
-                                    files.len()
-                                ))
-                                .default_open(!q.is_empty() || self.tab == 2)
-                                .show(ui, |ui| {
-                                    for (name, path) in files {
-                                        ui.horizontal(|ui| {
-                                            if name.to_lowercase().ends_with(".stl") && combinable.contains(&path)
-                                                && ui.small_button("+").clicked()
-                                            {
-                                                add = Some(path.clone());
-                                            }
-                                            let meta = crate::accessories::info(&path,z);
-                                            let label = meta.as_ref().map_or(name.as_str(),|m|m.name.as_str());
-                                            let tooltip = meta.as_ref().map_or_else(||path.clone(),|m|format!("{}\n{}",m.description,path));
-                                            if ui
-                                                .selectable_label(false, label)
-                                                .on_hover_text(tooltip)
-                                                .clicked()
-                                            {
-                                                open = Some(path);
-                                            }
-                                        });
-                                    }
-                                });
-                            }
-                        });
-                    if let Some(path) = open {
-                        self.open_asset(&path, ctx);
-                    }
-                    if let Some(path) = add {
-                        self.add_to_bom(path, ctx);
-                    }
-                }
-                });
+                    });
             });
     }
+
     fn remove_dividers(&mut self, ctx: &egui::Context) {
         self.divider_editor.open = false;
         self.divider_layout.remove(&mut self.bom, &self.selection);
@@ -1702,6 +1615,9 @@ impl App {
         if !self.select_accessory(path, true, qty) {
             return;
         }
+        if !self.members.is_empty() {
+            self.combination_view = true;
+        }
         self.assembly(ctx);
         self.status = t(
             self.zh,
@@ -1709,63 +1625,6 @@ impl App {
             "Added to BOM; check alternatives and quantities",
         )
         .into();
-    }
-    fn member_print_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let z = self.zh;
-        ui.strong(t(
-            z,
-            "当前抽屉 / 箱子的打印零件",
-            "Parts for the current drawer / box",
-        ));
-        ui.small(t(
-            z,
-            "勾选导出项并调整源文件份数。点击“预览”查看单件。",
-            "Choose parts and source-file copies. Preview opens an individual part.",
-        ));
-        if self.active_drawer.is_some() {
-            ui.small(t(z, "这里只列当前子抽屉；共用外壳在整体打印清单中核对。", "This list covers the current drawer; check the shared housing in the project print list."));
-        }
-        ui.add_space(8.);
-        let child = self.active_drawer.is_some();
-        let edits = print_list::rows(
-            ui,
-            self.bom
-                .iter_mut()
-                .filter(|b| !child || !crate::catalog::tower::housing(&b.path)),
-            &self.selection,
-            z,
-            Some(&self.catalog),
-        );
-        let toggled = edits
-            .toggle
-            .is_some_and(|(path, enabled, qty)| self.select_accessory(path, enabled, qty));
-        if edits.changed || toggled {
-            self.assembly(ctx);
-        }
-        if let Some(path) = edits.preview {
-            self.single(path, ctx);
-        }
-        ui.small(t(z, "份数按源 STL 统计；单份可能含多个实体。打印勾选与装配显隐分别控制。", "Copies count source STL files, which can contain several bodies. Print selection and preview visibility are independent."));
-        ui.add_space(8.);
-        ui.small(if self.assembly_kind == AssemblyKind::Sustainer {
-            t(
-                z,
-                "箱子五金规格与数量请参照 Sustainers Assembly；螺钉未建模。",
-                "Refer to Sustainers Assembly for box hardware; screws are not modeled.",
-            )
-        } else if self.selection.width == "XL" {
-            t(
-                z,
-                "XL 五金按专用结构核对。",
-                "Check XL hardware against its specific assembly.",
-            )
-        } else {
-            t(
-                z,
-                "五金：M4 × 14 mm，1F ×4、2F/4F ×6；顶提手选装 M6 × 50 mm ×2。",
-                "Hardware: M4 × 14 mm, 1F ×4 / 2F and 4F ×6; optional top handle M6 × 50 mm ×2.",
-            )
-        });
     }
     fn interior_scene(&self) -> Scene {
         let mut scene = self.scene.clone();

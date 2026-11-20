@@ -496,6 +496,14 @@ impl App {
                     });
                 });
             }
+            if self.selection.depth >= 6 {
+                option_row(ui, t(z, "顶盖", "Lid"), |ui| {
+                    ui.checkbox(
+                        &mut self.sustainer_options.split_roof,
+                        t(z, "分体", "Split"),
+                    );
+                });
+            }
             if before != self.sustainer_options {
                 match self.configured_bom(&self.bom) {
                     Ok(bom) => {
@@ -539,6 +547,39 @@ impl App {
                 self.label_open = true;
             }
         });
+        if self.assembly_kind == AssemblyKind::Drawer
+            && (self.active_drawer.is_some()
+                || self.members[self.active_member].preset.drawers.is_empty())
+        {
+            let mut hidden_key = self.selection.hidden_key;
+            option_row(ui, t(z, "钥匙", "Key"), |ui| {
+                ui.checkbox(
+                    &mut hidden_key,
+                    t(z, "两件式隐藏钥匙", "Two-piece hidden key"),
+                );
+            });
+            if hidden_key != self.selection.hidden_key {
+                let selection = Selection {
+                    hidden_key,
+                    ..self.selection.clone()
+                };
+                let bom = self.catalog.reconfigure(&selection, &self.bom);
+                if let Some(missing) = bom
+                    .iter()
+                    .find(|part| part.group == "Key" && self.catalog.resolve(&part.path).is_none())
+                {
+                    self.status = format!(
+                        "{} {}",
+                        t(z, "模型库缺少钥匙零件", "Key part missing from library"),
+                        missing.name()
+                    );
+                } else {
+                    self.selection = selection;
+                    self.bom = bom;
+                    self.assembly(ctx);
+                }
+            }
+        }
         ui.small(t(
             z,
             "修改自动保留在当前组合中。",
@@ -548,7 +589,7 @@ impl App {
 }
 
 impl App {
-    pub(super) fn inserts_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn inserts_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         if self.assembly_kind == AssemblyKind::Sustainer {
             ui.strong(t(z, "箱子内部配置", "Box inserts"));
@@ -584,9 +625,6 @@ impl App {
             });
         }
         if self.assembly_kind == AssemblyKind::Drawer {
-            if !self.inline_edit.open {
-                ui.strong(t(z, "抽屉内部配置", "Drawer inserts"));
-            }
             let has_dividers = self.divider_layout.enabled
                 || self
                     .bom
@@ -655,17 +693,6 @@ impl App {
                     self.divider_layout.enabled = true;
                 }
                 self.assembly(ctx);
-            }
-            if !self.inline_edit.open {
-                ui.label(
-                RichText::new(t(
-                    z,
-                    "底板与隔板互斥，切换会移除当前内部配置。",
-                    "Baseplates and dividers are exclusive. Switching removes the current insert.",
-                ))
-                .small()
-                .weak(),
-            );
             }
             if mode == 2 {
                 option_row(ui, t(z, "收纳隔板", "Dividers"), |ui| {

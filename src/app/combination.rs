@@ -371,9 +371,6 @@ impl App {
         self.export_options.plate = p
             .print_config
             .unwrap_or_else(|| Preset::legacy_print_config(&self.export_options.plate));
-        self.drawer_state = None;
-        self.box_state = None;
-        self.other_label = Default::default();
         self.layout_cache.clear();
         self.sustainer_layout_cache.clear();
         self.scene_key.clear();
@@ -805,98 +802,6 @@ impl App {
         }
         self.combination_spec = Some(draft);
     }
-    pub(super) fn combination_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let z = self.zh;
-        if !self.combination_view && !self.members.is_empty() {
-            self.member_color_follow_ui(ui);
-            ui.separator();
-            return;
-        }
-        if self.combination_spec.is_some() {
-            ui.disable();
-        }
-        ui.strong(t(z, "三维装配", "3D assembly"));
-        if self.members.is_empty() {
-            if ui
-                .add_enabled(
-                    !self.bom.is_empty(),
-                    crate::ui_style::primary_button(t(z, "开始整体装配", "Start overall assembly")),
-                )
-                .clicked()
-            {
-                self.show_combination(ctx);
-            }
-            return;
-        }
-        ui.label(t(
-            z,
-            "在预览中点击盒子或抽屉，通过模型旁的按钮添加或修改。",
-            "Select a box or drawer in the preview, then use its on-model controls.",
-        ));
-        ui.small(t(z,"左键拖动旋转，右键拖动平移；移动对象时点击目标，再选择对齐方向。","Drag to orbit; right-drag to pan. To move a member, pick its target and choose a direction."));
-        ui.separator();
-        ui.strong(t(z, "组合中的对象", "Objects"));
-        let mut selected = None;
-        for (i, m) in self.members.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let mut checked = self.member_selection.contains(&i);
-                if ui
-                    .checkbox(&mut checked, "")
-                    .on_hover_text(t(z, "批量选择", "Select for batch actions"))
-                    .changed()
-                {
-                    if checked {
-                        self.member_selection.insert(i);
-                    } else {
-                        self.member_selection.remove(&i);
-                    }
-                }
-                if ui
-                    .selectable_label(
-                        i == self.active_member,
-                        format!(
-                            "{} · {}{} / {}",
-                            m.name,
-                            m.preset.selection.width,
-                            m.preset.selection.depth,
-                            m.preset.selection.height
-                        ),
-                    )
-                    .clicked()
-                {
-                    selected = Some(i);
-                }
-            });
-        }
-        if let Some(i) = selected {
-            self.select_member_in_combination(i, ctx);
-        }
-        ui.separator();
-        ui.label(t(z, "名称", "Name"));
-        let mut name = self.members[self.active_member].name.clone();
-        if ui
-            .add(egui::TextEdit::singleline(&mut name).char_limit(80))
-            .changed()
-        {
-            self.record_workflow();
-            self.members[self.active_member].name = name;
-        }
-        self.workflow_undo_ui(ui, ctx);
-        self.batch_member_actions(ui, ctx);
-        if ui
-            .button(t(z, "安装 / 修改配件…", "Install / edit accessories…"))
-            .clicked()
-        {
-            self.open_exterior();
-        }
-        self.combination_dimensions(ui);
-        ui.small(t(
-            z,
-            "堆叠规格按原说明书检查；接口啮合尚未实物验证。",
-            "Stacking specifications follow the manual; physical engagement is unverified.",
-        ));
-        ui.separator();
-    }
     pub(super) fn combination_properties(&mut self, ui: &mut egui::Ui) {
         ui.strong(format!(
             "{}：{}",
@@ -920,8 +825,8 @@ impl App {
         }
         ui.small(t(
             self.zh,
-            "双击模型也可进入对应的单盒 / 单抽屉装配页。",
-            "Double-click its model to open the box / drawer assembly page.",
+            "双击模型可在整体预览中编辑对应的箱子或抽屉。",
+            "Double-click the model to edit its box or drawer in the assembly view.",
         ));
         ui.horizontal_wrapped(|ui| {
             if ui.button(t(self.zh, "显示全部", "Show all")).clicked() {

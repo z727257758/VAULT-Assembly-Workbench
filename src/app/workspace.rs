@@ -103,42 +103,10 @@ impl App {
 
     pub(super) fn workspace_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
-        let files = if self.combination_view {
-            self.tower_file_count()
-        } else {
-            self.bom
-                .iter()
-                .filter(|item| {
-                    item.enabled
-                        && (self.active_drawer.is_none()
-                            || !crate::catalog::tower::housing(&item.path))
-                })
-                .count()
-        };
-        if !self.combination_view {
-            if ui
-                .button(t(z, "← 返回整体配置", "← Back to project"))
-                .clicked()
-            {
-                self.show_combination(ctx);
-                self.tower.print_list = false;
-            }
-            let context = self.editor_context();
-            ui.add(egui::Label::new(RichText::new(&context).strong()).truncate())
-                .on_hover_text(&context);
-            ui.add_space(4.);
-        }
+        let files = self.tower_file_count();
         ui.horizontal_wrapped(|ui| {
             for (tab, print, title) in [
-                (
-                    0,
-                    false,
-                    if self.combination_view {
-                        t(z, "搭建", "Build")
-                    } else {
-                        t(z, "编辑内容", "Edit")
-                    },
-                ),
+                (0, false, t(z, "搭建", "Build")),
                 (0, true, t(z, "打印清单", "Print list")),
                 (1, false, t(z, "零件库", "Parts library")),
             ] {
@@ -149,32 +117,26 @@ impl App {
                     title.into()
                 };
                 if ui.add(ui_style::choice_button(selected, title)).clicked() {
-                    self.tab = tab;
                     if tab == 0 {
-                        self.tower.print_list = print;
+                        self.open_project_tab(print, ctx);
+                    } else {
+                        self.tab = tab;
                     }
                 }
             }
         });
-        if self.tab == 0 && !self.tower.print_list && !self.combination_view {
-            ui.horizontal(|ui| {
-                ui.small(t(z, "内部收纳与标牌", "Inserts & labels"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            !self.bom.is_empty(),
-                            ui_style::quiet_button(t(z, "配色…", "Colors…")),
-                        )
-                        .clicked()
-                    {
-                        self.colors_open = true;
-                    }
-                });
-            });
-        } else if self.tab == 2 {
+        if self.tab == 2 {
             ui.strong(t(z, "装配说明", "Manuals"));
         }
         ui.separator();
+    }
+
+    pub(super) fn open_project_tab(&mut self, print: bool, ctx: &egui::Context) {
+        if !self.combination_view && !self.members.is_empty() {
+            self.show_combination(ctx);
+        }
+        self.tab = 0;
+        self.tower.print_list = print;
     }
 
     pub(super) fn editor_context(&self) -> String {
@@ -192,82 +154,6 @@ impl App {
         } else {
             member.name.clone()
         }
-    }
-
-    pub(super) fn member_footer_panel(&mut self, ui: &mut egui::Ui) {
-        egui::TopBottomPanel::bottom("member-summary")
-            .frame(ui_style::panel_frame(
-                ui.style(),
-                egui::Margin {
-                    top: 8,
-                    ..Default::default()
-                },
-            ))
-            .show_inside(ui, |ui| {
-                let z = self.zh;
-                ui.separator();
-                let items: Vec<_> = self
-                    .bom
-                    .iter()
-                    .filter(|b| {
-                        b.enabled
-                            && (self.active_drawer.is_none()
-                                || !crate::catalog::tower::housing(&b.path))
-                    })
-                    .collect();
-                let files = items.len();
-                let copies: u32 = items.iter().map(|b| b.qty).sum();
-                ui.small(format!(
-                    "{} · {files} {} / {copies} {}",
-                    t(z, "当前内容", "Current contents"),
-                    t(z, "种 STL", "STL types"),
-                    t(z, "份", "copies")
-                ));
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button(if self.tower.print_list {
-                            t(z, "查看打印板", "Preview plates")
-                        } else {
-                            t(z, "打印清单 →", "Print list →")
-                        })
-                        .clicked()
-                    {
-                        self.tab = 0;
-                        if self.tower.print_list {
-                            self.preview_modes.mode = preview_modes::Mode::Plates;
-                        } else {
-                            self.tower.print_list = true;
-                        }
-                    }
-                    if ui
-                        .add_enabled(
-                            files > 0,
-                            ui_style::primary_button(t(z, "导出当前模块…", "Export module…")),
-                        )
-                        .clicked()
-                    {
-                        self.commit_member();
-                        self.export_scope = workflow::ExportScope::Current;
-                        self.export_open = true;
-                    }
-                });
-                if self.active_drawer.is_some() {
-                    ui.small(t(
-                        z,
-                        "模块导出包含共用外壳及同模块的其他抽屉。",
-                        "Module export includes the shared housing and its other drawers.",
-                    ));
-                }
-                if self.busy || self.preview.has_pending() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.small(t(z, "预览更新中…", "Updating preview…"));
-                    });
-                } else if !self.status.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(&self.status).small()).truncate())
-                        .on_hover_text(&self.status);
-                }
-            });
     }
 
     pub(super) fn stage_controls(&mut self, ctx: &egui::Context, rect: egui::Rect) {
@@ -325,7 +211,11 @@ impl App {
                             )))
                             .clicked()
                     {
-                        self.assembly(ctx);
+                        if !self.combination_view && !self.members.is_empty() {
+                            self.open_project_tab(self.tower.print_list, ctx);
+                        } else {
+                            self.assembly(ctx);
+                        }
                     }
                 });
             });

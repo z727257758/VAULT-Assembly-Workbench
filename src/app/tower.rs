@@ -1794,7 +1794,7 @@ impl App {
             .len()
     }
 
-    fn tower_footer(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    fn tower_footer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         if !self.tower.error.is_empty() {
             ui.colored_label(ui.visuals().error_fg_color, &self.tower.error);
@@ -1843,11 +1843,10 @@ impl App {
                 })
                 .clicked()
             {
-                self.tab = 0;
-                if self.tower.print_list {
+                let show_plates = self.tower.print_list;
+                self.open_project_tab(true, ctx);
+                if show_plates {
                     self.preview_modes.mode = preview_modes::Mode::Plates;
-                } else {
-                    self.tower.print_list = true;
                 }
             }
             if ui
@@ -1895,7 +1894,7 @@ impl App {
                 .bom
                 .iter_mut()
                 .filter(|b| housing.is_none_or(|h| crate::catalog::tower::housing(&b.path) == h));
-            let edits = print_list::rows(ui, items, &p.selection, z, None);
+            let edits = print_list::rows(ui, items, &p.selection, z);
             if let Some((path, enabled, qty)) = edits.toggle {
                 let inserts = (p.assembly_kind == AssemblyKind::Drawer)
                     .then_some((&mut p.divider_layout, &mut p.gridfinity));
@@ -2296,6 +2295,21 @@ impl App {
             if [3, 13, 16].contains(&self.smoke_stage) && self.inline_edit.open {
                 return Err("Inline editor did not close when leaving configuration".into());
             }
+            if workspace_smoke {
+                match self.smoke_stage {
+                    17 if self.tab != 1 || self.scene.assembly || self.combination_view => {
+                        return Err("Parts library did not show the selected STL".into());
+                    }
+                    18 if self.tab != 0
+                        || !self.tower.print_list
+                        || !self.combination_view
+                        || self.scene_key != "combination" =>
+                    {
+                        return Err("Returning from the parts library did not restore the project print list and assembly".into());
+                    }
+                    _ => {}
+                }
+            }
             if [19, 20].contains(&self.smoke_stage) {
                 let target = crate::scene::Target {
                     member: 3,
@@ -2525,10 +2539,11 @@ impl App {
             }
             16 => {
                 self.tab = 1;
+                self.open_asset(crate::label::PATH, ctx);
                 Ok(())
             }
             17 => {
-                self.tab = 0;
+                self.open_project_tab(true, ctx);
                 Ok(())
             }
             18 if workspace_smoke => {

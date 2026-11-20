@@ -316,65 +316,6 @@ impl App {
             self.commit_member();
         }
     }
-    pub(super) fn batch_member_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let z = self.zh;
-        ui.horizontal(|ui| {
-            if ui.small_button(t(z, "全选", "Select all")).clicked() {
-                self.member_selection = (0..self.members.len()).collect();
-            }
-            if ui
-                .small_button(t(z, "清除选择", "Clear selection"))
-                .clicked()
-            {
-                self.member_selection.clear();
-            }
-            ui.label(format!(
-                "{} {}",
-                self.member_selection.len(),
-                t(z, "个已勾选", "selected")
-            ));
-        });
-        if self.member_selection.is_empty() {
-            return;
-        }
-        ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
-            if ui
-                .button(t(
-                    z,
-                    "勾选成员跟随整体配色",
-                    "Selected: follow overall colors",
-                ))
-                .clicked()
-            {
-                self.batch_colors(true);
-            }
-            if ui
-                .button(t(
-                    z,
-                    "当前配色 → 勾选成员（一次性）",
-                    "Copy current colors to selected (once)",
-                ))
-                .clicked()
-            {
-                self.batch_colors(false);
-            }
-            ui.small(t(
-                z,
-                "一次性复制保留用途配色；单独零件覆盖仅匹配相同源文件。",
-                "One-time copy keeps role colors; per-part overrides match identical sources only.",
-            ));
-            if ui
-                .add_enabled(
-                    self.member_selection.len() < self.members.len(),
-                    crate::ui_style::danger_button(t(z, "删除勾选成员", "Delete selected members")),
-                )
-                .clicked()
-            {
-                let indices: Vec<_> = self.member_selection.iter().copied().collect();
-                self.remove_members(&indices, ctx);
-            }
-        });
-    }
     pub(super) fn batch_colors(&mut self, follow: bool) {
         if self.member_selection.is_empty() {
             return;

@@ -269,8 +269,7 @@ impl App {
             return Err("The editor motion target changed".into());
         }
         let goal = self
-            .motion_goals(&selected)
-            .toggle
+            .motion_toggle_goal(&selected)
             .ok_or("Editor motion button is disabled")?;
         self.animate_joint_to(&selected.child, goal, ctx)
     }
@@ -371,7 +370,7 @@ impl App {
             match self.smoke_stage {
                 1 if lid.value != 0.
                     || !(0.01..0.99).contains(&lid.latch)
-                    || self.motion_goals(&lid).toggle != Some(lid.min) =>
+                    || self.motion_toggle_goal(&lid) != Some(lid.min) =>
                 {
                     return Err("Lid release must allow immediate reversal before lifting".into());
                 }
@@ -502,7 +501,7 @@ impl App {
                         return Err("Rejected motion changed the scene".into());
                     }
                     self.tower_edit_slot(0, None, ctx);
-                    if self.motion_goals(&lid).toggle.is_some() {
+                    if self.motion_toggle_goal(&lid).is_some() {
                         return Err("Supporting lid offered an opening action".into());
                     }
                     if self.animate_latch_to(&lid.child, true, ctx).is_ok() {

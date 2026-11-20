@@ -106,46 +106,6 @@ fn dimensions((lo, hi): (Vec3, Vec3)) -> String {
     format!("{:.1} × {:.1} × {:.1} mm", s.x, s.z, s.y)
 }
 impl App {
-    pub(super) fn combination_dimensions(&self, ui: &mut egui::Ui) {
-        ui.separator();
-        if self.scene_key != "combination" || self.busy || self.preview.has_pending() {
-            ui.small(t(
-                self.zh,
-                "正在计算源模型尺寸…",
-                "Measuring source geometry…",
-            ));
-            return;
-        }
-        if let Some(&bounds) = self.scene.member_bounds.get(self.active_member) {
-            ui.label(t(
-                self.zh,
-                "所选对象 · 宽 × 深 × 高",
-                "Selected · W × D × H",
-            ));
-            ui.strong(dimensions(bounds));
-        }
-        if !self.scene.member_bounds.is_empty() {
-            let lo = self
-                .scene
-                .member_bounds
-                .iter()
-                .map(|v| v.0)
-                .fold(Vec3::splat(f32::INFINITY), Vec3::min);
-            let hi = self
-                .scene
-                .member_bounds
-                .iter()
-                .map(|v| v.1)
-                .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
-            ui.label(t(self.zh, "组合闭合外形", "Overall closed envelope"));
-            ui.strong(dimensions((lo, hi)));
-        }
-        ui.small(t(
-            self.zh,
-            "闭盖外形包含配件及已显示的五金示意；单位 mm。",
-            "Closed-lid envelope includes accessories and displayed hardware schematics; units mm.",
-        ));
-    }
     pub(super) fn apply_spatial_move(
         &mut self,
         source: usize,
