@@ -321,7 +321,10 @@ mod constraint_integration_tests {
             .iter()
             .position(|p| p.pose.path.contains("Runner Guide"))
             .unwrap();
-        assert_eq!(s.parts[guide].pose.position, positions[guide]);
+        assert!(
+            glam::Vec3::from(s.parts[guide].pose.position)
+                .abs_diff_eq(positions[guide].into(), 0.002)
+        );
         let slide = s
             .parts
             .iter()

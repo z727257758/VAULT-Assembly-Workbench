@@ -147,7 +147,9 @@ pub(crate) fn layout_drawer(scene: &mut Scene) -> Result<(), String> {
             } else if n.contains("Runner Stopper") {
                 -local_front * 55.
             } else if n.contains("Runner Guide") {
-                front * (depth + 15.) - local_front * 65.
+                // A driven guide now inherits the drawer's forward extraction.
+                // Its exploded position still clears the housing by depth + 15.
+                front * (depth + 15. - inherited.dot(front)) - local_front * 65.
             } else if n.contains("Runner Slide") {
                 front * 55. - local_front * 35.
             } else if p.pose.path.contains("/Geared Rails/") {

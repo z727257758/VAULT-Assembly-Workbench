@@ -1,11 +1,43 @@
 //! Drawer Assembly steps 4, 6, 9–11. Standard (non-XL) runner seats.
 use crate::{
-    constraints::{self, Relation},
-    scene::Scene,
+    constraints::{self, Joint, PartId, Relation},
+    scene::{Part, Scene},
 };
 use glam::{Quat, Vec3};
 
 pub const STOPPER_SEAT: &str = "Manual step 11: stopper / measured housing side port";
+
+/// Leave a small preview clearance before rigid contact at either end of travel.
+const END_CLEARANCE: f32 = 0.2;
+
+/// Probe from inside a gap between a moving, forward-facing shoulder and its stop.
+/// The two source meshes share their installed transforms, including the side of the drawer.
+fn axial_clearance(moving: &Part, stop: &Part, origin: Vec3) -> Result<f32, String> {
+    let mut pair = Scene {
+        parts: vec![moving.clone(), stop.clone()],
+        ..Default::default()
+    };
+    for part in &mut pair.parts {
+        part.visible = true;
+    }
+    let face_z = |index: usize, direction| {
+        let hit = pair.pick(origin, direction, 0.)?;
+        (hit.part == index).then(|| {
+            pair.parts[index]
+                .pose
+                .matrix(0.)
+                .transform_point3(hit.point)
+                .z
+        })
+    };
+    let back = face_z(0, -Vec3::Z).ok_or("Moving runner shoulder not recognized")?;
+    let front = face_z(1, Vec3::Z).ok_or("Runner travel stop not recognized")?;
+    let clearance = front - back - END_CLEARANCE;
+    if clearance <= 0. || !clearance.is_finite() {
+        return Err("No usable runner travel between the measured stops".into());
+    }
+    Ok(clearance)
+}
 
 fn stopper_port(
     scene: &Scene,
@@ -120,7 +152,8 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
         .filter(|(_, p)| p.pose.path.contains("/Runners/") && !p.pose.path.contains("/XL Runners/"))
         .map(|(i, _)| i)
         .collect();
-    for i in items {
+    let mut guides = Vec::new();
+    for &i in &items {
         let p = &scene.parts[i];
         let name = p.pose.path.rsplit('/').next().unwrap_or("");
         let track_y = box_y
@@ -133,6 +166,7 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
             1.
         };
         let (parent, x, z, label) = if name.contains("Runner Guide") {
+            guides.push(i);
             (
                 module,
                 side * (half_width + 7.3),
@@ -170,6 +204,67 @@ pub fn apply(scene: &mut Scene, module: usize, drawer: usize) -> Result<(), Stri
         relation.label = label.into();
         scene.relations.retain(|r| r.child != relation.child);
         constraints::add(scene, relation)?;
+    }
+    let mut max_travel = f32::INFINITY;
+    for guide in guides {
+        let part = &scene.parts[guide];
+        let instance = part.pose.instance;
+        let paired = |name: &str| {
+            items.iter().map(|&i| &scene.parts[i]).find(|p| {
+                p.pose.instance == instance
+                    && p.pose
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|n| n.contains(name))
+            })
+        };
+        let (Some(slide), Some(stopper)) = (paired("Runner Slide"), paired("Runner Stopper"))
+        else {
+            // Keep the housing seat when a partial BOM lacks an actual stop to measure.
+            continue;
+        };
+        let [x, y, z] = part.pose.position;
+        let side = x.signum();
+        // Standard profiles are common to all depths. The first section passes through the
+        // short rear slide flange and the guide's front channel shoulder. The second cuts
+        // through the rounded slot edge and the stopper nose projecting through the housing.
+        let inner_travel = axial_clearance(
+            slide,
+            part,
+            Vec3::new(side * (half_width + 3.30), y + 7.78, z),
+        )?;
+        let outer_travel = axial_clearance(
+            part,
+            stopper,
+            Vec3::new(side * (half_width + 9.05), y - 3.47, z),
+        )?;
+        let mut relation = Relation::fixed(scene, drawer, guide, false)?;
+        let Joint::Fixed { position, rotation } = relation.joint else {
+            unreachable!()
+        };
+        relation.joint = Joint::RunnerGuide {
+            position,
+            rotation,
+            inner_travel,
+            outer_travel,
+        };
+        relation.label = "Manual steps 6, 9–11: telescoping runner guide".into();
+        scene.relations.retain(|r| r.child != relation.child);
+        constraints::add(scene, relation)?;
+        max_travel = max_travel.min(inner_travel + outer_travel);
+    }
+    if max_travel.is_finite() {
+        let id = PartId::of(&scene.parts[drawer]);
+        let Some(Joint::Slider { max, .. }) = scene
+            .relations
+            .iter_mut()
+            .find(|r| r.child == id)
+            .map(|r| &mut r.joint)
+        else {
+            return Err("Telescopic guides require a drawer slider".into());
+        };
+        *max = max_travel;
     }
     Ok(())
 }
@@ -246,6 +341,7 @@ mod tests {
             ("M", "4F", 4),
             ("L", "2F", 7),
             ("M", "1F", 3),
+            ("S", "1F", 6),
             ("L", "1F", 3),
             ("S", "1F", 4),
             ("S", "1F", 7),
@@ -312,10 +408,10 @@ mod tests {
             }
             let before: Vec<_> = s.parts.iter().map(|p| p.pose.position).collect();
             for &i in &indices {
-                let parent = if s.parts[i].pose.path.contains("Runner Slide") {
-                    b
-                } else {
+                let parent = if s.parts[i].pose.path.ends_with("Stopper.stl") {
                     m
+                } else {
+                    b
                 };
                 assert!(
                     s.relations
@@ -381,7 +477,93 @@ mod tests {
                 }
             }
             let bid = constraints::PartId::of(&s.parts[b]);
-            for travel in [0., 25., 50.] {
+            let limits: Vec<_> = s
+                .relations
+                .iter()
+                .filter_map(|r| match r.joint {
+                    Joint::RunnerGuide {
+                        inner_travel,
+                        outer_travel,
+                        ..
+                    } => Some((r.child.clone(), inner_travel, outer_travel)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(limits.len(), levels * 2);
+            // The non-XL profiles share the transverse contact features across sizes.
+            // Actual measured shoulder and port positions still depend on track and depth.
+            let expected_inner = [65.11, 87.11, 108.11, 129.11, 150.11][usize::from(depth - 3)];
+            for (_, inner, outer) in &limits {
+                assert!(
+                    (inner + END_CLEARANCE - expected_inner).abs() < 0.15,
+                    "{width}{depth}/{height}: inner {inner}"
+                );
+                assert!(
+                    (outer + END_CLEARANCE - (84.9 + f32::from(depth - 3) * 21.)).abs() < 1.,
+                    "{width}{depth}/{height}: outer {outer}"
+                );
+            }
+            let inner = limits[0].1;
+            if (width, height, depth) == ("S", "1F", 3) {
+                let find = |name| {
+                    indices
+                        .iter()
+                        .map(|&i| &s.parts[i])
+                        .find(|p| p.pose.instance == 0 && p.pose.path.contains(name))
+                        .unwrap()
+                };
+                let guide = find("Runner Guide");
+                let slide = find("Runner Slide");
+                let stopper = find("Runner Stopper");
+                let (_, first, second) = limits
+                    .iter()
+                    .find(|(id, _, _)| *id == PartId::of(guide))
+                    .unwrap();
+                // Probe the full triangle surfaces independently of the two datum rays:
+                // the permitted travel stops short; one extra millimetre crosses the stop.
+                for (moving, fixed, travel) in [(slide, guide, *first), (guide, stopper, *second)] {
+                    for (extra, crosses) in [(0., false), (1., true)] {
+                        let mut pair = Scene {
+                            parts: vec![moving.clone(), fixed.clone()],
+                            ..Default::default()
+                        };
+                        pair.parts[0].pose.position[2] += travel + extra;
+                        assert_eq!(
+                            !crate::collision::check(&pair, 0.01)
+                                .unwrap()
+                                .pairs
+                                .is_empty(),
+                            crosses,
+                            "{} at {}",
+                            moving.pose.path,
+                            travel + extra
+                        );
+                    }
+                }
+            }
+            let max = limits
+                .iter()
+                .map(|(_, i, o)| i + o)
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                (constraints::AssemblyRules::mechanism_for_joint(&s, &bid)
+                    .unwrap()
+                    .max
+                    - max)
+                    .abs()
+                    < 0.002
+            );
+            for travel in [
+                0.,
+                25.,
+                inner - 1.,
+                inner,
+                inner + 1.,
+                max,
+                inner + 1.,
+                inner - 1.,
+                0.,
+            ] {
                 if let constraints::Joint::Slider { offset, .. } = &mut s
                     .relations
                     .iter_mut()
@@ -392,33 +574,47 @@ mod tests {
                     *offset = travel;
                 }
                 constraints::solve(&mut s).unwrap();
-                let mut parts = vec![s.parts[m].clone(), s.parts[b].clone()];
-                parts.extend(
-                    indices
-                        .iter()
-                        .filter(|&&i| !s.parts[i].pose.path.ends_with("Stopper.stl"))
-                        .map(|&i| s.parts[i].clone()),
-                );
-                let subset = Scene {
-                    parts,
-                    ..Default::default()
-                };
-                let report = crate::collision::check(&subset, 0.01).unwrap();
-                for p in &report.pairs {
-                    println!(
-                        "{width}{depth}/{height} {travel}: {} / {}",
-                        subset.parts[p.a].label(false),
-                        subset.parts[p.b].label(false)
+                assert!(Vec3::from(s.parts[m].pose.position).abs_diff_eq(before[m].into(), 0.002));
+                assert!((s.parts[b].pose.position[2] - before[b][2] - travel).abs() < 0.002);
+                if travel == 25. || travel == max {
+                    let mut parts = vec![s.parts[m].clone(), s.parts[b].clone()];
+                    parts.extend(
+                        indices
+                            .iter()
+                            .filter(|&&i| !s.parts[i].pose.path.ends_with("Stopper.stl"))
+                            .map(|&i| s.parts[i].clone()),
+                    );
+                    let subset = Scene {
+                        parts,
+                        ..Default::default()
+                    };
+                    let report = crate::collision::check(&subset, 0.01).unwrap();
+                    assert!(
+                        report.pairs.is_empty(),
+                        "{width}{depth}/{height} {travel}: {:?}",
+                        report
+                            .pairs
+                            .iter()
+                            .map(|pair| (
+                                subset.parts[pair.a].label(false),
+                                subset.parts[pair.b].label(false)
+                            ))
+                            .collect::<Vec<_>>()
                     );
                 }
-                assert!(report.pairs.is_empty());
                 for &i in &indices {
                     let delta = if s.parts[i].pose.path.contains("Runner Slide") {
                         travel
+                    } else if let Some((_, first, _)) = limits
+                        .iter()
+                        .find(|(id, _, _)| *id == PartId::of(&s.parts[i]))
+                    {
+                        (travel - first).max(0.)
                     } else {
                         0.
                     };
-                    assert!((s.parts[i].pose.position[2] - before[i][2] - delta).abs() < 0.002);
+                    let expected = Vec3::from(before[i]) + Vec3::Z * delta;
+                    assert!(Vec3::from(s.parts[i].pose.position).abs_diff_eq(expected, 0.002));
                 }
             }
             // Legacy tall assemblies only saved the lowest pair. New upper

@@ -1341,6 +1341,9 @@ impl App {
                 egui::CollapsingHeader::new(format!("{} · {}",index+1,child)).id_salt(("joint",index)).show(ui,|ui|{
                     ui.label(&r.label);ui.label(format!("{}: {}",t(z,"父件","Parent"),r.parent.path.rsplit('/').next().unwrap()));
                     match &mut r.joint {
+                        crate::constraints::Joint::RunnerGuide{inner_travel,outer_travel,..}=>{
+                            ui.label(format!("{} · {:.1} mm + {:.1} mm",t(z,"随抽屉两段伸出：内轨 / 中轨","Driven by drawer: inner / middle travel"),inner_travel,outer_travel));
+                        }
                         crate::constraints::Joint::Hinge{angle,min,max,..}=>{let mut value=*angle;if ui.add(egui::Slider::new(&mut value,*min..=*max).text(t(z,"转角 °","Angle °"))).changed(){motion=Some((r.child.clone(),value));}},
                         crate::constraints::Joint::Fixed{..}=>{ui.label(t(z,"固定 6 个自由度","All 6 DOFs fixed"));},
                         crate::constraints::Joint::Face{gap,..}=>{ui.horizontal(|ui|{ui.label(t(z,"面间隙 mm","Face gap mm"));changed|=ui.add(egui::DragValue::new(gap).speed(0.05).range(-10. ..=100.)).changed();});},
@@ -3523,27 +3526,25 @@ impl eframe::App for App {
                                 self.ghost = true;
                             }
                             9 => {
-                                for r in &mut self.scene.relations {
-                                    if r.child.path.contains("/Boxes/")
-                                        && let crate::constraints::Joint::Slider { offset, .. } =
-                                            &mut r.joint
-                                    {
-                                        *offset = 50.;
-                                    }
-                                }
-                                let _ = crate::constraints::solve(&mut self.scene);
+                                let drawer = crate::constraints::AssemblyRules::mechanism(
+                                    &self.scene,
+                                    crate::scene::Target {
+                                        member: 0,
+                                        drawer: None,
+                                    },
+                                )
+                                .expect("Runner smoke needs a drawer slider");
+                                crate::constraints::AssemblyRules::set_slider(
+                                    &mut self.scene,
+                                    &drawer.child,
+                                    drawer.max,
+                                )
+                                .expect("Open both runner stages");
                                 self.camera.fit(&self.scene, 0.);
                             }
                             10 => {
-                                for r in &mut self.scene.relations {
-                                    if r.child.path.contains("/Boxes/")
-                                        && let crate::constraints::Joint::Slider { offset, .. } =
-                                            &mut r.joint
-                                    {
-                                        *offset = 0.;
-                                    }
-                                }
-                                let _ = crate::constraints::solve(&mut self.scene);
+                                crate::constraints::AssemblyRules::close_drawers(&mut self.scene)
+                                    .expect("Return both runner stages to their closed datums");
                                 for p in &mut self.scene.parts {
                                     p.visible = p.pose.path.contains("/Modules/")
                                         || (p.pose.path.contains("/Runners/")

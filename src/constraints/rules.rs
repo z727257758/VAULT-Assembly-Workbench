@@ -77,12 +77,26 @@ impl AssemblyRules {
                     .iter()
                     .find(|p| PartId::of(p) == *child)
                     .ok_or("Drawer is unavailable")?;
-                (
-                    MotionKind::Drawer,
-                    0_f32.max(*min),
-                    max.min((part.source_size.y - Self::DRAWER_REAR_RETENTION).max(0.)),
-                    *offset,
-                )
+                let runner_limit = scene
+                    .relations
+                    .iter()
+                    .filter(|r| &r.parent == child)
+                    .filter_map(|r| {
+                        if let Joint::RunnerGuide {
+                            inner_travel,
+                            outer_travel,
+                            ..
+                        } = r.joint
+                        {
+                            Some(inner_travel + outer_travel)
+                        } else {
+                            None
+                        }
+                    })
+                    .reduce(f32::min);
+                let limit = runner_limit
+                    .unwrap_or_else(|| (part.source_size.y - Self::DRAWER_REAR_RETENTION).max(0.));
+                (MotionKind::Drawer, 0_f32.max(*min), max.min(limit), *offset)
             }
             Joint::Hinge {
                 min, max, angle, ..

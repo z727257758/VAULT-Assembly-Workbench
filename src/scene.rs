@@ -381,6 +381,104 @@ impl Scene {
         *self = candidate;
         Ok(())
     }
+    /// Convert the old guide/housing seats into closed guide/drawer seats. Both saved
+    /// transforms are in the same housing frame, even when the project was saved open.
+    fn legacy_runner_joints(
+        &self,
+        old: &Scene,
+    ) -> HashMap<crate::constraints::PartId, crate::constraints::Joint> {
+        use crate::constraints::{AssemblyRules, Joint, PartId};
+        let mut updates = HashMap::new();
+        for guide in &self.relations {
+            let Joint::RunnerGuide {
+                inner_travel,
+                outer_travel,
+                ..
+            } = guide.joint
+            else {
+                continue;
+            };
+            let Some(old_guide) = old
+                .relations
+                .iter()
+                .find(|r| r.child == guide.child && matches!(r.joint, Joint::Fixed { .. }))
+            else {
+                continue;
+            };
+            // For shared shells, identical source paths can occur in several drawers.
+            // Full graph identities match the exact driver, guide and housing.
+            let same_driver = |r: &&crate::constraints::Relation| {
+                r.child == guide.parent && r.parent == old_guide.parent
+            };
+            let Some(old_driver) = old.relations.iter().find(same_driver) else {
+                continue;
+            };
+            let Some(driver) = self.relations.iter().find(same_driver) else {
+                continue;
+            };
+            let Joint::Slider {
+                position,
+                rotation,
+                axis,
+                offset,
+                min,
+                max,
+            } = old_driver.joint
+            else {
+                continue;
+            };
+            let Joint::Slider {
+                max: measured_limit,
+                ..
+            } = driver.joint
+            else {
+                continue;
+            };
+            let Some(drawer) = self.parts.iter().find(|p| PartId::of(p) == driver.child) else {
+                continue;
+            };
+            if old.calibrated || !old_guide.label.ends_with("Subassembly attachment (verify)") {
+                let Ok(seat) = old_guide.joint.transform() else {
+                    continue;
+                };
+                let closed = Mat4::from_rotation_translation(
+                    Quat::from_array(rotation).normalize(),
+                    position.into(),
+                );
+                let (_, guide_rotation, guide_position) =
+                    (closed.inverse() * seat).to_scale_rotation_translation();
+                updates.insert(
+                    guide.child.clone(),
+                    Joint::RunnerGuide {
+                        position: guide_position.to_array(),
+                        rotation: guide_rotation.to_array(),
+                        inner_travel,
+                        outer_travel,
+                    },
+                );
+            }
+            updates.entry(driver.child.clone()).or_insert_with(|| {
+                let old_default =
+                    (drawer.source_size.y - AssemblyRules::DRAWER_REAR_RETENTION).max(0.);
+                let max = if (max - old_default).abs() < 0.001 {
+                    measured_limit
+                } else {
+                    max.clamp(0., measured_limit)
+                };
+                let min = min.clamp(0., max);
+                Joint::Slider {
+                    position,
+                    rotation,
+                    axis,
+                    min,
+                    max,
+                    offset: offset.clamp(min, max),
+                }
+            });
+        }
+        updates
+    }
+
     /// Keep edits for surviving parts while retaining default mates for new parts.
     pub fn retain_assembly_state(&mut self, old: &Scene) {
         use crate::constraints::PartId;
@@ -446,6 +544,14 @@ impl Scene {
                     })
             });
         let ids: Vec<_> = self.parts.iter().map(PartId::of).collect();
+        let mut runner_joints = self.legacy_runner_joints(old);
+        let runner_motion_changed = self.relations.iter().any(|r| {
+            matches!(r.joint, crate::constraints::Joint::RunnerGuide { .. })
+                && !old
+                    .relations
+                    .iter()
+                    .any(|saved| saved.child == r.child && saved.parent == r.parent)
+        });
         for part in &mut self.parts {
             if let Some(previous) = old.parts.iter().find(|p| PartId::of(p) == PartId::of(part)) {
                 let id = PartId::of(part);
@@ -507,6 +613,11 @@ impl Scene {
                 self.relations.push(relation.clone());
             }
         }
+        for relation in &mut self.relations {
+            if let Some(joint) = runner_joints.remove(&relation.child) {
+                relation.joint = joint;
+            }
+        }
         self.constraint_warning = crate::constraints::solve(self).err();
         // Sustainer explosion is derived from the restored assembled poses. Old
         // saved world-axis offsets must not replace the current display layout.
@@ -516,6 +627,7 @@ impl Scene {
         self.calibrated = old.calibrated
             && self.geometry_stamps() == old.geometry_stamps()
             && !layout_changed
+            && !runner_motion_changed
             && self.constraint_warning.is_none()
             && ids
                 .iter()
@@ -689,6 +801,112 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+    #[test]
+    fn saved_fixed_runner_seats_migrate_at_the_closed_datum_per_drawer() {
+        use crate::constraints::{AssemblyRules, Joint, PartId, Relation, solve};
+        let mut current = tiny_scene();
+        current.parts[0].pose.instance = MEMBER_STRIDE;
+        current.parts[0].pose.position = [184., 5., -20.];
+        current.parts[0].pose.rotation = [0., 30., 0.];
+        let housing = PartId::of(&current.parts[0]);
+        // A common shell and identical file paths exercise the persisted drawer namespaces.
+        let cases = [
+            (80., 100., 94., 80., 80.),
+            (120., 100., 70., 120., 70.),
+            (110., 55., 10., 55., 10.),
+        ];
+        for (index, &(limit, ..)) in cases.iter().enumerate() {
+            let mut drawer = current.parts[0].clone();
+            drawer.pose.instance = Target {
+                member: 1,
+                drawer: Some(index),
+            }
+            .instance(0);
+            drawer.pose.path = "parts/Boxes/drawer.stl".into();
+            drawer.source_size.y = 120.;
+            let mut guide = drawer.clone();
+            guide.pose.path = "parts/Runners/Runner Guide.stl".into();
+            let drawer_id = PartId::of(&drawer);
+            current.relations.extend([
+                Relation {
+                    parent: housing.clone(),
+                    child: drawer_id.clone(),
+                    label: format!("Member 2: {}", AssemblyRules::DRAWER_SLIDE),
+                    joint: Joint::Slider {
+                        position: [3., 50. * index as f32, 10.],
+                        rotation: Quat::from_rotation_y(0.7).to_array(),
+                        axis: [0., 0., 1.],
+                        min: 0.,
+                        max: limit,
+                        offset: 0.,
+                    },
+                },
+                Relation {
+                    parent: drawer_id,
+                    child: PartId::of(&guide),
+                    label: "Two-stage guide".into(),
+                    joint: Joint::RunnerGuide {
+                        position: [0.; 3],
+                        rotation: Quat::IDENTITY.to_array(),
+                        inner_travel: 25.,
+                        outer_travel: limit - 25.,
+                    },
+                },
+            ]);
+            current.parts.extend([drawer, guide]);
+        }
+        solve(&mut current).unwrap();
+        let mut old = current.clone();
+        let mut seats = Vec::new();
+        for (index, &(_, previous_max, previous_offset, ..)) in cases.iter().enumerate() {
+            let Joint::Slider { max, offset, .. } = &mut old.relations[2 * index].joint else {
+                unreachable!()
+            };
+            *max = previous_max;
+            *offset = previous_offset;
+            let guide = &mut old.relations[2 * index + 1];
+            guide.parent = housing.clone();
+            guide.label = format!("Drawer slot {} (estimated)", index + 1);
+            guide.joint = Joint::Fixed {
+                position: [17., 50. * index as f32 + 2., -3.],
+                rotation: Quat::from_rotation_x(0.2).to_array(),
+            };
+            seats.push(guide.joint.transform().unwrap());
+        }
+        solve(&mut old).unwrap();
+        old.calibrated = true;
+        let saved = toml::from_str(&toml::to_string(&old.definition()).unwrap()).unwrap();
+        let mut migrated = current.clone();
+        migrated.apply(&saved).unwrap();
+        assert!(!migrated.calibrated);
+        let frame = migrated.parts[0].pose.matrix(0.);
+        for (index, &(_, _, _, expected_max, expected_offset)) in cases.iter().enumerate() {
+            let driver = &migrated
+                .relations
+                .iter()
+                .find(|r| r.child == PartId::of(&migrated.parts[1 + index * 2]))
+                .unwrap()
+                .joint;
+            let Joint::Slider { offset, max, .. } = *driver else {
+                unreachable!()
+            };
+            assert_eq!((max, offset), (expected_max, expected_offset));
+            let guide = &migrated.parts[2 + index * 2];
+            let outer_offset = (offset - 25.).max(0.);
+            let expected = frame * Mat4::from_translation(Vec3::Z * outer_offset) * seats[index];
+            assert!(guide.pose.matrix(0.).abs_diff_eq(expected, 0.001));
+        }
+        // A subsequently verified two-stage assembly retains its calibration on reload.
+        migrated.calibrated = true;
+        current.apply(&migrated.definition()).unwrap();
+        assert!(current.calibrated);
+        // A saved part without its guide relation acquires a new estimated joint.
+        let mut incomplete = migrated.definition();
+        let missing_guide = PartId::of(&migrated.parts[2]);
+        incomplete.relations.retain(|r| r.child != missing_guide);
+        current.apply(&incomplete).unwrap();
+        assert!(!current.calibrated);
     }
     #[test]
     fn saved_invalid_poses_and_graphs_leave_the_scene_unchanged() {

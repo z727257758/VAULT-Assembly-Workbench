@@ -1,11 +1,13 @@
 use super::*;
-use crate::constraints::PartId;
+use crate::constraints::{Joint, PartId};
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
     meshes: Vec<usize>,
     bounds: Vec<(glam::Vec3, glam::Vec3)>,
     roots: Vec<(PartId, glam::Mat4)>,
+    runner_datums: HashMap<PartId, glam::Mat4>,
     error: Option<String>,
 }
 
@@ -60,6 +62,66 @@ impl App {
     fn smoke_mechanism(&self, member: usize, drawer: Option<usize>) -> Result<Mechanism, String> {
         AssemblyRules::mechanism(&self.scene, Target { member, drawer })
     }
+    fn check_shared_runners(&self) -> Result<(), String> {
+        let closed = &self.animation.smoke.runner_datums;
+        let drawers = [
+            self.smoke_mechanism(1, Some(0))?,
+            self.smoke_mechanism(1, Some(1))?,
+        ];
+        let mut guides = [0; 2];
+        let mut stoppers = 0;
+        for (id, datum) in closed {
+            let part = self
+                .scene
+                .parts
+                .iter()
+                .find(|p| PartId::of(p) == *id)
+                .ok_or("Shared-shell runner disappeared")?;
+            let distance = if id.path.ends_with("/Runner Stopper.stl") {
+                stoppers += 1;
+                0.
+            } else {
+                let slot = Target::of(part)
+                    .drawer
+                    .filter(|i| *i < drawers.len())
+                    .ok_or("Moving runner has no child drawer")?;
+                let drawer = &drawers[slot];
+                if id.path.contains("Runner Guide") {
+                    let joint = self
+                        .scene
+                        .relations
+                        .iter()
+                        .find(|r| r.child == *id && r.parent == drawer.child);
+                    let Some(Joint::RunnerGuide { inner_travel, .. }) = joint.map(|r| &r.joint)
+                    else {
+                        return Err("Guide is not constrained to its own drawer".into());
+                    };
+                    guides[slot] += 1;
+                    if *inner_travel <= 0. || *inner_travel >= drawer.max {
+                        return Err("Drawer cannot use both runner stages".into());
+                    }
+                    (drawer.value - inner_travel).max(0.)
+                } else {
+                    drawer.value
+                }
+            };
+            // This test project is an unrotated stack. Compare actual world transforms
+            // with the initial closed fixture, also after rebuilding the scene.
+            let expected = glam::Mat4::from_translation(glam::Vec3::Z * distance) * *datum;
+            if !part.pose.matrix(0.).abs_diff_eq(expected, 0.01) {
+                return Err(format!(
+                    "Stage {}: {} #{} did not follow its runner travel of {distance:.2} mm",
+                    self.smoke_stage, id.path, id.instance
+                ));
+            }
+        }
+        if guides != [2, 2] || stoppers != 4 {
+            return Err(format!(
+                "Expected two guides per drawer and four housing stops, found {guides:?} and {stoppers}"
+            ));
+        }
+        Ok(())
+    }
     fn smoke_toggle(&mut self, expected: &Mechanism, ctx: &egui::Context) -> Result<(), String> {
         let selected = AssemblyRules::mechanism(&self.scene, self.motion_target())?;
         if selected.child != expected.child {
@@ -94,6 +156,17 @@ impl App {
                 self.animation.smoke.meshes =
                     self.scene.parts.iter().map(|p| p.mesh_key()).collect();
                 self.animation.smoke.bounds = self.scene.member_bounds.clone();
+                self.animation.smoke.runner_datums = self
+                    .scene
+                    .parts
+                    .iter()
+                    .filter(|p| {
+                        Target::of(p).member == 1
+                            && (p.pose.path.contains("/Runners/")
+                                || p.pose.path.contains("/Boxes/"))
+                    })
+                    .map(|p| (PartId::of(p), p.pose.matrix(0.)))
+                    .collect();
                 self.animation.smoke.roots = self
                     .scene
                     .parts
@@ -107,6 +180,7 @@ impl App {
             {
                 self.advance_motion(0.05, ctx);
             }
+            self.check_shared_runners()?;
             if self.smoke_stage == 2 {
                 let m = self.smoke_mechanism(2, None)?;
                 if m.value < 30. {
@@ -328,10 +402,11 @@ impl App {
                         toml::from_str(&text).map_err(|e| e.to_string())?;
                     restored.validate(&self.catalog)?;
                     std::fs::write(folder.join("project.toml"), text).map_err(|e| e.to_string())?;
+                    self.restore_project(restored);
                     self.assembly(ctx);
                 }
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"),"PASS: staged lock release / lid opening / re-latching; independent shared-shell drawer extraction; fixed housings; view-aware suspension and reversal; support and travel rejection; unchanged mesh resources; closed dimensions; persisted lid/drawer endpoints after rebuild and TOML roundtrip. Motion is a constrained display preview, not CAD validation.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"),"PASS: staged lock release / lid opening / re-latching; independent shared-shell drawers with measured two-stage guide motion and fixed stoppers during extraction, return and rebuild; fixed housings; view-aware suspension and reversal; support and travel rejection; unchanged mesh resources; closed dimensions; persisted lid/drawer endpoints after rebuild and TOML roundtrip. Motion is a constrained display preview, not CAD validation.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

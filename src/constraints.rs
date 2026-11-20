@@ -49,6 +49,14 @@ pub enum Joint {
         min: f32,
         max: f32,
     },
+    /// Middle runner in its drawer's closed local frame. The parent slider is the
+    /// only input; neither stage stores a second, independently editable offset.
+    RunnerGuide {
+        position: [f32; 3],
+        rotation: [f32; 4],
+        inner_travel: f32,
+        outer_travel: f32,
+    },
     /// Closed child transform plus a pivot/axis in the parent's local frame.
     Hinge {
         position: [f32; 3],
@@ -220,6 +228,7 @@ fn quaternion(v: [f32; 4]) -> Result<Quat, String> {
     Ok(q.normalize())
 }
 impl Joint {
+    /// For a driven guide this returns its installation datum at zero drawer travel.
     pub fn transform(&self) -> Result<Mat4, String> {
         let (p, q) = match *self {
             Self::Fixed { position, rotation } => {
@@ -275,6 +284,21 @@ impl Joint {
                 }
                 (Vec3::from(position) + a * offset, quaternion(rotation)?)
             }
+            Self::RunnerGuide {
+                position,
+                rotation,
+                inner_travel,
+                outer_travel,
+            } => {
+                if !finite(position)
+                    || inner_travel <= 0.
+                    || outer_travel <= 0.
+                    || !(inner_travel + outer_travel).is_finite()
+                {
+                    return Err("Invalid two-stage runner datum or travel".into());
+                }
+                (Vec3::from(position), quaternion(rotation)?)
+            }
             Self::Hinge {
                 position,
                 rotation,
@@ -305,6 +329,34 @@ impl Joint {
             }
         };
         Ok(Mat4::from_rotation_translation(q, p))
+    }
+
+    fn solved_transform(&self, parent_joint: Option<&Joint>) -> Result<Mat4, String> {
+        let datum = self.transform()?;
+        let Self::RunnerGuide {
+            inner_travel,
+            outer_travel,
+            ..
+        } = self
+        else {
+            return Ok(datum);
+        };
+        let Some(Self::Slider {
+            axis,
+            rotation,
+            offset,
+            ..
+        }) = parent_joint
+        else {
+            return Err("A two-stage runner requires its drawer slider as parent".into());
+        };
+        if !(0. ..=inner_travel + outer_travel).contains(offset) {
+            return Err("Drawer travel exceeds a runner stop".into());
+        }
+        // As the parent drawer advances, cancel its first-stage travel in its
+        // own frame. After the slide shoulder catches, the guide follows it.
+        let axis_in_drawer = quaternion(*rotation)?.inverse() * Vec3::from(*axis);
+        Ok(Mat4::from_translation(-axis_in_drawer * offset.min(*inner_travel)) * datum)
     }
 }
 impl Relation {
@@ -422,15 +474,16 @@ pub fn solve(scene: &mut Scene) -> Result<(), String> {
         if parent == child || incoming[child].is_some() {
             return Err("A part may have only one parent and cannot constrain itself".into());
         }
-        incoming[child] = Some(parent);
-        edges.push((parent, child, r.joint.transform()?));
+        incoming[child] = Some(&r.joint);
+        edges.push((parent, child, &r.joint));
     }
     let mut poses: Vec<_> = scene.parts.iter().map(|p| p.pose.matrix(0.)).collect();
     let mut solved: HashSet<usize> = (0..count).filter(|i| incoming[*i].is_none()).collect();
     loop {
         let before = solved.len();
-        for &(parent, child, relative) in &edges {
+        for &(parent, child, joint) in &edges {
             if solved.contains(&parent) && !solved.contains(&child) {
+                let relative = joint.solved_transform(incoming[parent])?;
                 poses[child] = poses[parent] * relative;
                 solved.insert(child);
             }
@@ -483,7 +536,7 @@ pub fn rotate_subassembly(scene: &mut Scene, index: usize, rotation: Quat) -> Re
     if incoming.is_some_and(|i| {
         matches!(
             scene.relations[i].joint,
-            Joint::Slider { .. } | Joint::Hinge { .. }
+            Joint::Slider { .. } | Joint::Hinge { .. } | Joint::RunnerGuide { .. }
         )
     }) {
         return Err("Use the joint control to move a sliding or hinged subassembly".into());
