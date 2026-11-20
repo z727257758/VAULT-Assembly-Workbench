@@ -37,7 +37,6 @@ struct Entry {
 pub(super) struct State {
     pub(super) plan_rect: Option<Rect>,
     pub(super) done_rect: Option<Rect>,
-    inputs: VecDeque<Vec<Event>>,
     initial_layouts: Option<[Layout; 2]>,
     original_seat: Option<Vec3>,
     entry: Option<Entry>,
@@ -57,6 +56,36 @@ fn pointer(pos: Pos2, pressed: bool) -> Event {
 impl State {
     pub(super) fn observe_scene(&mut self, scene: &Scene, rect: Rect) {
         self.rendered = Some((scene.clone(), rect));
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Pointer {
+    inputs: VecDeque<Vec<Event>>,
+}
+
+impl Pointer {
+    pub(super) fn click(&mut self, pos: Pos2) {
+        self.inputs
+            .extend([vec![Event::PointerMoved(pos)], vec![pointer(pos, true)]]);
+        self.release(pos);
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        !self.inputs.is_empty()
+    }
+
+    pub(super) fn inject(&mut self, input: &mut RawInput) {
+        input.focused = true;
+        input.events.retain(|event| {
+            !matches!(
+                event,
+                Event::PointerMoved(_) | Event::PointerButton { .. } | Event::PointerGone
+            )
+        });
+        if let Some(events) = self.inputs.pop_front() {
+            input.events.extend(events);
+        }
     }
 
     fn drag(&mut self, start: Pos2, end: Pos2, release: bool) {
@@ -162,19 +191,6 @@ impl App {
             Ok(())
         })();
         self.bin_editor_smoke.error = setup.err();
-    }
-
-    pub(super) fn bin_editor_smoke_input(&mut self, input: &mut RawInput) {
-        input.focused = true;
-        input.events.retain(|event| {
-            !matches!(
-                event,
-                Event::PointerMoved(_) | Event::PointerButton { .. } | Event::PointerGone
-            )
-        });
-        if let Some(events) = self.bin_editor_smoke.inputs.pop_front() {
-            input.events.extend(events);
-        }
     }
 
     fn check_bin_smoke_layout(&mut self, cell: [u32; 2]) -> Result<(), String> {
@@ -509,7 +525,7 @@ impl App {
                             rect.height() * row / rows as f32,
                         )
                 };
-                self.bin_editor_smoke.drag(point(from), point(to), true);
+                self.editor_smoke_pointer.drag(point(from), point(to), true);
             }
             11 | 12 => {
                 let (from, to) = if stage == 11 {
@@ -528,7 +544,7 @@ impl App {
                     .bin_view
                     .project_cell(to)
                     .ok_or("Missing 3D drag endpoint")?;
-                self.bin_editor_smoke.drag(from, to, true);
+                self.editor_smoke_pointer.drag(from, to, true);
             }
             _ => {
                 std::fs::write(folder.join("smoke-result.txt"), "PASS: The build sidebar kept its width. The complete assembly showed only the selected drawer opening along its joint. The selected baseplate, bins and labels stayed opaque with exterior opacity at 30%, 20% and 50%. 3D and plan drags moved the same bin by two 42 mm steps. Overlap was rejected. At 1050 x 700 all cell centers fit the model view. Done restored the assembly opacities, camera and drawer extension at both sizes, with the edited layout retained. A vertical plan drag created a 1x2 bin and a diagonal 3D drag created a 2x2 bin at the expected sockets. Dragging its front edge in 3D resized it to 2x1 and dragging the plan edge restored 2x2. Mesh dimensions matched at each step, with the earlier bins and shared defaults retained.").map_err(|e| e.to_string())?;
@@ -553,7 +569,7 @@ impl App {
             {
                 return Err(format!("Stage {}: {}", self.smoke_stage, self.status));
             }
-            if !self.bin_editor_smoke.inputs.is_empty() || self.busy || self.preview.has_pending() {
+            if self.editor_smoke_pointer.pending() || self.busy || self.preview.has_pending() {
                 return Ok(());
             }
             if self.smoke_stage >= 10 {
@@ -701,26 +717,31 @@ impl App {
                         .bin_view
                         .project_cell([1.5, 0.5])
                         .ok_or("Missing 3D drag destination")?;
-                    self.bin_editor_smoke.drag(from, to, false);
+                    self.editor_smoke_pointer.drag(from, to, false);
                 }
                 1 => {
                     let to = self
                         .bin_view
                         .project_cell([1.5, 0.5])
                         .ok_or("Missing 3D drop position")?;
-                    self.bin_editor_smoke.release(to);
+                    self.editor_smoke_pointer.release(to);
                 }
                 2 => {
                     self.bin_exterior_opacity = 50;
-                    self.bin_editor_smoke
-                        .drag(plan_point(1.5, 0.5), plan_point(1.5, 1.5), true);
+                    self.editor_smoke_pointer.drag(
+                        plan_point(1.5, 0.5),
+                        plan_point(1.5, 1.5),
+                        true,
+                    );
                 }
-                3 => self
-                    .bin_editor_smoke
-                    .drag(plan_point(1.5, 1.5), plan_point(2.5, 2.5), false),
+                3 => self.editor_smoke_pointer.drag(
+                    plan_point(1.5, 1.5),
+                    plan_point(2.5, 2.5),
+                    false,
+                ),
                 4 => {
                     self.bin_exterior_opacity = 30;
-                    self.bin_editor_smoke.release(plan_point(2.5, 2.5));
+                    self.editor_smoke_pointer.release(plan_point(2.5, 2.5));
                 }
                 5 | 8 => {
                     let done = self
@@ -728,10 +749,7 @@ impl App {
                         .done_rect
                         .ok_or("Missing Done button")?
                         .center();
-                    self.bin_editor_smoke
-                        .inputs
-                        .extend([vec![Event::PointerMoved(done)], vec![pointer(done, true)]]);
-                    self.bin_editor_smoke.release(done);
+                    self.editor_smoke_pointer.click(done);
                 }
                 6 => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(NARROW)),
                 _ => {

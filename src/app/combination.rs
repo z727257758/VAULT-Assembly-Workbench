@@ -341,7 +341,8 @@ impl App {
         self.gridfinity_editor = Default::default();
         self.gridfinity_selected = None;
         self.divider_editor = Default::default();
-        self.sustainer_divider_editor = Default::default();
+        self.close_sustainer_divider_editor();
+        self.sustainer_divider_editor.reset();
         self.divider_view = None;
         self.assembly_view = None;
         self.selected = None;

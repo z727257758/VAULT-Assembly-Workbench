@@ -1,6 +1,26 @@
 use super::*;
 use crate::ui_style;
 
+pub(super) fn model_and_plan_rects(stage: egui::Rect) -> (egui::Rect, egui::Rect) {
+    let margin = (stage.width() * 0.016).clamp(6., 14.);
+    let space = stage.shrink(margin);
+    if space.width() < 440. && space.height() > space.width() {
+        let split = space.top() + space.height() * 0.45;
+        return (
+            egui::Rect::from_min_max(stage.min, egui::pos2(stage.right(), split - 4.)),
+            egui::Rect::from_min_max(egui::pos2(space.left(), split + 4.), space.max),
+        );
+    }
+    let width = (space.width() * 0.30)
+        .clamp(208., 328.)
+        .min(space.width() * 0.46);
+    let split = space.right() - width;
+    (
+        egui::Rect::from_min_max(stage.min, egui::pos2(split - 8., stage.bottom())),
+        egui::Rect::from_min_max(egui::pos2(split, space.top()), space.max),
+    )
+}
+
 impl App {
     pub(super) fn choose_library(&mut self, ctx: &egui::Context) {
         if self.busy {

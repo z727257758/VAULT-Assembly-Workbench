@@ -52,16 +52,7 @@ impl App {
         let mut draft = self.gridfinity.clone();
         let mut selected = self.gridfinity_selected;
         let mut close = false;
-        let stage = ui.max_rect();
-        let margin = (stage.width() * 0.016).clamp(6., 14.);
-        let space = stage.shrink(margin);
-        let width = (space.width() * 0.30)
-            .clamp(208., 328.)
-            .min(space.width() * 0.46);
-        let split = space.right() - width;
-        let model_rect =
-            egui::Rect::from_min_max(stage.min, egui::pos2(split - 8., stage.bottom()));
-        let card_rect = egui::Rect::from_min_max(egui::pos2(split, space.top()), space.max);
+        let (model_rect, card_rect) = workspace::model_and_plan_rects(ui.max_rect());
         let mut model = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt("bin-model")

@@ -117,6 +117,8 @@ impl Layout {
 #[derive(Clone, Default)]
 pub struct Geometry {
     pub specification: String,
+    /// Pose in which wall slots were measured, before the case is placed in a tower.
+    pub housing_pose: glam::Mat4,
     pub bounds: [f32; 4], // left, rear, right, front in assembly coordinates
     pub floor: f32,
     pub rows: Vec<f32>,
@@ -204,6 +206,7 @@ pub fn measure(scene: &Scene, s: &Selection, o: SustainerOptions) -> Result<Geom
     }
     Ok(Geometry {
         specification: spec(s, o),
+        housing_pose: matrix,
         bounds: [lo.x + 5., rear, hi.x - 5., front],
         floor,
         rows,
@@ -212,6 +215,38 @@ pub fn measure(scene: &Scene, s: &Selection, o: SustainerOptions) -> Result<Geom
     })
 }
 impl Geometry {
+    pub(crate) fn compartment_count(&self, layout: &Layout) -> usize {
+        self.lanes
+            .iter()
+            .enumerate()
+            .map(|(lane, &[left, right])| {
+                let rows = layout
+                    .items
+                    .iter()
+                    .filter(|p| p.axis == Axis::Width && p.lane == lane && p.slot < self.rows.len())
+                    .count();
+                let columns = layout
+                    .items
+                    .iter()
+                    .filter(|p| {
+                        p.axis == Axis::Depth
+                            && self
+                                .columns
+                                .get(p.slot)
+                                .is_some_and(|&x| x > left && x < right)
+                    })
+                    .count();
+                (rows + 1) * (columns + 1)
+            })
+            .sum()
+    }
+
+    pub fn slots(&self) -> impl Iterator<Item = Placement> + '_ {
+        (0..self.lanes.len())
+            .flat_map(|lane| self.choices(Axis::Width, lane))
+            .chain(self.choices(Axis::Depth, 0))
+    }
+
     pub fn choices(&self, axis: Axis, lane: usize) -> Vec<Placement> {
         (0..if axis == Axis::Width {
             self.rows.len()
@@ -340,6 +375,34 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_fixed_bays_and_intersecting_removable_dividers() {
+        let sealed = Geometry {
+            rows: vec![-20., 0., 20., 40.],
+            lanes: vec![[-60., -2.], [2., 60.]],
+            ..Default::default()
+        };
+        let mut layout = Layout::default();
+        assert_eq!(sealed.compartment_count(&layout), 2);
+        layout.items = (0..2)
+            .flat_map(|lane| sealed.choices(Axis::Width, lane))
+            .collect();
+        assert_eq!(sealed.compartment_count(&layout), 10);
+        layout.items.pop();
+        assert_eq!(sealed.compartment_count(&layout), 9);
+
+        let grid = Geometry {
+            rows: vec![-20., 20.],
+            columns: vec![-30., 30.],
+            lanes: vec![[-60., 60.]],
+            ..Default::default()
+        };
+        layout.items = grid.choices(Axis::Width, 0);
+        layout.items.extend(grid.choices(Axis::Depth, 0));
+        assert_eq!(grid.compartment_count(&layout), 9);
+    }
+
     #[test]
     fn layout_rejects_duplicate_slots_and_preserves_roof_independence() {
         let s = Selection::default();

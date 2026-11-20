@@ -1,203 +1,389 @@
-use crate::{
-    catalog::{Catalog, Selection, SustainerOptions},
-    sustainer_dividers::{self as dividers, Axis, Geometry, Layout, Placement},
-};
-use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+//! Plan view of the same measured wall slots and placements used in the 3D editor.
+use crate::sustainer_dividers::{Axis, Geometry, Layout, Placement};
+use eframe::egui::{self, Pos2, Rect, Stroke, Vec2};
 
 #[derive(Default)]
 pub struct Editor {
     pub open: bool,
     pub selected: Option<usize>,
-    axis: Axis,
-    lane: usize,
-    add_mode: bool,
+    pub(crate) plan_rect: Option<Rect>,
+    pub(crate) error: Option<String>,
     undo: Vec<Layout>,
     redo: Vec<Layout>,
-    drag: Option<Layout>,
-    error: String,
+    drag: Option<(usize, Layout)>,
 }
+
+fn remember(history: &mut Vec<Layout>, layout: Layout) {
+    if history.len() == 100 {
+        history.remove(0);
+    }
+    history.push(layout);
+}
+
 impl Editor {
+    pub(crate) fn close(&mut self, layout: &Layout) {
+        if let Some((_, before)) = self.drag.take()
+            && before != *layout
+        {
+            remember(&mut self.undo, before);
+            self.redo.clear();
+        }
+        self.open = false;
+        self.plan_rect = None;
+        self.error = None;
+    }
+
     pub fn reset(&mut self) {
-        let open = self.open;
         *self = Self {
-            open,
+            open: self.open,
             ..Default::default()
         };
     }
-    fn commit(&mut self, layout: &mut Layout, next: Layout) -> bool {
+
+    fn replace(&mut self, layout: &mut Layout, next: Layout) -> bool {
         if *layout == next {
             return false;
         }
-        let mut unique = std::collections::BTreeSet::new();
-        if next.items.iter().any(|p| !unique.insert(p)) {
-            self.error = "同一槽位已有隔板".into();
-            return false;
-        }
-        self.undo.push(layout.clone());
-        if self.undo.len() > 100 {
-            self.undo.remove(0);
-        }
+        remember(&mut self.undo, std::mem::replace(layout, next));
         self.redo.clear();
-        *layout = next;
-        self.error.clear();
+        self.selected = None;
+        self.drag = None;
         true
     }
-    fn nearest(g: &Geometry, axis: Axis, lane: usize, point: [f32; 2]) -> Option<Placement> {
-        g.choices(axis, lane).into_iter().min_by(|a, b| {
-            let distance = |p: &Placement| {
-                let line = g.line(p).unwrap();
-                let k = usize::from(axis == Axis::Width);
-                (line[0][k] - point[k]).abs()
-            };
-            distance(a).total_cmp(&distance(b))
-        })
-    }
-    pub fn show(
+
+    pub(crate) fn toggle_slot(
         &mut self,
-        ctx: &egui::Context,
-        c: &Catalog,
-        s: &Selection,
-        o: SustainerOptions,
-        geometry: Option<&Geometry>,
         layout: &mut Layout,
+        g: &Geometry,
+        slot: Placement,
     ) -> bool {
-        if !self.open {
+        if g.line(&slot).is_none()
+            || (slot.axis == Axis::Depth && slot.lane != 0)
+            || (!layout.items.is_empty() && layout.specification != g.specification)
+        {
             return false;
         }
-        let mut open = true;
+        let mut next = layout.clone();
+        next.specification.clone_from(&g.specification);
+        let selected = if let Some(i) = next.items.iter().position(|p| *p == slot) {
+            next.items.remove(i);
+            None
+        } else {
+            next.items.push(slot);
+            Some(next.items.len() - 1)
+        };
+        self.replace(layout, next);
+        self.selected = selected;
+        true
+    }
+
+    fn history(&mut self, layout: &mut Layout, redo: bool) -> bool {
+        let (from, to) = if redo {
+            (&mut self.redo, &mut self.undo)
+        } else {
+            (&mut self.undo, &mut self.redo)
+        };
+        let Some(previous) = from.pop() else {
+            return false;
+        };
+        remember(to, std::mem::replace(layout, previous));
+        self.selected = None;
+        self.drag = None;
+        true
+    }
+
+    fn presets(&mut self, ui: &mut egui::Ui, layout: &mut Layout, g: &Geometry, zh: bool) -> bool {
         let mut changed = false;
-        egui::Window::new("箱子隔板配置 · 壁槽定位").id(egui::Id::new("sustainer-divider-editor"))
-            .default_pos([24.,95.]).default_size([660.,630.]).min_width(580.).open(&mut open).show(ctx,|ui| {
-            let Some(g)=geometry.filter(|g|g.specification==dividers::spec(s,o)) else {
-                ui.label("正在读取当前箱体的槽位，请等待装配预览完成。"); return;
+        ui.menu_button(if zh { "预设" } else { "Presets" }, |ui| {
+            let mut option = |title: &str, items: Vec<Placement>| {
+                if ui.button(title).clicked() {
+                    changed |= self.replace(
+                        layout,
+                        Layout {
+                            specification: g.specification.clone(),
+                            items,
+                        },
+                    );
+                    ui.close();
+                }
             };
-            ui.label(format!("{}{} / {} · {} 排横槽 · {} 个内部区域",s.width,s.depth,s.height,g.rows.len(),g.lanes.len()));
-            ui.label("点击槽位添加隔板；选中后可拖动吸附到其他槽位。虚线表示可用槽位。");
-            ui.small("型号和高度随箱体匹配，数量自动加入打印清单。位置来自源模型槽位测量，尚未实物确认。");
-            ui.small("装配前请按说明书第 6 页移除槽内手动支撑；预览保留原始支撑，表面检查可能提示相交。");
-            ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.undo.is_empty(),egui::Button::new("撤销")).clicked() {
-                    self.redo.push(layout.clone());*layout=self.undo.pop().unwrap();self.selected=None;changed=true;self.error.clear();
-                }
-                if ui.add_enabled(!self.redo.is_empty(),egui::Button::new("重做")).clicked() {
-                    self.undo.push(layout.clone());*layout=self.redo.pop().unwrap();self.selected=None;changed=true;self.error.clear();
-                }
-                if ui.add_enabled(!layout.items.is_empty(),crate::ui_style::danger_button("清空隔板")).clicked() {
-                    changed|=self.commit(layout,Layout{specification:dividers::spec(s,o),..Default::default()});self.selected=None;
-                }
-                ui.label(format!("共 {} 块",layout.items.len()));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut self.axis,Axis::Width,"横向隔板");
-                if !g.columns.is_empty() {ui.selectable_value(&mut self.axis,Axis::Depth,"纵向隔板");}
-                else {self.axis=Axis::Width;}
-                self.lane=self.lane.min(g.lanes.len().saturating_sub(1));
-                if self.axis==Axis::Width && g.lanes.len()>1 {
-                    ui.label("区域");
-                    for lane in 0..g.lanes.len() {ui.selectable_value(&mut self.lane,lane,format!("{}",lane+1));}
-                }
-                if ui.add(crate::ui_style::primary_button("添加隔板")).clicked() {
-                    let choices=g.choices(self.axis,self.lane);
-                    let center=(choices.len().saturating_sub(1)) as f32/2.;
-                    if let Some(p)=choices.into_iter().filter(|p|!layout.items.contains(p)).min_by(|a,b|((a.slot as f32-center).abs()).total_cmp(&(b.slot as f32-center).abs())) {
-                        let mut next=layout.clone();next.specification=dividers::spec(s,o);next.items.push(p);
-                        if self.commit(layout,next) {self.selected=Some(layout.items.len()-1);changed=true;}
-                    } else {self.error="此方向 / 区域的槽位已全部占用".into();}
-                }
-                ui.toggle_value(&mut self.add_mode,"点击放置");
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("填满当前方向 / 区域").clicked() {
-                    let mut next=layout.clone();next.specification=dividers::spec(s,o);
-                    for p in g.choices(self.axis,self.lane) {if !next.items.contains(&p){next.items.push(p);}}
-                    changed|=self.commit(layout,next);
-                }
-                if ui.add_enabled(self.selected.is_some_and(|i|i<layout.items.len()),crate::ui_style::danger_button("删除选中")).clicked() {
-                    let mut next=layout.clone();next.items.remove(self.selected.take().unwrap());changed|=self.commit(layout,next);
-                }
-            });
-            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(),48.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                ui.set_min_height(48.);
-                if let Some(i)=self.selected.filter(|i|*i<layout.items.len()) {
-                    let p=&layout.items[i];
-                    let name=c.sustainer_divider(s,o,p.axis,p.lane).unwrap_or_default();
-                    ui.label(format!("#{} · 槽位 {} · 区域 {}",i+1,p.slot+1,p.lane+1));
-                    ui.add(egui::Label::new(egui::RichText::new(name.rsplit('/').next().unwrap_or("")).small()).truncate());
-                } else {ui.label("选择模式：点击选中隔板，拖动更换槽位。");}
-            });
-            let hint=if self.error.is_empty() {if self.add_mode {"放置模式：点击虚线槽位添加，Esc 退出。"}else{"关闭编辑器后恢复完整箱体视图。"}}else{&self.error};
-            let color = if self.error.is_empty() { ui.visuals().weak_text_color() } else { ui.visuals().error_fg_color };
-            ui.add(egui::Label::new(egui::RichText::new(hint).color(color)).truncate()).on_hover_text(hint);
-            if ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.add_mode=false;}
-            let (canvas,response)=ui.allocate_exact_size(Vec2::new(ui.available_width(),ui.available_height().clamp(280.,440.)),egui::Sense::click_and_drag());
-            let size=Vec2::new(g.bounds[2]-g.bounds[0],g.bounds[3]-g.bounds[1]);
-            let scale=((canvas.width()-60.)/size.x).min((canvas.height()-60.)/size.y);
-            let origin=canvas.center()-size*scale/2.;
-            let screen=|p:[f32;2]|origin+Vec2::new(p[0]-g.bounds[0],p[1]-g.bounds[1])*scale;
-            let rect=Rect::from_min_size(origin,size*scale);
-            let paint=ui.painter();
-            paint.rect_filled(rect,3.,Color32::from_rgb(32,43,52));
-            paint.rect_stroke(rect,3.,Stroke::new(2.,Color32::GRAY),egui::StrokeKind::Inside);
-            let caption_color = ui.visuals().text_color();
-            paint.text(rect.center_top()-Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("后部 · {:.1} mm",size.x),egui::FontId::proportional(13.),caption_color);
-            paint.text(rect.center_bottom()+Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("面板侧 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),caption_color);
-            for lane in g.lanes.windows(2) {
-                paint.rect_filled(Rect::from_min_max(screen([lane[0][1],g.bounds[1]]),screen([lane[1][0],g.bounds[3]])),0.,Color32::GRAY);
+            option(if zh { "留空" } else { "Empty" }, Vec::new());
+            option(
+                if zh { "居中横分" } else { "Center row" },
+                g.slots()
+                    .filter(|p| {
+                        p.axis == Axis::Width && p.slot == g.rows.len().saturating_sub(1) / 2
+                    })
+                    .collect(),
+            );
+            option(
+                if zh { "填满横槽" } else { "All rows" },
+                g.slots().filter(|p| p.axis == Axis::Width).collect(),
+            );
+            if !g.columns.is_empty() {
+                option(
+                    if zh { "填满纵槽" } else { "All columns" },
+                    g.choices(Axis::Depth, 0),
+                );
+                option(
+                    if zh { "纵横网格" } else { "Full grid" },
+                    g.slots().collect(),
+                );
             }
-            let line_screen=|p:&Placement|g.line(p).map(|l|[screen(l[0]),screen(l[1])]);
-            for axis in [Axis::Width,Axis::Depth] {
-                for lane in 0..if axis==Axis::Width {g.lanes.len()}else{1} {
-                    for p in g.choices(axis,lane) {
-                        if let Some(line)=line_screen(&p) {
-                            paint.add(egui::Shape::dashed_line(&line,Stroke::new(1.,Color32::from_gray(90)),5.,4.));
-                        }
-                    }
-                }
-            }
-            let distance=|p:Pos2,line:[Pos2;2]|{
-                let d=line[1]-line[0];let t=((p-line[0]).dot(d)/d.length_sq()).clamp(0.,1.);
-                (p-(line[0]+d*t)).length()
-            };
-            let mut hit=None;
-            for (i,p) in layout.items.iter().enumerate() {
-                if let Some(line)=line_screen(p) {
-                    let color=if self.selected==Some(i){Color32::from_rgb(244,173,70)}else{Color32::from_rgb(66,180,180)};
-                    paint.line_segment(line,Stroke::new(4.,color));
-                    paint.text(line[0]+(line[1]-line[0])*0.22,egui::Align2::CENTER_BOTTOM,format!("#{}",i+1),egui::FontId::proportional(12.),color);
-                    if response.interact_pointer_pos().is_some_and(|pos|distance(pos,line)<9.) {hit=Some(i);}
-                }
-            }
-            let candidate=response.hover_pos().filter(|p|rect.contains(*p)).and_then(|pos|{
-                let p=(pos-origin)/scale+Vec2::new(g.bounds[0],g.bounds[1]);
-                let lane=g.lanes.iter().position(|l|(l[0]..=l[1]).contains(&p.x)).unwrap_or(self.lane);
-                Self::nearest(g,self.axis,lane,[p.x,p.y])
-            });
-            if self.add_mode && let Some(p)=&candidate && let Some(line)=line_screen(p) {
-                paint.line_segment(line,Stroke::new(4.,if layout.items.contains(p){Color32::LIGHT_RED}else{Color32::LIGHT_GREEN}));
-            }
-            if response.clicked() {
-                if self.add_mode {
-                    if let Some(p)=candidate {let mut next=layout.clone();next.specification=dividers::spec(s,o);next.items.push(p);if self.commit(layout,next){self.selected=Some(layout.items.len()-1);changed=true;}}
-                } else {self.selected=hit;}
-            }
-            if !self.add_mode && response.drag_started() {
-                let pressed=ctx.input(|i|i.pointer.press_origin());
-                self.selected=pressed.and_then(|pos|layout.items.iter().enumerate().filter_map(|(i,p)|line_screen(p).map(|line|(i,distance(pos,line)))).filter(|(_,d)|*d<9.).min_by(|a,b|a.1.total_cmp(&b.1)).map(|(i,_)|i));
-                self.drag=self.selected.map(|_|layout.clone());
-            }
-            if response.dragged() && let (Some(i),Some(baseline),Some(pos))=(self.selected,self.drag.as_ref(),response.interact_pointer_pos()) {
-                let raw=(pos-origin)/scale+Vec2::new(g.bounds[0],g.bounds[1]);
-                let old=&baseline.items[i];
-                let lane=g.lanes.iter().position(|l|(l[0]..=l[1]).contains(&raw.x)).unwrap_or(old.lane);
-                if let Some(p)=Self::nearest(g,old.axis,lane,[raw.x,raw.y]) {
-                    if layout.items.iter().enumerate().all(|(j,item)|j==i || *item!=p) {
-                        if layout.items[i]!=p {layout.items[i]=p;changed=true;}self.error.clear();
-                    } else {self.error="目标槽位已有隔板".into();}
-                }
-            }
-            if response.drag_stopped() && let Some(old)=self.drag.take() && old!=*layout {self.undo.push(old);self.redo.clear();}
         });
-        self.open = open;
+        changed
+    }
+
+    // Partial fills add to the current layout. This also works for a sealed case
+    // whose separate bays take different divider parts in the same numbered row.
+    fn fill_bay(&mut self, ui: &mut egui::Ui, layout: &mut Layout, g: &Geometry, zh: bool) -> bool {
+        let mut changed = false;
+        ui.menu_button(if zh { "补齐槽位" } else { "Fill slots" }, |ui| {
+            let mut fill = |axis, lane, title: String| {
+                let free: Vec<_> = g
+                    .choices(axis, lane)
+                    .into_iter()
+                    .filter(|p| !layout.items.contains(p))
+                    .collect();
+                if ui
+                    .add_enabled(!free.is_empty(), egui::Button::new(title))
+                    .clicked()
+                {
+                    let mut next = layout.clone();
+                    next.specification.clone_from(&g.specification);
+                    next.items.extend(free);
+                    changed = self.replace(layout, next);
+                    ui.close();
+                }
+            };
+            for lane in 0..g.lanes.len() {
+                let title = if g.lanes.len() == 1 {
+                    if zh {
+                        "补齐横槽".into()
+                    } else {
+                        "Fill remaining rows".into()
+                    }
+                } else if zh {
+                    format!("补齐区域 {} 横槽", lane + 1)
+                } else {
+                    format!("Fill rows in bay {}", lane + 1)
+                };
+                fill(Axis::Width, lane, title);
+            }
+            if !g.columns.is_empty() {
+                fill(
+                    Axis::Depth,
+                    0,
+                    if zh {
+                        "补齐纵槽".into()
+                    } else {
+                        "Fill remaining columns".into()
+                    },
+                );
+            }
+        });
+        changed
+    }
+
+    pub(crate) fn panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        geometry: Option<&Geometry>,
+        layout: &mut Layout,
+        zh: bool,
+    ) -> bool {
+        let Some(g) = geometry else {
+            self.plan_rect = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                ui.label(if zh {
+                    "正在读取箱体槽位…"
+                } else {
+                    "Reading case slots…"
+                });
+            });
+            return false;
+        };
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            changed |= self.presets(ui, layout, g, zh);
+            let n = layout.items.len();
+            let cells = g.compartment_count(layout);
+            ui.weak(if zh {
+                format!("{n} 块隔板 · {cells} 格")
+            } else {
+                format!("{n} dividers · {cells} compartments")
+            });
+        });
+        changed |= self.canvas(ui, layout, g, zh);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.undo.is_empty(),
+                    egui::Button::new(if zh { "撤销" } else { "Undo" }),
+                )
+                .clicked()
+            {
+                changed |= self.history(layout, false);
+            }
+            if ui
+                .add_enabled(
+                    !self.redo.is_empty(),
+                    egui::Button::new(if zh { "重做" } else { "Redo" }),
+                )
+                .clicked()
+            {
+                changed |= self.history(layout, true);
+            }
+            if g.lanes.len() > 1 || !g.columns.is_empty() {
+                changed |= self.fill_bay(ui, layout, g, zh);
+            }
+        });
+        ui.weak(if zh {
+            "点击槽位装上或取下隔板。在简图中拖动隔板可换槽。"
+        } else {
+            "Click a slot to add or remove a divider. Drag a divider in the plan to move it."
+        });
+        changed
+    }
+
+    fn canvas(&mut self, ui: &mut egui::Ui, layout: &mut Layout, g: &Geometry, zh: bool) -> bool {
+        let size = Vec2::new(g.bounds[2] - g.bounds[0], g.bounds[3] - g.bounds[1]);
+        let width = ui.available_width().max(1.);
+        let scale = (width / size.x).min(300. / size.y);
+        let (space, response) = ui.allocate_exact_size(
+            Vec2::new(width, size.y * scale + 22.),
+            egui::Sense::click_and_drag(),
+        );
+        let rect = Rect::from_min_size(
+            space.center_top() - Vec2::new(size.x * scale * 0.5, 0.),
+            size * scale,
+        );
+        self.plan_rect = Some(rect);
+        let screen =
+            |p: [f32; 2]| rect.min + Vec2::new(p[0] - g.bounds[0], p[1] - g.bounds[1]) * scale;
+        let line = |slot: &Placement| g.line(slot).map(|ends| ends.map(screen));
+        let candidates: Vec<_> = g.slots().collect();
+        let nearest = |pos: Pos2, axis: Option<Axis>| {
+            if !rect.contains(pos) {
+                return None;
+            }
+            candidates
+                .iter()
+                .filter(|p| axis.is_none_or(|a| a == p.axis))
+                .filter_map(|p| {
+                    let [start, end] = line(p)?;
+                    if p.axis == Axis::Width && !(start.x..=end.x).contains(&pos.x) {
+                        return None;
+                    }
+                    let segment = end - start;
+                    let factor = ((pos - start).dot(segment) / segment.length_sq()).clamp(0., 1.);
+                    let distance = pos.distance(start + segment * factor);
+                    (distance <= 8.).then_some((p, distance))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(slot, _)| slot.clone())
+        };
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let source = ui
+                .input(|i| i.pointer.press_origin())
+                .and_then(|pos| nearest(pos, None));
+            self.selected = source.and_then(|p| layout.items.iter().position(|item| *item == p));
+            self.drag = self.selected.map(|index| (index, layout.clone()));
+        }
+        let primary = egui::PointerButton::Primary;
+        let hover = response
+            .hover_pos()
+            .or_else(|| response.interact_pointer_pos())
+            .and_then(|pos| {
+                nearest(
+                    pos,
+                    self.drag
+                        .as_ref()
+                        .map(|(i, baseline)| baseline.items[*i].axis),
+                )
+            });
+        let mut changed = false;
+        if response.clicked_by(primary)
+            && let Some(p) = hover.as_ref()
+        {
+            changed = self.toggle_slot(layout, g, p.clone());
+        }
+        if let Some((index, baseline)) = &self.drag {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape) || !i.focused) {
+                changed = layout != baseline;
+                layout.clone_from(baseline);
+                self.drag = None;
+            } else if let Some(p) = &hover
+                && layout.items.get(*index).is_some_and(|item| item != p)
+                && !layout.items.contains(p)
+            {
+                layout.items[*index] = p.clone();
+                changed = true;
+            }
+        }
+        if response.drag_stopped()
+            && let Some((index, before)) = self.drag.take()
+            && before != *layout
+        {
+            if layout.items.get(index) == hover.as_ref() {
+                remember(&mut self.undo, before);
+                self.redo.clear();
+            } else {
+                *layout = before;
+                changed = true;
+            }
+        }
+        let visuals = ui.visuals();
+        let paint = ui.painter();
+        paint.rect_filled(rect, 5., visuals.faint_bg_color);
+        for walls in g.lanes.windows(2) {
+            paint.rect_filled(
+                Rect::from_min_max(
+                    screen([walls[0][1], g.bounds[1]]),
+                    screen([walls[1][0], g.bounds[3]]),
+                ),
+                1.,
+                visuals.widgets.inactive.bg_stroke.color,
+            );
+        }
+        for p in &candidates {
+            let Some(segment) = line(p) else { continue };
+            let index = layout.items.iter().position(|item| item == p);
+            let pointed = hover.as_ref() == Some(p);
+            if index.is_some() || pointed {
+                let selected = index.is_some() && index == self.selected;
+                let color = if pointed && index.is_some() && self.drag.is_some() && !selected {
+                    visuals.error_fg_color
+                } else if pointed || selected {
+                    visuals.hyperlink_color
+                } else {
+                    visuals.text_color()
+                };
+                paint.line_segment(
+                    segment,
+                    Stroke::new(if index.is_some() { 4. } else { 2. }, color),
+                );
+            } else {
+                paint.add(egui::Shape::dashed_line(
+                    &segment,
+                    Stroke::new(1., visuals.widgets.inactive.bg_stroke.color),
+                    4.,
+                    4.,
+                ));
+            }
+        }
+        paint.rect_stroke(rect, 5., visuals.window_stroke, egui::StrokeKind::Inside);
+        paint.text(
+            rect.center_bottom() + Vec2::new(0., 11.),
+            egui::Align2::CENTER_CENTER,
+            if zh { "前" } else { "Front" },
+            egui::TextStyle::Small.resolve(ui.style()),
+            visuals.weak_text_color(),
+        );
+        if hover.is_some() {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
         changed
     }
 }
@@ -205,107 +391,116 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn pointer_add_duplicate_drag_and_history_use_wall_slots() {
-        let g = Geometry {
-            specification: dividers::spec(&Selection::default(), SustainerOptions::default()),
+
+    fn two_bays() -> Geometry {
+        Geometry {
+            specification: "test-two-bays".into(),
             bounds: [-50., -60., 50., 60.],
-            floor: 0.,
             rows: vec![-30., 0., 30.],
-            columns: vec![],
-            lanes: vec![[-50., 50.]],
-        };
-        let s = Selection::default();
-        let o = SustainerOptions::default();
-        let c = Catalog {
-            root: Default::default(),
-            entries: vec![],
-        };
-        let mut layout = Layout {
-            specification: g.specification.clone(),
+            lanes: vec![[-50., -2.], [2., 50.]],
             ..Default::default()
-        };
-        let mut editor = Editor {
-            open: true,
-            add_mode: true,
-            ..Default::default()
-        };
+        }
+    }
+
+    fn row(lane: usize, slot: usize) -> Placement {
+        Placement {
+            axis: Axis::Width,
+            slot,
+            lane,
+        }
+    }
+
+    #[test]
+    fn both_views_toggle_the_same_layout_and_reject_unmeasured_slots() {
+        let g = two_bays();
+        let mut e = Editor::default();
+        let mut l = Layout::default();
+        assert!(e.toggle_slot(&mut l, &g, row(0, 0)));
+        assert!(e.toggle_slot(&mut l, &g, row(1, 0)));
+        assert!(!e.toggle_slot(&mut l, &g, row(2, 0)));
+        assert!(!e.toggle_slot(&mut l, &g, row(0, 3)));
+        assert!(e.toggle_slot(&mut l, &g, row(0, 0)));
+        assert_eq!(l.items, [row(1, 0)]);
+        assert!(e.history(&mut l, false));
+        assert_eq!(l.items, [row(0, 0), row(1, 0)]);
+        assert!(e.history(&mut l, true));
+        assert_eq!(l.items, [row(1, 0)]);
+        l.specification = "other-size".into();
+        assert!(!e.toggle_slot(&mut l, &g, row(1, 0)));
+    }
+
+    #[test]
+    fn actual_plan_pointer_toggles_drags_and_leaves_the_fixed_wall_alone() {
         let ctx = egui::Context::default();
-        let mut style = (*ctx.style()).clone();
-        style.animation_time = 0.;
-        ctx.set_style(style);
+        let g = two_bays();
+        let mut e = Editor::default();
+        let mut l = Layout::default();
         let mut time = 0.;
-        let mut frame = |events: Vec<egui::Event>, editor: &mut Editor, layout: &mut Layout| {
+        let mut frame = |events, e: &mut Editor, l: &mut Layout| {
             time += 1. / 60.;
-            let output = ctx.run(
+            let _ = ctx.run(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1500., 1100.))),
-                    time: Some(time),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420., 640.))),
                     events,
+                    time: Some(time),
                     ..Default::default()
                 },
                 |ctx| {
-                    editor.show(ctx, &c, &s, o, Some(&g), layout);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        e.panel(ui, Some(&g), l, true);
+                    });
                 },
             );
-            output
-                .shapes
-                .into_iter()
-                .find_map(|shape| match shape.shape {
-                    egui::Shape::Rect(r) if r.fill == Color32::from_rgb(32, 43, 52) => Some(r.rect),
-                    _ => None,
-                })
         };
-        let mut canvas = None;
-        for _ in 0..6 {
-            canvas = frame(vec![], &mut editor, &mut layout);
-        }
-        let canvas = canvas.unwrap();
-        let point = |row: usize| {
-            Pos2::new(
-                canvas.center().x,
-                canvas.top() + (g.rows[row] + 60.) / 120. * canvas.height(),
-            )
-        };
-        let click = |p: Pos2, pressed: bool| egui::Event::PointerButton {
-            pos: p,
+        frame(vec![], &mut e, &mut l);
+        frame(vec![], &mut e, &mut l);
+        let rect = e.plan_rect.unwrap();
+        let point = |x: f32, y: f32| rect.min + rect.size() * Vec2::new(x, y);
+        let click = |pos, pressed| egui::Event::PointerButton {
+            pos,
             button: egui::PointerButton::Primary,
             pressed,
             modifiers: Default::default(),
         };
-        for (row, count) in [(0, 1), (0, 1), (1, 2)] {
-            let p = point(row);
-            frame(vec![egui::Event::PointerMoved(p)], &mut editor, &mut layout);
-            for pressed in [true, false] {
-                frame(vec![click(p, pressed)], &mut editor, &mut layout);
-            }
-            let after = frame(vec![], &mut editor, &mut layout).unwrap();
-            assert_eq!(layout.items.len(), count);
-            assert!(
-                (canvas.min - after.min).length() < 0.1,
-                "row={row} before={canvas:?} after={after:?}"
+        let from = point(0.25, 0.25);
+        let to = point(0.75, 0.75);
+        for (pos, expected) in [(point(0.5, 0.25), 0), (from, 1), (from, 0), (from, 1)] {
+            frame(
+                vec![egui::Event::PointerMoved(pos), click(pos, true)],
+                &mut e,
+                &mut l,
             );
+            frame(vec![click(pos, false)], &mut e, &mut l);
+            assert_eq!(l.items.len(), expected);
+            assert_eq!(e.plan_rect, Some(rect));
         }
-        editor.add_mode = false;
-        let start = point(0);
-        let end = point(2);
         frame(
-            vec![egui::Event::PointerMoved(start), click(start, true)],
-            &mut editor,
-            &mut layout,
+            vec![egui::Event::PointerMoved(from), click(from, true)],
+            &mut e,
+            &mut l,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut e, &mut l);
+        frame(vec![click(to, false)], &mut e, &mut l);
+        assert_eq!(l.items, [row(1, 2)]);
+        assert!(e.history(&mut l, false));
+        assert_eq!(l.items, [row(0, 0)]);
+        assert!(e.toggle_slot(&mut l, &g, row(1, 2)));
+        let original = l.clone();
+        let history = e.undo.len();
+        frame(
+            vec![egui::Event::PointerMoved(from), click(from, true)],
+            &mut e,
+            &mut l,
         );
         frame(
-            vec![egui::Event::PointerMoved(end)],
-            &mut editor,
-            &mut layout,
+            vec![egui::Event::PointerMoved(point(0.25, 0.5))],
+            &mut e,
+            &mut l,
         );
-        frame(vec![click(end, false)], &mut editor, &mut layout);
-        assert_eq!(layout.items[0].slot, 2);
-        assert_eq!(editor.undo.last().unwrap().items[0].slot, 0);
-        let before = layout.clone();
-        let mut next = layout.clone();
-        next.items[0] = next.items[1].clone();
-        assert!(!editor.commit(&mut layout, next));
-        assert_eq!(layout, before);
+        assert_eq!(l.items[0], row(0, 1));
+        frame(vec![egui::Event::PointerMoved(to)], &mut e, &mut l);
+        frame(vec![click(to, false)], &mut e, &mut l);
+        assert_eq!(l, original);
+        assert_eq!(e.undo.len(), history);
     }
 }

@@ -4,6 +4,9 @@ mod bin_editor_smoke;
 mod bin_view;
 mod bin_workspace;
 mod combination;
+mod divider_editor_smoke;
+mod divider_view;
+mod divider_workspace;
 mod exterior_smoke;
 mod inline_edit;
 mod large_stl_smoke;
@@ -200,6 +203,7 @@ pub struct App {
     member_selection: std::collections::BTreeSet<usize>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     sustainer_divider_editor: crate::sustainer_divider_editor::Editor,
+    divider_model: divider_view::State,
     sustainer_layout_cache: BTreeMap<String, crate::sustainer_dividers::Layout>,
     assembly_kind: AssemblyKind,
     sustainer_options: SustainerOptions,
@@ -212,6 +216,8 @@ pub struct App {
     bin_exterior_opacity: u32,
     bin_view: bin_view::State,
     bin_editor_smoke: bin_editor_smoke::State,
+    editor_smoke_pointer: bin_editor_smoke::Pointer,
+    divider_editor_smoke: divider_editor_smoke::State,
     gridfinity_editor: crate::gridfinity_editor::Editor,
     gridfinity_selected: Option<u32>,
     gridfinity_error: Option<String>,
@@ -362,6 +368,8 @@ impl App {
             bin_exterior_opacity: 30,
             bin_view: Default::default(),
             bin_editor_smoke: Default::default(),
+            editor_smoke_pointer: Default::default(),
+            divider_editor_smoke: Default::default(),
             gridfinity_editor: Default::default(),
             gridfinity_selected: None,
             gridfinity_error: None,
@@ -374,6 +382,7 @@ impl App {
             divider_editor: Default::default(),
             sustainer_dividers: Default::default(),
             sustainer_divider_editor: Default::default(),
+            divider_model: Default::default(),
             sustainer_layout_cache: Default::default(),
             divider_view: None,
             layout_cache: Default::default(),
@@ -987,6 +996,9 @@ impl App {
                     if self.smoke && std::env::args().any(|a| a == "--smoke-bin-editor") {
                         self.setup_bin_editor_smoke(ctx);
                     }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-divider-editor") {
+                        self.setup_divider_editor_smoke(ctx);
+                    }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
                     }
@@ -1142,12 +1154,17 @@ impl App {
                         && self.scene_key != "combination"
                         && crate::sustainer::lid_angle(&s).is_some()
                     {
+                        let lid_moved = !preserve
+                            || crate::sustainer::lid_angle(&self.scene)
+                                .is_none_or(|angle| (angle - self.sustainer_angle).abs() > 0.001);
                         if let Err(e) =
                             crate::sustainer::set_lid_angle(&mut s, self.sustainer_angle)
                         {
                             self.status = e;
                         }
-                        self.camera.fit(&s, self.explosion);
+                        if lid_moved {
+                            self.camera.fit(&s, self.explosion);
+                        }
                     }
                     if s.assembly
                         && self.scene_key != "combination"
@@ -1456,7 +1473,7 @@ impl App {
                         );
                         if before != after {
                             self.divider_editor.open=false;
-                            self.sustainer_divider_editor.open=false;
+                            self.close_sustainer_divider_editor();
                             let mut old=self.bom.clone();
                             if before.4!=self.assembly_kind {
                                 std::mem::swap(&mut self.label,&mut self.other_label);
@@ -1764,7 +1781,7 @@ impl App {
         scene
     }
     fn interior_editor_open(&self) -> bool {
-        self.divider_editor.open || self.sustainer_divider_editor.open
+        self.divider_editor.open
     }
     fn divider_view(&mut self, ctx: &egui::Context) {
         if self.scene_key == "combination" {
@@ -2129,6 +2146,12 @@ impl App {
                     self.bin_workspace(ui);
                     return;
                 }
+                if self.sustainer_divider_editor.open
+                    && self.assembly_kind == AssemblyKind::Sustainer
+                {
+                    self.sustainer_divider_workspace(ui);
+                    return;
+                }
                 self.stage_controls(ctx, ui.max_rect());
                 self.inline_editor_ui(ctx, ui.max_rect());
                 if self.preview_modes_ui(ui, ctx) {
@@ -2285,25 +2308,7 @@ impl App {
                         &self.camera,
                         ViewOptions {
                             explosion: self.explosion,
-                            selected: if self.sustainer_divider_editor.open {
-                                self.sustainer_divider_editor
-                                    .selected
-                                    .and_then(|i| {
-                                        self.sustainer_dividers.selected_part(
-                                            i,
-                                            &self.catalog,
-                                            &self.selection,
-                                            self.sustainer_options,
-                                        )
-                                    })
-                                    .and_then(|(path, instance)| {
-                                        self.scene.parts.iter().position(|p| {
-                                            p.pose.path == path
-                                                && p.pose.instance
-                                                    == self.local_scene_instance(instance)
-                                        })
-                                    })
-                            } else if self.interior_editor_open() {
+                            selected: if self.interior_editor_open() {
                                 self.divider_editor
                                     .selected_part(&self.divider_layout)
                                     .and_then(|(path, instance)| {
@@ -2885,8 +2890,15 @@ impl App {
 }
 impl eframe::App for App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
-        if self.smoke && std::env::args().any(|arg| arg == "--smoke-bin-editor") {
-            self.bin_editor_smoke_input(input);
+        if self.smoke
+            && std::env::args().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--smoke-bin-editor" | "--smoke-divider-editor"
+                )
+            })
+        {
+            self.editor_smoke_pointer.inject(input);
         }
         if self.smoke && std::env::args().any(|arg| arg == "--smoke-color-groups") {
             self.color_groups_smoke_input(input);
@@ -2908,6 +2920,9 @@ impl eframe::App for App {
         self.workspace_toolbar(ctx);
         self.left(ctx);
         if self.tab != 0 || self.tower.print_list || self.preview_modes.special() {
+            if self.sustainer_divider_editor.open {
+                self.close_sustainer_divider_editor();
+            }
             if self.gridfinity_open {
                 self.close_bin_editor();
             }
@@ -2954,16 +2969,6 @@ impl eframe::App for App {
         self.combination_spec_window(ctx);
         self.exterior_window(ctx);
         self.label_window(ctx);
-        if self.sustainer_divider_editor.show(
-            ctx,
-            &self.catalog,
-            &self.selection,
-            self.sustainer_options,
-            self.scene.interior_geometry(self.active_member),
-            &mut self.sustainer_dividers,
-        ) {
-            self.assembly(ctx);
-        }
         if self.divider_editor.show(
             ctx,
             &self.catalog,
@@ -3007,6 +3012,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-bin-editor") {
             self.bin_editor_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-divider-editor") {
+            self.divider_editor_smoke(ctx);
             return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
@@ -3325,8 +3334,8 @@ impl eframe::App for App {
                                         _ => "L",
                                     }
                                     .into(),
-                                    depth: 3,
-                                    height: "1F".into(),
+                                    depth: if self.smoke_stage == 49 { 5 } else { 3 },
+                                    height: if self.smoke_stage == 49 { "2F" } else { "1F" }.into(),
                                     hidden_key: false,
                                 };
                                 self.sustainer_options = SustainerOptions {
@@ -3344,7 +3353,7 @@ impl eframe::App for App {
                                     _ => 1,
                                 };
                                 for lane in 0..lanes {
-                                    for slot in 0..if self.smoke_stage == 49 { 2 } else { 3 } {
+                                    for slot in 0..if self.smoke_stage == 49 { 4 } else { 3 } {
                                         items.push(crate::sustainer_dividers::Placement {
                                             axis: crate::sustainer_dividers::Axis::Width,
                                             slot,

@@ -260,6 +260,9 @@ impl App {
             if self.gridfinity_open {
                 self.close_bin_editor();
             }
+            if self.sustainer_divider_editor.open {
+                self.close_sustainer_divider_editor();
+            }
             self.inline_edit.pending_focus = true;
             self.inline_edit.path = None;
             ctx.request_repaint();
@@ -563,7 +566,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(self.sustainer_dividers.items.len().to_string());
                         if ui.button(t(z, "配置…", "Configure…")).clicked() {
-                            self.sustainer_divider_editor.open = true;
+                            self.open_sustainer_divider_editor(ctx);
                         }
                         if ui
                             .add_enabled(
