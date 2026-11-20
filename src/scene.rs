@@ -1,6 +1,7 @@
 pub mod drawers;
 mod exterior;
 pub mod layouts;
+pub(crate) mod print_bed;
 mod target;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
 use glam::{Mat4, Quat, Vec3};

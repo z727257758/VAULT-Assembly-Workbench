@@ -138,6 +138,22 @@ struct Outline {
     origin: D2,
 }
 impl Outline {
+    fn glyph(
+        &mut self,
+        face: &ttf_parser::Face<'_>,
+        id: ttf_parser::GlyphId,
+        ch: char,
+        size: f64,
+    ) -> Result<(), String> {
+        self.scale = size / f64::from(face.units_per_em());
+        let before = self.paths.len();
+        face.outline_glyph(id, self);
+        if self.paths.len() == before && !ch.is_whitespace() {
+            return Err(format!("字符没有可用轮廓：{ch}"));
+        }
+        self.origin.x += f64::from(face.glyph_hor_advance(id).unwrap_or(0)) * self.scale;
+        Ok(())
+    }
     fn point(&self, x: f32, y: f32) -> D2 {
         D2::new(
             x as f64 * self.scale + self.origin.x,
@@ -150,6 +166,22 @@ impl Outline {
     fn push(&mut self, p: D2) {
         self.paths.last_mut().unwrap().push(p);
     }
+}
+/// Unrotated outlines in millimetres for lettering printed on a flat surface.
+pub(crate) fn line_outlines(
+    face: &ttf_parser::Face<'_>,
+    text: &str,
+    size: f64,
+) -> Option<Vec<Vec<D2>>> {
+    let mut out = Outline {
+        paths: Vec::new(),
+        scale: 1.,
+        origin: D2::new(0., 0.),
+    };
+    for ch in text.chars() {
+        out.glyph(face, face.glyph_index(ch)?, ch, size).ok()?;
+    }
+    Some(out.paths)
 }
 impl ttf_parser::OutlineBuilder for Outline {
     fn move_to(&mut self, x: f32, y: f32) {
@@ -260,13 +292,7 @@ fn text_polygons_in_area(
                     fallback.glyph_index(ch).map(|id| (fallback, id))
                 })
                 .ok_or_else(|| format!("当前字体不包含字符：{ch}"))?;
-            out.scale = config.size as f64 / glyph_face.units_per_em() as f64;
-            let before = out.paths.len();
-            glyph_face.outline_glyph(id, &mut out);
-            if out.paths.len() == before && !ch.is_whitespace() {
-                return Err(format!("字符没有可用轮廓：{ch}"));
-            }
-            out.origin.x += glyph_face.glyph_hor_advance(id).unwrap_or(0) as f64 * out.scale;
+            out.glyph(glyph_face, id, ch, f64::from(config.size))?;
         }
         rows.push(first..out.paths.len());
         let mut lo = f64::INFINITY;

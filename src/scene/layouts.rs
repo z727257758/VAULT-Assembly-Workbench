@@ -1,7 +1,6 @@
 //! Read-only presentation layouts; never applied to assembly definitions.
 use super::{MEMBER_STRIDE, Part, Pose, Scene};
 use glam::{Quat, Vec3};
-use std::sync::Arc;
 
 fn member_band(lo: Vec3) -> i32 {
     (lo.y * 2.).round() as i32
@@ -144,6 +143,7 @@ impl Scene {
 }
 
 pub struct Plate {
+    pub textured: bool,
     pub number: usize,
     pub origin: [f32; 2],
     pub name: String,
@@ -193,6 +193,7 @@ impl PrintLayout {
             slots.sort_unstable();
             slots.dedup();
             self.plates.push(Plate {
+                textured: config.textured,
                 number,
                 origin: [0.; 2],
                 name: name.into(),
@@ -258,20 +259,20 @@ impl PrintLayout {
             part.pose.position[0] += plate.origin[0];
             part.pose.position[2] -= plate.origin[1];
         }
-        let bed = bed_mesh();
         for (i, plate) in self.plates.iter().enumerate() {
+            let bed = super::print_bed::mesh(plate.textured);
             self.scene.parts.push(Part {
                 mesh: bed.clone(),
                 pose: Pose {
-                    path: "@print-bed".into(),
+                    path: super::print_bed::PATH.into(),
                     instance: i as u32,
                     body: None,
-                    position: [plate.origin[0], -0.8, -plate.origin[1]],
+                    position: [plate.origin[0], -0.15, -plate.origin[1]],
                     rotation: [0.; 3],
                     travel: [0.; 3],
                     travel_frame: None,
                 },
-                color: [0.13, 0.18, 0.22, 1.],
+                color: [0.267, 0.278, 0.278, 1.],
                 visible: true,
                 source_size: bed.size,
                 source_bodies: 1,
@@ -283,43 +284,12 @@ impl PrintLayout {
         Ok(())
     }
 }
-fn bed_mesh() -> Arc<crate::mesh::Mesh> {
-    let mut vertices = Vec::new();
-    let mut quad = |x: f32, z: f32, w: f32, d: f32, y: f32, shade: f32| {
-        for position in [
-            [x, y, z],
-            [x + w, y, z],
-            [x + w, y, z - d],
-            [x, y, z],
-            [x + w, y, z - d],
-            [x, y, z - d],
-        ] {
-            vertices.push(crate::mesh::Vertex {
-                position,
-                normal: [0., 1., 0.],
-                shade,
-            });
-        }
-    };
-    quad(0., 0., 256., 256., 0., 0.85);
-    for n in 0..=4 {
-        let value = n as f32 * 64.;
-        quad(value.clamp(0., 255.6), 0., 0.4, 256., 0.04, 1.8);
-        quad(0., -value.clamp(0., 255.6), 256., 0.4, 0.04, 1.8);
-    }
-    Arc::new(crate::mesh::Mesh {
-        vertices,
-        min: Vec3::new(0., 0., -256.),
-        max: Vec3::new(256., 0.04, 0.),
-        size: Vec3::new(256., 0.04, 256.),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     fn part(path: &str, instance: u32, y: f32) -> Part {
-        let mesh = bed_mesh();
+        let mesh = crate::scene::print_bed::mesh(true);
         Part {
             mesh: mesh.clone(),
             pose: Pose {

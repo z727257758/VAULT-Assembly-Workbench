@@ -1336,7 +1336,7 @@ fn export_members(
 }
 
 impl App {
-    pub(super) fn setup_combination_smoke(&mut self) {
+    pub(super) fn setup_combination_smoke(&mut self, plate_preview: bool) {
         let base = self.member_snapshot();
         self.members.clear();
         for i in 0..3 {
@@ -1347,8 +1347,8 @@ impl App {
                 AssemblyKind::Drawer
             };
             p.selection = Selection {
-                width: if i == 1 { "M" } else { "S" }.into(),
-                depth: if i == 1 { 4 } else { 3 },
+                width: if i == 1 && !plate_preview { "M" } else { "S" }.into(),
+                depth: if i == 1 && !plate_preview { 4 } else { 3 },
                 height: if i == 1 { "2F" } else { "1F" }.into(),
                 hidden_key: false,
             };
@@ -1361,9 +1361,16 @@ impl App {
             };
             p.label.enabled = true;
             p.label.text = format!("BOX {}", i + 1);
-            p.label.style = crate::label::Style::Raised;
+            p.label.style = if plate_preview {
+                crate::label::Style::Flat
+            } else {
+                crate::label::Style::Raised
+            };
             let config = p.print_config.as_mut().unwrap();
             config.preview_colors = true;
+            if plate_preview {
+                config.textured = i != 1;
+            }
             config.palette = [
                 [74, 104, 120],
                 [234, 151, 73],
@@ -1378,8 +1385,8 @@ impl App {
                 exterior: Default::default(),
                 name: format!("成员 {}", i + 1),
                 placement: Placement {
-                    column: if i == 1 { 1 } else { 0 },
-                    level: if i == 2 { 1 } else { 0 },
+                    column: u32::from(!plate_preview && i == 1),
+                    level: if plate_preview { i } else { u32::from(i == 2) },
                     offset: [0.; 3],
                 },
                 preset: p,

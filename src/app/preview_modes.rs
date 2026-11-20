@@ -31,6 +31,7 @@ pub(super) struct State {
     pub(super) error: Option<String>,
     selected: Option<usize>,
     filter: Option<usize>,
+    active_plate: usize,
     scope: u8,
 }
 impl State {
@@ -165,6 +166,7 @@ impl App {
             state.error = None;
             state.selected = None;
             state.filter = None;
+            state.active_plate = 0;
         }
         if let Some((revision, result)) = state.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             state.rx = None;
@@ -336,7 +338,7 @@ impl App {
             if let Some(layout) = &self.preview_modes.layout {
                 let label = self.preview_modes.filter.map_or_else(
                     || t(z, "全部打印板", "All plates").to_owned(),
-                    |i| format!("{} {}", t(z, "打印板", "Plate"), i + 1),
+                    |i| format!("{} {:02}", t(z, "打印板", "Plate"), i + 1),
                 );
                 egui::ComboBox::from_id_salt("preview-plate-filter")
                     .selected_text(label)
@@ -352,25 +354,47 @@ impl App {
                             let response = ui.selectable_value(
                                 &mut self.preview_modes.filter,
                                 Some(i),
-                                format!("{} · {} / {}", i + 1, plate.name, plate.number + 1),
+                                format!(
+                                    "{:02} · {} / {} · {} {}",
+                                    i + 1,
+                                    plate.name,
+                                    plate.number + 1,
+                                    plate.copies,
+                                    t(z, "份", "copies")
+                                ),
                             );
-                            let slots = plate
-                                .slots
-                                .iter()
-                                .map(u32::to_string)
-                                .collect::<Vec<_>>()
-                                .join(" + ");
-                            response.on_hover_text(format!(
-                                "{} {} · {} {slots}{}",
-                                plate.copies,
-                                t(z, "份", "copies"),
-                                t(z, "耗材槽", "Slots"),
-                                if plate.removable {
-                                    t(z, " · 可拆标牌专用盘", " · Removable-label plate")
+                            response.on_hover_ui(|ui| {
+                                ui.label(if plate.textured {
+                                    t(z, "纹理 PEI 板", "Textured PEI Plate")
                                 } else {
-                                    ""
-                                },
-                            ));
+                                    t(z, "高温打印板", "High Temp Plate")
+                                });
+                                if plate.removable {
+                                    ui.small(t(z, "可拆标牌专用盘", "Removable-label plate"));
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.small(t(z, "耗材槽", "Slots"));
+                                    for (&slot, &[r, g, b, _]) in
+                                        plate.slots.iter().zip(&plate.colors)
+                                    {
+                                        let (dot, _) = ui.allocate_exact_size(
+                                            egui::Vec2::splat(11.),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle(
+                                            dot.center(),
+                                            4.5,
+                                            Color32::from_rgb(
+                                                (r * 255.).round() as u8,
+                                                (g * 255.).round() as u8,
+                                                (b * 255.).round() as u8,
+                                            ),
+                                            ui.visuals().widgets.noninteractive.bg_stroke,
+                                        );
+                                        ui.small(slot.to_string());
+                                    }
+                                });
+                            });
                         }
                     });
                 let selected_part = self
@@ -565,12 +589,18 @@ impl App {
             });
             return;
         };
-        let printable_parts = layout.parts.iter().filter(|part| part.is_some()).count();
+        if let Some(plate) = self.preview_modes.filter {
+            self.preview_modes.active_plate = plate;
+        }
+        let first_bed = layout.parts.len() - layout.plates.len();
+        let plate_for = |index: usize| {
+            layout.parts[index]
+                .as_ref()
+                .map_or_else(|| index - first_bed, |part| part.plate)
+        };
         let mut visibility_changed = false;
         for (index, part) in layout.scene.parts.iter_mut().enumerate() {
-            let plate = layout.parts[index]
-                .as_ref()
-                .map_or_else(|| index - printable_parts, |part| part.plate);
+            let plate = plate_for(index);
             let visible = self
                 .preview_modes
                 .filter
@@ -591,11 +621,11 @@ impl App {
             && let Some(point) = response.interact_pointer_pos()
         {
             let (o, d) = self.preview_modes.camera.ray(point, rect);
-            self.preview_modes.selected = layout
-                .scene
-                .pick(o, d, 0.)
-                .map(|h| h.part)
-                .filter(|&i| layout.parts[i].is_some());
+            let hit = layout.scene.pick(o, d, 0.).map(|hit| hit.part);
+            if let Some(index) = hit {
+                self.preview_modes.active_plate = plate_for(index);
+            }
+            self.preview_modes.selected = hit.filter(|&i| layout.parts[i].is_some());
         }
         let dpi = ctx.pixels_per_point();
         let id = self.preview_modes.renderer.as_mut().unwrap().render(
@@ -603,16 +633,30 @@ impl App {
             [(size.x * dpi) as u32, (size.y * dpi) as u32],
             &layout.scene,
             &self.preview_modes.camera,
-            ViewOptions::default(),
+            ViewOptions {
+                print_beds: Some(crate::render::PrintBedView {
+                    active: self.preview_modes.active_plate,
+                    dark: ui.visuals().dark_mode,
+                }),
+                ..ViewOptions::default()
+            },
         );
         paint_image(ui, id, rect);
-        paint_plates(
+        paint_plate_titles(
             ui,
             rect,
             &self.preview_modes.camera,
             &layout,
             self.preview_modes.filter,
             z,
+        );
+        paint_plate_numbers(
+            ui,
+            rect,
+            &self.preview_modes.camera,
+            &layout,
+            self.preview_modes.filter,
+            self.preview_modes.active_plate,
         );
         if let Some(i) = self.preview_modes.selected
             && let Some(part) = layout.scene.parts.get(i).filter(|p| p.visible)
@@ -671,80 +715,168 @@ fn hint(ui: &egui::Ui, rect: egui::Rect, z: bool) {
         Color32::GRAY,
     );
 }
-fn paint_plates(
+fn paint_plate_titles(
     ui: &egui::Ui,
     rect: egui::Rect,
     camera: &Camera,
     layout: &PrintLayout,
     filter: Option<usize>,
-    z: bool,
+    zh: bool,
 ) {
     let painter = ui.painter().with_clip_rect(rect);
+    let (toolbar, hud) = ui.ctx().memory(|memory| {
+        (
+            memory.area_rect(egui::Id::new("stage-preview-modes")),
+            memory.area_rect(egui::Id::new("stage-project-hud")),
+        )
+    });
+    let ink = ui.visuals().text_color();
+    let direction = camera.direction();
+    // Anchor to the outer edge facing the viewer, including after a quarter turn.
+    let (start, end) = if direction.x.abs() > direction.z.abs() {
+        let side = if direction.x > 0. { 258. } else { 0. };
+        ([side, 0.], [side, -258.])
+    } else {
+        let edge = if direction.z >= 0. { 10. } else { -266. };
+        ([0., edge], [258., edge])
+    };
     for (i, plate) in layout
         .plates
         .iter()
         .enumerate()
         .filter(|(i, _)| filter.is_none_or(|f| *i == f))
     {
-        let [ox, oy] = plate.origin;
-        let point = |x, y| project(camera, rect, Vec3::new(ox + x, 0.05, -oy - y));
-        // P1S's front-left keep-out, matching the bed used by the packer.
-        let corners = [(0., 0.), (18., 0.), (18., 28.), (0., 28.)]
-            .into_iter()
-            .filter_map(|(x, y)| point(x, y))
-            .collect::<Vec<_>>();
-        if corners.len() == 4 {
-            painter.add(egui::Shape::convex_polygon(
-                corners,
-                Color32::from_rgba_unmultiplied(180, 65, 60, 45),
-                egui::Stroke::new(1., Color32::from_rgb(160, 75, 65)),
-            ));
-        }
-        if let Some(p) = point(0., -12.) {
-            let compact = filter.is_none()
-                && point(256., -12.).is_some_and(|right| (right.x - p.x).abs() < 90.);
-            let title = if filter.is_some() {
-                format!(
-                    "{} {} · {} / {} · {} {}{}",
-                    t(z, "盘", "Plate"),
-                    i + 1,
-                    plate.name,
-                    plate.number + 1,
-                    plate.copies,
-                    t(z, "份", "copies"),
-                    if plate.removable {
-                        t(z, " · 标牌", " · Labels")
-                    } else {
-                        ""
-                    }
-                )
-            } else if compact {
-                (i + 1).to_string()
+        let [x, y] = plate.origin;
+        let edge = |[dx, dz]: [f32; 2]| project(camera, rect, Vec3::new(x + dx, 0., -y + dz));
+        let (Some(left), Some(right)) = (edge(start), edge(end)) else {
+            continue;
+        };
+        let number = format!("{} {:02}", t(zh, "盘", "Plate"), i + 1);
+        let copies = format!("{} {}", plate.copies, t(zh, "份", "copies"));
+        let full = format!(
+            "{number} · {} / {} · {copies}{}",
+            plate.name,
+            plate.number + 1,
+            if plate.removable {
+                t(zh, " · 标牌", " · Labels")
             } else {
-                format!(
-                    "{} {} · {} {}",
-                    t(z, "盘", "Plate"),
-                    i + 1,
-                    plate.copies,
-                    t(z, "份", "copies")
-                )
-            };
-            painter.text(
-                p,
-                egui::Align2::LEFT_TOP,
-                title,
-                egui::FontId::proportional(if compact { 9. } else { 12. }),
-                Color32::from_rgb(175, 207, 222),
-            );
-            for (j, color) in plate.colors.iter().enumerate().filter(|_| !compact) {
-                let c = Color32::from_rgb(
-                    (color[0] * 255.) as u8,
-                    (color[1] * 255.) as u8,
-                    (color[2] * 255.) as u8,
-                );
-                painter.circle_filled(p + egui::vec2(5. + j as f32 * 14., 22.), 4., c);
+                ""
+            }
+        );
+        let font = egui::FontId::proportional(if filter.is_some() { 13. } else { 11. });
+        let width = (right.x - left.x).abs() - 6.;
+        let mut title = painter.layout(full, font.clone(), ink, (rect.width() - 36.).max(1.));
+        if filter.is_none() && title.size().x > width {
+            title = painter.layout_no_wrap(format!("{number} · {copies}"), font.clone(), ink);
+            if title.size().x > width {
+                title = painter.layout_no_wrap(number, font, ink);
             }
         }
+        let mut pos = egui::pos2(left.x.min(right.x) + 2., left.y.max(right.y) + 2.);
+        let bounds = egui::Rect::from_min_size(pos, title.size());
+        let fits = rect.contains_rect(bounds) && toolbar.is_none_or(|r| !r.intersects(bounds));
+        if filter.is_some() {
+            if !fits {
+                pos = hud.map_or(rect.left_top(), |r| r.left_bottom()) + egui::vec2(0., 5.);
+            }
+        } else if !fits || title.size().x > width {
+            continue;
+        }
+        painter.galley(pos, title, ink);
+    }
+}
+
+fn paint_plate_numbers(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    camera: &Camera,
+    layout: &PrintLayout,
+    filter: Option<usize>,
+    active_plate: usize,
+) {
+    // The plate index occupies the gutter outside the machine's front-right corner.
+    if camera.direction().y <= 0. {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(rect);
+    let origin = camera.center;
+    let (Some(mid), Some(right), Some(back)) = (
+        project(camera, rect, origin),
+        project(camera, rect, origin + Vec3::X * 16.),
+        project(camera, rect, origin - Vec3::Z * 16.),
+    ) else {
+        return;
+    };
+    // Fit the two digits into a 16 mm square as the camera tilts and zooms.
+    let x_axis = right - mid;
+    let y_axis = back - mid;
+    let height = x_axis.rot90().dot(y_axis).abs() / x_axis.length().max(0.001);
+    let font_size = (x_axis.length().min(height) * 0.9).min(25.);
+    if font_size < 6. {
+        return;
+    }
+    let angle = x_axis.angle();
+    // On an oblique view a tall part can project past its own bed. Reserve
+    // its screen bounds before painting labels so the part stays unobstructed.
+    let view = camera.matrix(rect.aspect_ratio());
+    let blockers: Vec<_> = layout
+        .scene
+        .parts
+        .iter()
+        .zip(&layout.parts)
+        .filter(|(part, info)| part.visible && info.is_some())
+        .map(|(part, _)| {
+            let clip_from_part = view * part.pose.matrix(0.);
+            let center = clip_from_part.transform_point3((part.mesh.min + part.mesh.max) * 0.5);
+            let half = (part.mesh.max - part.mesh.min) * 0.5;
+            let extent = clip_from_part.x_axis.truncate().abs() * half.x
+                + clip_from_part.y_axis.truncate().abs() * half.y
+                + clip_from_part.z_axis.truncate().abs() * half.z;
+            (center, extent)
+        })
+        .collect();
+    let half_diagonal = 0.85 * font_size;
+    let label_extent = glam::Vec2::new(
+        2. * half_diagonal / rect.width(),
+        2. * half_diagonal / rect.height(),
+    );
+    let dark = ui.visuals().dark_mode;
+    for (i, plate) in layout.plates.iter().enumerate() {
+        if filter.is_some_and(|selected| selected != i) {
+            continue;
+        }
+        let [ox, oy] = plate.origin;
+        let center = Vec3::new(ox + 267., 0., -oy - 8.);
+        let Some(p) = project(camera, rect, center) else {
+            continue;
+        };
+        let anchor = view.transform_point3(center);
+        if blockers.iter().any(|(c, e)| {
+            c.z - e.z < anchor.z
+                && (anchor - *c)
+                    .truncate()
+                    .abs()
+                    .cmple(e.truncate() + label_extent)
+                    .all()
+        }) {
+            continue;
+        }
+        let ink = match (i == active_plate, dark) {
+            (true, true) => Color32::from_rgb(95, 218, 136),
+            (true, false) => Color32::from_rgb(0, 125, 53),
+            (false, true) => Color32::from_gray(194),
+            (false, false) => Color32::from_gray(82),
+        };
+        let galley = painter.layout_no_wrap(
+            format!("{:02}", i + 1),
+            egui::FontId::monospace(font_size),
+            ink,
+        );
+        let origin = p - galley.size() * 0.5;
+        painter.add(
+            egui::epaint::TextShape::new(origin, galley, ink)
+                .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER),
+        );
     }
 }
 fn outline(ui: &egui::Ui, rect: egui::Rect, camera: &Camera, part: &crate::scene::Part) {
@@ -817,6 +949,9 @@ impl App {
             if self.smoke_stage == 4 {
                 self.preview_modes.camera.yaw = 0.;
                 self.preview_modes.camera.pitch = std::f32::consts::FRAC_PI_2 - 0.0001;
+            } else if self.smoke_stage == 8 {
+                self.preview_modes.camera.yaw = -0.32;
+                self.preview_modes.camera.pitch = 0.85;
             }
         }
         if self.smoke_frame >= 10 && !self.screenshot_requested {
@@ -852,6 +987,9 @@ impl App {
                     .layout
                     .as_ref()
                     .ok_or("Missing print layout")?;
+                if self.preview_modes.active_plate != 0 || self.preview_modes.filter.is_some() {
+                    return Err("The overview must open with the first tray active".into());
+                }
                 let expected: usize = self
                     .members
                     .iter()
@@ -863,9 +1001,57 @@ impl App {
                     return Err("Print copies differ from checked member BOMs".into());
                 }
                 for member in 0..self.members.len() {
-                    if !layout.parts.iter().flatten().any(|p| p.member == member) {
-                        return Err("Missing member print geometry".into());
+                    let config = self.members[member].preset.print_config.as_ref().unwrap();
+                    let mut parts = layout
+                        .parts
+                        .iter()
+                        .flatten()
+                        .filter(|p| p.member == member)
+                        .peekable();
+                    if parts.peek().is_none()
+                        || parts.any(|p| layout.plates[p.plate].textured != config.textured)
+                    {
+                        return Err("Missing member geometry or incorrect plate surface".into());
                     }
+                }
+            }
+            if self.smoke_stage == 4 || self.smoke_stage == 8 {
+                let layout = self
+                    .preview_modes
+                    .layout
+                    .as_ref()
+                    .ok_or("Missing single-plate layout")?;
+                let filter = self
+                    .preview_modes
+                    .filter
+                    .ok_or("Missing single-plate filter")?;
+                if self.preview_modes.active_plate != filter
+                    || layout.plates[filter].textured != (self.smoke_stage == 4)
+                {
+                    return Err(format!(
+                        "Stage {}: filter={filter}, active={}, textured={}",
+                        self.smoke_stage,
+                        self.preview_modes.active_plate,
+                        layout.plates[filter].textured
+                    ));
+                }
+                let mut visible_beds = 0;
+                let mut visible_parts = 0;
+                for (part, metadata) in layout.scene.parts.iter().zip(&layout.parts) {
+                    if let Some(metadata) = metadata {
+                        if part.visible != (metadata.plate == filter) {
+                            return Err("Single-plate filter lost printable geometry".into());
+                        }
+                        visible_parts += usize::from(part.visible);
+                    } else if part.visible {
+                        if part.pose.path != "@print-bed" || part.pose.instance as usize != filter {
+                            return Err("Single-plate filter retained the wrong bed".into());
+                        }
+                        visible_beds += 1;
+                    }
+                }
+                if visible_beds != 1 || visible_parts == 0 {
+                    return Err("Single-plate view must show one tray with printable parts".into());
                 }
             }
             if self.smoke_stage == 5 && (!self.label_open || self.label.text != "EDIT") {
@@ -918,13 +1104,24 @@ impl App {
                 self.preview_modes.camera = self.camera.clone();
             }
             6 => {
+                self.export_options.plate.textured = false;
                 self.preview_modes.mode = Mode::Plates;
+            }
+            7 => {
+                let layout = self.preview_modes.layout.as_ref().unwrap();
+                self.preview_modes.filter = layout
+                    .plates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, plate)| !plate.textured)
+                    .max_by_key(|(_, p)| p.copies)
+                    .map(|(i, _)| i);
             }
             _ => {
                 let _ = std::fs::write(
                     folder.join("result.txt"),
                     format!(
-                        "PASS: overall, exploded, vertical layers, all print plates, filtered top plate, label editor, single-member layers and refreshed print plates. GPU: {}",
+                        "PASS: overall, exploded, vertical layers, all print plates and both bed surfaces, filtered top plate, label editor, single-member layers and filtered oblique plate. GPU: {}",
                         self.renderer.state.adapter.get_info().name
                     ),
                 );

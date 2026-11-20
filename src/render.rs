@@ -82,6 +82,7 @@ struct ObjectUniform {
     model: [[f32; 4]; 4],
     color: [f32; 4],
     text_color: [f32; 4],
+    bed: [f32; 4],
 }
 struct GpuMesh {
     source: std::sync::Arc<crate::mesh::Mesh>,
@@ -106,6 +107,24 @@ pub struct ViewOptions {
     pub interior_only: bool,
     pub colliding: Vec<usize>,
     pub member_offsets: Vec<Vec3>,
+    pub print_beds: Option<PrintBedView>,
+}
+
+pub struct PrintBedView {
+    pub active: usize,
+    pub dark: bool,
+}
+
+impl PrintBedView {
+    fn colors(&self, index: usize) -> ([f32; 4], f32) {
+        if self.active == index {
+            ([0.267, 0.278, 0.278, 1.], 0.55)
+        } else if self.dark {
+            ([0.384, 0.384, 0.412, 1.], 0.51)
+        } else {
+            ([0.82, 0.82, 0.82, 1.], 0.91)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -390,6 +409,7 @@ impl Renderer {
             interior_only,
             colliding,
             member_offsets,
+            print_beds,
         } = options;
         self.target(index, [size[0].clamp(1, 4096), size[1].clamp(1, 4096)]);
         let target = self.targets[index].as_ref().unwrap();
@@ -442,6 +462,15 @@ impl Renderer {
             if let Some(MaterialOverride::Opacity(opacity)) = material {
                 color[3] = opacity.clamp(0., 1.);
             }
+            let mut bed = [0.; 4];
+            if let Some(view) = &print_beds
+                && p.pose.path == crate::scene::print_bed::PATH
+            {
+                let (base, grid) = view.colors(p.pose.instance as usize);
+                color = base;
+                let [width, depth] = crate::print_plate::EXCLUDED_CORNER_MM;
+                bed = [crate::print_plate::BED_SIZE_MM, width, depth, grid];
+            }
             self.part_opacities.push(color[3]);
             let mut model = p.pose.matrix(explosion);
             if let Some(offset) =
@@ -450,6 +479,7 @@ impl Renderer {
                 model.w_axis += offset.extend(0.);
             }
             let uniform = ObjectUniform {
+                bed,
                 model: model.to_cols_array_2d(),
                 color,
                 text_color: print_colors.map_or([0.; 4], |c| {

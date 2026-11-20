@@ -983,14 +983,7 @@ impl App {
                         if plates {
                             self.export_options.plate = Default::default();
                         }
-                        self.setup_combination_smoke();
-                        if plates {
-                            for member in &mut self.members {
-                                member.preset.label.style = crate::label::Style::Flat;
-                            }
-                            self.restore_member(0);
-                            self.combination_view = true;
-                        }
+                        self.setup_combination_smoke(plates);
                     }
                     self.status = format!(
                         "{} STL · {}",
@@ -2410,6 +2403,7 @@ impl App {
                             },
                             ghost: self.ghost,
                             member_offsets,
+                            print_beds: None,
                             interior_only: self.interior_editor_open()
                                 && self.scene.assembly
                                 && self.scene_key != "combination",

@@ -3,6 +3,8 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 mod materials;
 pub use materials::{FilamentMaterial, MaterialLibrary};
+pub(crate) const BED_SIZE_MM: f32 = 256.;
+pub(crate) const EXCLUDED_CORNER_MM: [f32; 2] = [18., 28.];
 pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 // The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
 const MAX_PROJECT_SLOTS: u32 = 32;
@@ -774,7 +776,7 @@ fn usable_bed(c: &Config, offset: Vec2) -> Rect {
     // Intersection of model-space bed and machine-space bed translated back
     // into model coordinates. Both must contain the complete print footprint.
     let min = offset.max(Vec2::ZERO) + Vec2::splat(c.margin);
-    let max = Vec2::splat(256. - c.margin) + offset.min(Vec2::ZERO);
+    let max = Vec2::splat(BED_SIZE_MM - c.margin) + offset.min(Vec2::ZERO);
     Rect {
         x: min.x,
         y: min.y,
@@ -788,8 +790,8 @@ fn hull_keepout(c: &Config, offset: Vec2) -> Rect {
     Rect {
         x: offset.x.min(0.),
         y: offset.y.min(0.),
-        w: 18. + offset.x.abs() + c.margin,
-        h: 28. + offset.y.abs() + c.margin,
+        w: EXCLUDED_CORNER_MM[0] + offset.x.abs() + c.margin,
+        h: EXCLUDED_CORNER_MM[1] + offset.y.abs() + c.margin,
     }
 }
 // Actual extrusion segments in the embedded P1S machine_start_gcode:
@@ -822,8 +824,8 @@ fn exclusion_zones(c: &Config, offset: Vec2) -> Vec<Rect> {
     let mut zones = vec![Rect {
         x: offset.x.min(0.),
         y: offset.y.min(0.),
-        w: 18. + offset.x.abs() + c.margin + c.gap,
-        h: 28. + offset.y.abs() + c.margin + c.gap,
+        w: EXCLUDED_CORNER_MM[0] + offset.x.abs() + c.margin + c.gap,
+        h: EXCLUDED_CORNER_MM[1] + offset.y.abs() + c.margin + c.gap,
     }];
     zones.extend(
         PRIME_LINE.map(|r| both_frames(r).expanded(PRIME_LINE_CLEARANCE + c.margin + c.gap)),
