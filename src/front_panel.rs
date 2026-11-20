@@ -6,6 +6,34 @@ use crate::{
 };
 use glam::{Quat, Vec3};
 
+pub(crate) const DRAWER_KEY: &str = "Drawer lock: key / facade bore";
+// Preview limit from sampled S/M/L housing geometry. The pinion can turn a
+// quarter-turn in the facade bore, but its rear cam meets the mounted housing
+// by 65 degrees with these assembly datums.
+pub(crate) const KEY_TURN_DEGREES: f32 = 60.;
+
+fn attach_key(scene: &mut Scene, facade: usize, key: usize, seat: Vec3) -> Result<(), String> {
+    // Step 7 shows the horizontal head in the open position. The shouldered
+    // bore permits positive rotation about the outward normal to lock.
+    // Opening reverses that rotation, keeping the collar centered on its seat.
+    let relation = Relation {
+        parent: PartId::of(&scene.parts[facade]),
+        child: PartId::of(&scene.parts[key]),
+        joint: Joint::Hinge {
+            position: seat.to_array(),
+            rotation: Quat::from_rotation_y(KEY_TURN_DEGREES.to_radians()).to_array(),
+            pivot: seat.to_array(),
+            axis: Vec3::NEG_Y.to_array(),
+            min: 0.,
+            max: KEY_TURN_DEGREES,
+            angle: 0.,
+        },
+        label: DRAWER_KEY.into(),
+    };
+    scene.relations.retain(|old| old.child != relation.child);
+    constraints::add(scene, relation)
+}
+
 fn attach(
     scene: &mut Scene,
     parent: usize,
@@ -144,13 +172,11 @@ pub fn apply(scene: &mut Scene, facade: usize) -> Result<(), String> {
         // The Key collar at raw Z +1.692 seats flush with facade front;
         // A 0.1 mm axial running clearance avoids coincident tessellated seats.
         // Its rear flange at -5.908 seats on the -7.6 mm counterbore.
-        attach(
+        attach_key(
             scene,
             facade,
             key,
-            Vec3::new(0., row_y, front - 1.692 - 0.1),
-            false,
-            "Manual step 1: Key / facade bore",
+            Vec3::new(0., front - 1.692 - 0.1, -row_y),
         )?;
         if let Some(cap) = cap {
             // Socket opens toward raw +Z in the source cap. Turn it over,
@@ -171,13 +197,11 @@ pub fn apply(scene: &mut Scene, facade: usize) -> Result<(), String> {
         // Same rear gear/flange as the ordinary key, but the body ends at its
         // front collar. Its bbox center differs by 7.508 mm from the full key.
         let collar = scene.parts[hidden].mesh.max.y;
-        attach(
+        attach_key(
             scene,
             facade,
             hidden,
-            Vec3::new(0., row_y, front - collar - 0.1),
-            false,
-            "Hidden key: lock body / facade bore",
+            Vec3::new(0., front - collar - 0.1, -row_y),
         )?;
         if let Some(head) = hidden_head {
             // The socket floor seats at the lock collar, not on the lower
@@ -281,6 +305,21 @@ pub fn apply(scene: &mut Scene, facade: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn manual_open_pose(scene: &Scene) -> Scene {
+        use constraints::AssemblyRules;
+        let mut open = scene.clone();
+        let driver = open
+            .relations
+            .iter()
+            .find(|r| r.label == AssemblyRules::DRAWER_SLIDE)
+            .unwrap()
+            .child
+            .clone();
+        let plan = AssemblyRules::plan_latch(&open, &driver, true).unwrap();
+        AssemblyRules::apply_motion_sample(&mut open, &driver, plan.sample(plan.duration)).unwrap();
+        open
+    }
+
     #[test]
     #[ignore = "requires VAULT_MODEL_ROOT"]
     fn all_standard_facade_caps_have_distinct_seats_and_follow_panel() {
@@ -391,12 +430,14 @@ mod tests {
                     PartId::of(&s.parts[parent])
                 );
             }
+            // Step 7 calls for the horizontal (unlocked) key for insertion.
+            let open = manual_open_pose(&s);
             let pair = Scene {
                 parts: vec![
-                    s.parts[facade].clone(),
-                    s.parts[body].clone(),
-                    s.parts[head].clone(),
-                    s.parts[cap].clone(),
+                    open.parts[facade].clone(),
+                    open.parts[body].clone(),
+                    open.parts[head].clone(),
+                    open.parts[cap].clone(),
                 ],
                 ..Default::default()
             };
@@ -661,10 +702,11 @@ mod tests {
                     .any(|r| r.parent == PartId::of(&s.parts[key])
                         && r.child == PartId::of(&s.parts[cap]))
             );
+            let open = manual_open_pose(&s);
             let subset = Scene {
                 parts: [facade, key, cap, label, plug]
                     .iter()
-                    .map(|i| s.parts[*i].clone())
+                    .map(|i| open.parts[*i].clone())
                     .collect(),
                 ..Default::default()
             };
@@ -672,7 +714,7 @@ mod tests {
             for pair in &report.pairs {
                 println!(
                     "key-local {:?}",
-                    s.parts[key]
+                    open.parts[key]
                         .pose
                         .matrix(0.)
                         .inverse()

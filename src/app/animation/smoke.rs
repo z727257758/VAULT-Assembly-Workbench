@@ -7,7 +7,7 @@ pub(super) struct State {
     meshes: Vec<usize>,
     bounds: Vec<(glam::Vec3, glam::Vec3)>,
     roots: Vec<(PartId, glam::Mat4)>,
-    runner_datums: HashMap<PartId, glam::Mat4>,
+    closed_poses: HashMap<PartId, glam::Mat4>,
     error: Option<String>,
 }
 
@@ -63,14 +63,17 @@ impl App {
         AssemblyRules::mechanism(&self.scene, Target { member, drawer })
     }
     fn check_shared_runners(&self) -> Result<(), String> {
-        let closed = &self.animation.smoke.runner_datums;
+        let closed = &self.animation.smoke.closed_poses;
         let drawers = [
             self.smoke_mechanism(1, Some(0))?,
             self.smoke_mechanism(1, Some(1))?,
         ];
         let mut guides = [0; 2];
         let mut stoppers = 0;
-        for (id, datum) in closed {
+        for (id, datum) in closed.iter().filter(|(id, _)| {
+            id.instance / crate::scene::MEMBER_STRIDE == 1
+                && (id.path.contains("/Runners/") || id.path.contains("/Boxes/"))
+        }) {
             let part = self
                 .scene
                 .parts
@@ -122,6 +125,109 @@ impl App {
         }
         Ok(())
     }
+    // The fixture has two drawers in the middle member and a lid on the top member.
+    // Compare their rendered poses while operating only one lock at a time.
+    fn check_independent_lock(&self, released: Option<Target>) -> Result<(), String> {
+        let drawer = Target {
+            member: 1,
+            drawer: Some(1),
+        };
+        let lid = Target {
+            member: 2,
+            drawer: None,
+        };
+        let drawer_id = AssemblyRules::mechanism(&self.scene, drawer)?.child;
+        let drawer_center = self
+            .animation
+            .smoke
+            .closed_poses
+            .get(&drawer_id)
+            .ok_or("Missing closed drawer pose")?
+            .w_axis
+            .x;
+        for target in [
+            drawer,
+            lid,
+            Target {
+                member: 1,
+                drawer: Some(0),
+            },
+        ] {
+            let m = AssemblyRules::mechanism(&self.scene, target)?;
+            let expected = if Some(target) == released { 1. } else { 0. };
+            if m.value.abs() > 0.001 || (m.latch - expected).abs() > 0.001 {
+                return Err(format!(
+                    "Standalone lock changed the wrong mechanism: {target:?}"
+                ));
+            }
+        }
+        let mut key_rotations = Vec::new();
+        let mut rack_shifts = Vec::new();
+        let mut lid_links = 0;
+        for p in &self.scene.parts {
+            let id = PartId::of(p);
+            let closed = self
+                .animation
+                .smoke
+                .closed_poses
+                .get(&id)
+                .ok_or("No initial lock pose")?;
+            let pose = p.pose.matrix(0.);
+            let target = Target::of(p);
+            let path = &id.path;
+            if Some(target) == released && target == drawer {
+                if path.contains("/Geared Rails/") {
+                    let shift = pose.w_axis.x - closed.w_axis.x;
+                    let center = closed.transform_point3((p.mesh.min + p.mesh.max) * 0.5).x;
+                    let expected = glam::Mat4::from_translation(glam::Vec3::X * shift) * *closed;
+                    if !pose.abs_diff_eq(expected, 0.01) || (center - drawer_center) * shift >= 0. {
+                        return Err(
+                            "Released rack did not retract along its transverse channel".into()
+                        );
+                    }
+                    rack_shifts.push(shift);
+                    continue;
+                }
+                if path.ends_with("/Key (Turn On Supports).stl") || path.ends_with("/Key Cap.stl") {
+                    let rotation =
+                        glam::Quat::from_mat4(&pose) * glam::Quat::from_mat4(closed).inverse();
+                    key_rotations.push(rotation);
+                    continue;
+                }
+            }
+            if Some(target) == released && target == lid && path.contains("/Locks/") {
+                let link = path.contains("/LOCK INNER PART") || path.contains("/LOCK OUTER PART");
+                if link || (path.contains("PINS") && p.pose.body.is_some_and(|body| body < 2)) {
+                    if pose.abs_diff_eq(*closed, 0.01) {
+                        return Err(format!("Released lid lock did not move {path}"));
+                    }
+                    lid_links += usize::from(link);
+                    continue;
+                }
+            }
+            if !pose.abs_diff_eq(*closed, 0.01) {
+                return Err(format!("Standalone lock displaced {path} on {target:?}"));
+            }
+        }
+        if released == Some(drawer) {
+            let [key, cap] = key_rotations.as_slice() else {
+                return Err("Missing drawer key or key cap".into());
+            };
+            if key.angle_between(glam::Quat::IDENTITY) < 0.05 || key.angle_between(*cap) > 0.005 {
+                return Err("Drawer key and cap did not turn together".into());
+            }
+            let [upper, lower] = rack_shifts.as_slice() else {
+                return Err("Missing geared racks in the shared drawer".into());
+            };
+            if upper * lower >= 0. || upper.abs() < 0.1 || (upper + lower).abs() > 0.01 {
+                return Err("Drawer racks did not retract in opposite directions".into());
+            }
+        }
+        if released == Some(lid) && lid_links != 2 {
+            return Err("Missing inner or outer link of the lid lock".into());
+        }
+        Ok(())
+    }
     fn smoke_toggle(&mut self, expected: &Mechanism, ctx: &egui::Context) -> Result<(), String> {
         let selected = AssemblyRules::mechanism(&self.scene, self.motion_target())?;
         if selected.child != expected.child {
@@ -156,15 +262,10 @@ impl App {
                 self.animation.smoke.meshes =
                     self.scene.parts.iter().map(|p| p.mesh_key()).collect();
                 self.animation.smoke.bounds = self.scene.member_bounds.clone();
-                self.animation.smoke.runner_datums = self
+                self.animation.smoke.closed_poses = self
                     .scene
                     .parts
                     .iter()
-                    .filter(|p| {
-                        Target::of(p).member == 1
-                            && (p.pose.path.contains("/Runners/")
-                                || p.pose.path.contains("/Boxes/"))
-                    })
                     .map(|p| (PartId::of(p), p.pose.matrix(0.)))
                     .collect();
                 self.animation.smoke.roots = self
@@ -175,12 +276,15 @@ impl App {
                     .map(|p| (PartId::of(p), p.pose.matrix(0.)))
                     .collect();
             }
-            if [3, 5, 6, 8, 9].contains(&self.smoke_stage)
-                || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0)
-            {
+            let wait_for_endpoint = matches!(self.smoke_stage, 3 | 5 | 6 | 8 | 9 | 11..=14);
+            if wait_for_endpoint || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0) {
                 self.advance_motion(0.05, ctx);
             }
             self.check_shared_runners()?;
+            let drawer = self.smoke_mechanism(1, Some(1))?;
+            if drawer.value > 0.01 && drawer.latch < 0.999 {
+                return Err("Drawer moved before releasing the key".into());
+            }
             if self.smoke_stage == 2 {
                 let m = self.smoke_mechanism(2, None)?;
                 if m.value < 30. {
@@ -193,7 +297,7 @@ impl App {
                     return Ok(false);
                 }
             }
-            if [3, 5, 6, 8, 9].contains(&self.smoke_stage) && !self.animation.tracks.is_empty() {
+            if wait_for_endpoint && !self.animation.tracks.is_empty() {
                 return Ok(false);
             }
             if self.smoke_stage < 10
@@ -243,7 +347,8 @@ impl App {
                     return Err("Lid did not reach its endpoint".into());
                 }
                 4 | 5 => {
-                    if self.smoke_mechanism(1, Some(0))?.value.abs() > 0.001 {
+                    let sibling = self.smoke_mechanism(1, Some(0))?;
+                    if sibling.value.abs() > 0.001 || sibling.latch.abs() > 0.001 {
                         return Err("Shared-shell sibling moved".into());
                     }
                     if self.smoke_stage == 5 {
@@ -255,7 +360,8 @@ impl App {
                 }
                 6 if lid.value.abs() > 0.001
                     || lid.latch.abs() > 0.001
-                    || self.smoke_mechanism(1, Some(1))?.value.abs() > 0.001 =>
+                    || drawer.value.abs() > 0.001
+                    || drawer.latch.abs() > 0.001 =>
                 {
                     return Err("Closure did not restore locks and drawers".into());
                 }
@@ -269,6 +375,15 @@ impl App {
                         return Err("Motion endpoints did not survive a project rebuild".into());
                     }
                 }
+                11 | 14 => self.check_independent_lock(None)?,
+                12 => self.check_independent_lock(Some(Target {
+                    member: 1,
+                    drawer: Some(1),
+                }))?,
+                13 => self.check_independent_lock(Some(Target {
+                    member: 2,
+                    drawer: None,
+                }))?,
                 _ => {}
             }
             Ok(true)
@@ -320,6 +435,13 @@ impl App {
                     self.tower_edit_slot(1, Some(1), ctx);
                     let m = self.smoke_mechanism(1, Some(1))?;
                     self.smoke_toggle(&m, ctx)?;
+                    self.advance_motion(0.1, ctx);
+                    let still_seated = self.smoke_mechanism(1, Some(1))?;
+                    if still_seated.value.abs() > 0.001
+                        || !(0.01..0.99).contains(&still_seated.latch)
+                    {
+                        return Err("Pulling the drawer must first turn its key in place".into());
+                    }
                 }
                 5 => {
                     let m = self.smoke_mechanism(1, Some(1))?;
@@ -349,15 +471,22 @@ impl App {
                     if self.motion_goals(&lid).toggle.is_some() {
                         return Err("Supporting lid offered an opening action".into());
                     }
-                    AssemblyRules::apply_motion_sample(
+                    if self.animate_latch_to(&lid.child, true, ctx).is_ok() {
+                        return Err("Supporting lid allowed an independent clasp release".into());
+                    }
+                    // The upper member comes to rest on a lid whose clasp is already half open.
+                    let supports = std::mem::take(&mut self.scene.member_supports);
+                    let half_open = AssemblyRules::apply_motion_sample(
                         &mut self.scene,
                         &lid.child,
                         MotionSample {
                             value: lid.min,
                             latch: 0.5,
                         },
-                    )?;
-                    self.smoke_toggle(&lid, ctx)?;
+                    );
+                    self.scene.member_supports = supports;
+                    half_open?;
+                    self.animate_latch_to(&lid.child, false, ctx)?;
                     for _ in 0..3 {
                         self.advance_motion(0.1, ctx);
                     }
@@ -369,7 +498,9 @@ impl App {
                     self.tower_edit_slot(1, Some(0), ctx);
                     let m = self.smoke_mechanism(1, Some(0))?;
                     self.smoke_toggle(&m, ctx)?;
-                    self.advance_motion(0.1, ctx);
+                    for _ in 0..4 {
+                        self.advance_motion(0.1, ctx);
+                    }
                     let before = self.smoke_mechanism(1, Some(0))?.value;
                     self.preview_modes.mode = preview_modes::Mode::Layers;
                     self.advance_motion(0.1, ctx);
@@ -405,8 +536,30 @@ impl App {
                     self.restore_project(restored);
                     self.assembly(ctx);
                 }
+                10 => {
+                    let lid = self.smoke_mechanism(2, None)?;
+                    let drawer = self.smoke_mechanism(1, Some(1))?;
+                    self.animate_joint_to(&lid.child, lid.min, ctx)?;
+                    self.animate_joint_to(&drawer.child, drawer.min, ctx)?;
+                }
+                11 => {
+                    self.tower_edit_slot(1, Some(1), ctx);
+                    let drawer = self.smoke_mechanism(1, Some(1))?;
+                    self.animate_latch_to(&drawer.child, true, ctx)?;
+                }
+                12 => {
+                    let drawer = self.smoke_mechanism(1, Some(1))?;
+                    self.animate_latch_to(&drawer.child, false, ctx)?;
+                    self.tower_edit_slot(2, None, ctx);
+                    let lid = self.smoke_mechanism(2, None)?;
+                    self.animate_latch_to(&lid.child, true, ctx)?;
+                }
+                13 => {
+                    let lid = self.smoke_mechanism(2, None)?;
+                    self.animate_latch_to(&lid.child, false, ctx)?;
+                }
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"),"PASS: staged lock release / lid opening / re-latching; independent shared-shell drawers with measured two-stage guide motion and fixed stoppers during extraction, return and rebuild; fixed housings; view-aware suspension and reversal; support and travel rejection; unchanged mesh resources; closed dimensions; persisted lid/drawer endpoints after rebuild and TOML roundtrip. Motion is a constrained display preview, not CAD validation.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: independent key/cap rotation and opposing rack travel on a seated drawer. Independent lid lock release and return. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

@@ -140,6 +140,163 @@ fn hinged_box(facade_path: &str) -> Scene {
     scene
 }
 
+fn keyed_drawer(racks: bool) -> Scene {
+    let mut scene = drawer();
+    for (index, (path, label, max)) in [
+        ("key.stl", crate::front_panel::DRAWER_KEY, 90.),
+        ("lower.stl", crate::geared_rails::LOWER_RACK, 20.),
+        ("upper.stl", crate::geared_rails::UPPER_RACK, 20.),
+    ]
+    .into_iter()
+    .take(if racks { 3 } else { 1 })
+    .enumerate()
+    {
+        let mut part = scene.parts[1].clone();
+        part.pose.path = path.into();
+        scene.parts.push(part);
+        let mut relation = if index == 0 {
+            Relation::hinge(&scene, 2, 3, Vec3::ZERO, Vec3::Y).unwrap()
+        } else {
+            Relation::fixed(&scene, 1, 3 + index, true).unwrap()
+        };
+        match &mut relation.joint {
+            Joint::Hinge {
+                min, max: limit, ..
+            }
+            | Joint::Slider {
+                min, max: limit, ..
+            } => {
+                *min = 0.;
+                *limit = max;
+            }
+            _ => unreachable!(),
+        }
+        relation.label = label.into();
+        add(&mut scene, relation).unwrap();
+    }
+    scene
+}
+
+#[test]
+fn drawer_lock_can_reverse_independently_and_stays_released_during_travel() {
+    for racks in [false, true] {
+        let mut scene = keyed_drawer(racks);
+        let child = PartId::of(&scene.parts[1]);
+        let closed = scene.parts[1].pose.matrix(0.);
+        let lock = AssemblyRules::plan_latch(&scene, &child, true).unwrap();
+        let half = lock.sample(lock.duration / 2.);
+        AssemblyRules::apply_motion_sample(&mut scene, &child, half).unwrap();
+        assert_eq!(half.latch, 0.5);
+        assert_eq!(scene.parts[1].pose.matrix(0.), closed);
+        for (i, relation) in scene.relations.iter().skip(2).enumerate() {
+            match relation.joint {
+                Joint::Hinge { angle, .. } if i == 0 => assert_eq!(angle, 45.),
+                Joint::Slider { offset, .. } if i > 0 => assert_eq!(offset, 10.),
+                _ => panic!("Expected a driven key or rack"),
+            }
+        }
+        let reverse = AssemblyRules::plan_latch(&scene, &child, false).unwrap();
+        assert_eq!(reverse.sample(0.).latch, half.latch);
+        assert_eq!(reverse.sample(reverse.duration).latch, 0.);
+        let pull = AssemblyRules::plan_motion(&scene, &child, 60.).unwrap();
+        assert_eq!(pull.sample(pull.duration).value, pull.goal);
+        assert_eq!(pull.sample(0.).latch, half.latch);
+        assert_eq!(pull.sample(pull.release_time * 0.5).value, 0.);
+        let moving = pull.sample(pull.release_time + pull.move_time / 2.);
+        assert!((moving.value - 30.).abs() < 0.001);
+        assert_eq!(moving.latch, 1.);
+        AssemblyRules::apply_motion_sample(&mut scene, &child, moving).unwrap();
+        assert!(AssemblyRules::plan_latch(&scene, &child, false).is_err());
+        assert!(
+            AssemblyRules::apply_motion_sample(
+                &mut scene,
+                &child,
+                MotionSample {
+                    latch: 0.5,
+                    ..moving
+                }
+            )
+            .is_err()
+        );
+        let push = AssemblyRules::plan_motion(&scene, &child, 0.).unwrap();
+        assert_eq!(push.sample(push.move_time).latch, 1.);
+        let latching = push.sample(push.move_time + push.lock_time / 2.);
+        assert_eq!(latching.value, 0.);
+        assert!((latching.latch - 0.5).abs() < 0.001);
+        AssemblyRules::apply_motion_sample(&mut scene, &child, push.sample(push.duration)).unwrap();
+        assert!(scene.parts[1].pose.matrix(0.).abs_diff_eq(closed, 0.001));
+        assert_eq!(
+            AssemblyRules::mechanism_for_joint(&scene, &child)
+                .unwrap()
+                .latch,
+            0.
+        );
+    }
+}
+
+#[test]
+fn drawer_lock_direct_input_is_scoped_and_rejects_a_missing_rack() {
+    let unit = keyed_drawer(true);
+    let mut scene =
+        AssemblyRules::shared_shell(drawer(), vec![(unit.clone(), 1), (unit, 1)]).unwrap();
+    let first = AssemblyRules::mechanism(
+        &scene,
+        crate::scene::Target {
+            member: 0,
+            drawer: Some(0),
+        },
+    )
+    .unwrap();
+    let second = AssemblyRules::mechanism(
+        &scene,
+        crate::scene::Target {
+            member: 0,
+            drawer: Some(1),
+        },
+    )
+    .unwrap();
+    let rack = scene
+        .relations
+        .iter()
+        .find(|r| r.label == crate::geared_rails::LOWER_RACK && r.parent == second.child)
+        .unwrap()
+        .child
+        .clone();
+    assert_eq!(
+        AssemblyRules::latch_owner(&scene, &rack),
+        Some(second.child.clone())
+    );
+    AssemblyRules::set_joint_value(&mut scene, &rack, 5.).unwrap();
+    assert_eq!(
+        AssemblyRules::mechanism_for_joint(&scene, &second.child)
+            .unwrap()
+            .latch,
+        0.25
+    );
+    AssemblyRules::set_slider(&mut scene, &second.child, 17.).unwrap();
+    assert_eq!(
+        AssemblyRules::mechanism_for_joint(&scene, &second.child)
+            .unwrap()
+            .latch,
+        1.
+    );
+    let before = snapshot(&scene);
+    assert!(AssemblyRules::set_joint_value(&mut scene, &rack, 0.).is_err());
+    assert_eq!(snapshot(&scene), before);
+    AssemblyRules::set_slider(&mut scene, &second.child, 0.).unwrap();
+    assert_eq!(
+        AssemblyRules::mechanism_for_joint(&scene, &first.child)
+            .unwrap()
+            .latch,
+        0.
+    );
+    scene.relations.retain(|r| r.child != rack);
+    let before = snapshot(&scene);
+    assert!(AssemblyRules::set_slider(&mut scene, &second.child, 15.).is_err());
+    assert_eq!(snapshot(&scene), before);
+    assert!(AssemblyRules::plan_latch(&scene, &first.child, true).is_ok());
+}
+
 #[test]
 fn shared_shell_retains_independent_slider_axes_and_descendant_motion() {
     let mut scene =
@@ -345,6 +502,29 @@ fn animation_rechecks_support_travel_and_missing_lock_constraints_before_committ
         .is_err()
     );
     assert_eq!(snapshot(&scene), before);
+}
+
+#[test]
+fn supporting_a_member_interrupts_lock_release_but_allows_relatching_in_place() {
+    let mut scene = hinged_box("Facade.stl");
+    let lid = PartId::of(&scene.parts[1]);
+    let release = AssemblyRules::plan_latch(&scene, &lid, true).unwrap();
+    let partial = release.sample(release.duration * 0.4);
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, partial).unwrap();
+    scene.member_supports = vec![vec![], vec![0]];
+    let before = snapshot(&scene);
+    assert!(AssemblyRules::plan_latch(&scene, &lid, true).is_err());
+    assert!(
+        AssemblyRules::apply_motion_sample(&mut scene, &lid, release.sample(release.duration))
+            .is_err()
+    );
+    assert_eq!(snapshot(&scene), before);
+    let close = AssemblyRules::plan_latch(&scene, &lid, false).unwrap();
+    assert!((close.sample(0.).latch - partial.latch).abs() < 1e-6);
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, close.sample(close.duration)).unwrap();
+    let restored = AssemblyRules::mechanism_for_joint(&scene, &lid).unwrap();
+    assert_eq!((restored.value, restored.latch), (0., 0.));
+    assert!(!restored.can_toggle_latch());
 }
 fn pair() -> Scene {
     Scene::combine_positioned(

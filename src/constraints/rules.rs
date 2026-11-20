@@ -1,6 +1,8 @@
 //! Canonical assembly and motion policy. Geometry fitting remains in the specialist modules.
+use super::kinematics::LatchJoint;
 use super::*;
 use std::ops::RangeInclusive;
+mod latches;
 #[cfg(test)]
 mod tests;
 
@@ -118,46 +120,9 @@ impl AssemblyRules {
                 "Motion joint does not contain a valid closed datum and travel range".into(),
             );
         }
-        let mut latch = 0.;
-        if kind == MotionKind::Lid {
-            let travel = Self::lock_travel(scene, member);
-            let mut fractions = Vec::new();
-            let mut count = [0; 2];
-            for lock in scene
-                .relations
-                .iter()
-                .filter(|r| r.child.instance / crate::scene::MEMBER_STRIDE == member)
-            {
-                let slot = match Self::label(&lock.label) {
-                    crate::sustainer::LOCK_INNER => 0,
-                    crate::sustainer::LOCK_OUTER => 1,
-                    _ => continue,
-                };
-                count[slot] += 1;
-                let Joint::Hinge { angle, .. } = lock.joint else {
-                    return Err("Lock joint is not hinged".into());
-                };
-                let delta = if slot == 0 { travel.0 } else { travel.1 };
-                if delta.abs() > 0.001 {
-                    fractions.push(angle / delta);
-                }
-            }
-            if count.contains(&0) {
-                return Err("Opening requires both inner and outer lock joints".into());
-            }
-            latch = fractions
-                .first()
-                .copied()
-                .unwrap_or(if value > 0.001 { 1. } else { 0. });
-            if fractions
-                .iter()
-                .any(|f| !f.is_finite() || (*f - latch).abs() > 0.01)
-                || !(-0.001..=1.001).contains(&latch)
-                || (value > 0.001 && latch < 0.999)
-            {
-                return Err("Lid and lock joints are in inconsistent motion states".into());
-            }
-            latch = latch.clamp(0., 1.);
+        let (latch_joints, latch) = Self::latch_state(scene, kind, child)?;
+        if !latch_joints.is_empty() && value > 0.001 && latch < 0.999 {
+            return Err("An open mechanism requires released locks".into());
         }
         Ok(Mechanism {
             child: child.clone(),
@@ -166,6 +131,7 @@ impl AssemblyRules {
             max,
             value,
             latch,
+            latch_joints,
             supports_upper: scene
                 .member_supports
                 .iter()
@@ -211,7 +177,7 @@ impl AssemblyRules {
     pub fn plan_motion(scene: &Scene, child: &PartId, goal: f32) -> Result<MotionPlan, String> {
         let m = Self::mechanism_for_joint(scene, child)?;
         Self::validate_motion_value(&m, goal)?;
-        let release_time = if m.kind == MotionKind::Lid && goal > m.min + 0.001 {
+        let release_time = if m.has_latch() && goal > m.min + 0.001 {
             (1. - m.latch) * Self::LATCH_SECONDS
         } else {
             0.
@@ -222,7 +188,7 @@ impl AssemblyRules {
             } else {
                 Self::DRAWER_SPEED
             };
-        let lock_time = if m.kind == MotionKind::Lid && goal <= m.min + 0.001 {
+        let lock_time = if m.has_latch() && goal <= m.min + 0.001 {
             (if move_time > 0. { 1. } else { m.latch }) * Self::LATCH_SECONDS
         } else {
             0.
@@ -231,6 +197,7 @@ impl AssemblyRules {
             mechanism: m,
             goal,
             duration: release_time + move_time + lock_time,
+            latch_only: None,
             release_time,
             move_time,
             lock_time,
@@ -258,31 +225,32 @@ impl AssemblyRules {
         if !sample.latch.is_finite() || !(0. ..=1.).contains(&sample.latch) {
             return Err("Invalid motion sample".into());
         }
-        if m.kind == MotionKind::Lid && sample.value > 0.001 && sample.latch < 0.999 {
-            return Err("Lid lift requires released locks".into());
+        if !m.has_latch() && sample.latch > 0. {
+            return Err("This mechanism has no lock to release".into());
         }
-        let member = m.child.instance / crate::scene::MEMBER_STRIDE;
-        let travel = (m.kind == MotionKind::Lid).then(|| Self::lock_travel(scene, member));
-        for r in &mut scene.relations {
-            if r.child == m.child {
-                match &mut r.joint {
-                    Joint::Slider { offset, .. } => *offset = sample.value,
-                    Joint::Hinge { angle, .. } => *angle = sample.value,
-                    _ => return Err("Motion joint changed".into()),
-                }
-            } else if let Some((inner, outer)) = travel
-                && r.child.instance / crate::scene::MEMBER_STRIDE == member
-            {
-                let delta = match Self::label(&r.label) {
-                    crate::sustainer::LOCK_INNER => inner,
-                    crate::sustainer::LOCK_OUTER => outer,
-                    _ => continue,
-                };
-                let Joint::Hinge { angle, .. } = &mut r.joint else {
-                    return Err("Lock joint changed".into());
-                };
-                *angle = delta * sample.latch;
-            }
+        if m.has_latch() && sample.value > 0.001 && sample.latch < 0.999 {
+            return Err("Release the lock before moving the drawer or lid".into());
+        }
+        if m.kind == MotionKind::Lid && m.supports_upper && sample.latch > m.latch + 1e-6 {
+            return Err("A supporting lid cannot be unlocked".into());
+        }
+        let driver = scene
+            .relations
+            .iter_mut()
+            .find(|r| r.child == m.child)
+            .ok_or("Motion joint changed")?;
+        match &mut driver.joint {
+            Joint::Slider { offset, .. } => *offset = sample.value,
+            Joint::Hinge { angle, .. } => *angle = sample.value,
+            _ => return Err("Motion joint changed".into()),
+        }
+        for latch in &m.latch_joints {
+            let value = match &mut scene.relations[latch.relation].joint {
+                Joint::Slider { offset, .. } => offset,
+                Joint::Hinge { angle, .. } => angle,
+                _ => return Err("Lock joint changed".into()),
+            };
+            *value = latch.released * sample.latch;
         }
         solve(scene)
     }
@@ -673,7 +641,7 @@ impl AssemblyRules {
         if mechanism.kind != kind {
             return Err("Selected joint does not support the requested motion".into());
         }
-        let latch = if kind == MotionKind::Lid && value > 0. {
+        let latch = if mechanism.has_latch() && value > mechanism.min + 0.001 {
             1.
         } else {
             0.
@@ -706,6 +674,23 @@ impl AssemblyRules {
         }
         if Self::label(&relation.label) == Self::DRAWER_SLIDE {
             return Self::set_motion_endpoint(scene, child, MotionKind::Drawer, value).map(Some);
+        }
+        if let Some(owner) = Self::latch_owner(scene, child) {
+            let m = Self::mechanism_for_joint(scene, &owner)?;
+            let latch = m
+                .latch_joints
+                .iter()
+                .find(|latch| &scene.relations[latch.relation].child == child)
+                .ok_or("Lock control is unavailable")?;
+            if latch.released.abs() < 0.001 {
+                return Err("This lock joint has no independent travel".into());
+            }
+            let sample = MotionSample {
+                value: m.value,
+                latch: value / latch.released,
+            };
+            return Self::transaction(scene, |candidate| Self::solve_sample(candidate, &m, sample))
+                .map(|()| None);
         }
         Self::transaction(scene, |candidate| {
             let relation = candidate

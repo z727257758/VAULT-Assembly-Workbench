@@ -1,3 +1,4 @@
+mod drawer_locks;
 pub mod drawers;
 mod exterior;
 pub mod layouts;
@@ -544,6 +545,8 @@ impl Scene {
                     })
             });
         let ids: Vec<_> = self.parts.iter().map(PartId::of).collect();
+        let mut lock_upgrades = self.upgraded_drawer_locks(old);
+        let drawer_lock_changed = !lock_upgrades.is_empty();
         let mut runner_joints = self.legacy_runner_joints(old);
         let runner_motion_changed = self.relations.iter().any(|r| {
             matches!(r.joint, crate::constraints::Joint::RunnerGuide { .. })
@@ -579,6 +582,7 @@ impl Scene {
                             || r.label.starts_with("Gridfinity bin /"))
                 });
                 let source_owned = upgraded_stoppers.contains(&id)
+                    || lock_upgrades.contains_key(&id)
                     || legacy_hidden
                     || layout_owned
                     || old_sustainer_estimates
@@ -614,6 +618,9 @@ impl Scene {
             }
         }
         for relation in &mut self.relations {
+            if let Some(upgrade) = lock_upgrades.remove(&relation.child) {
+                *relation = upgrade;
+            }
             if let Some(joint) = runner_joints.remove(&relation.child) {
                 relation.joint = joint;
             }
@@ -628,6 +635,7 @@ impl Scene {
             && self.geometry_stamps() == old.geometry_stamps()
             && !layout_changed
             && !runner_motion_changed
+            && !drawer_lock_changed
             && self.constraint_warning.is_none()
             && ids
                 .iter()

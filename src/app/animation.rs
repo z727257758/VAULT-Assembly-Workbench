@@ -103,10 +103,11 @@ impl App {
             .tracks
             .iter()
             .map(|track| &track.plan)
-            .find(|plan| plan.mechanism.child == m.child);
+            .find(|plan| plan.mechanism.child == m.child && plan.latch_only.is_none());
         let goal = plan.map_or(m.value, |plan| plan.goal);
         let can_open = !(m.kind == MotionKind::Lid && m.supports_upper) && m.max > goal + 0.001;
-        let can_close = goal > m.min + 0.001 || (plan.is_none() && m.latch > 0.001);
+        let can_close = goal > m.min + 0.001
+            || (plan.is_none() && m.kind == MotionKind::Lid && m.supports_upper && m.latch > 0.001);
         let toggle = match (can_open, can_close) {
             (true, true) if plan.is_some_and(|plan| plan.goal < plan.mechanism.value) => {
                 Some(m.max)
@@ -119,6 +120,66 @@ impl App {
             can_open,
             can_close,
             toggle,
+        }
+    }
+
+    fn latch_toggle_ui(&mut self, ui: &mut egui::Ui, m: &Mechanism, ctx: &egui::Context) {
+        if !m.has_latch() {
+            return;
+        }
+        let playing = self
+            .animation
+            .tracks
+            .iter()
+            .find(|t| t.plan.mechanism.child == m.child);
+        let supported = m.kind == MotionKind::Lid && m.supports_upper;
+        let release = match playing.and_then(|t| t.plan.latch_only) {
+            Some(released) => !released,
+            None if supported => m.latch <= 0.001,
+            None => m.latch < 0.5,
+        };
+        let enabled = m.can_toggle_latch()
+            && !(release && supported)
+            && playing.is_none_or(|t| t.plan.latch_only.is_some());
+        let z = self.zh;
+        let (label, hint) = match (m.kind, release) {
+            (MotionKind::Drawer, true) => (
+                t(z, "解锁", "Unlock"),
+                t(z, "转动抽屉旋钮解锁", "Turn the drawer knob to unlock"),
+            ),
+            (MotionKind::Drawer, false) => (
+                t(z, "上锁", "Lock"),
+                t(z, "转回抽屉旋钮上锁", "Turn the drawer knob back to lock"),
+            ),
+            (MotionKind::Lid, true) => (
+                t(z, "松扣", "Unlatch"),
+                t(z, "松开箱盖正面的搭扣", "Release the front lid clasp"),
+            ),
+            (MotionKind::Lid, false) => (
+                t(z, "扣合", "Latch"),
+                t(z, "扣紧箱盖正面的搭扣", "Fasten the front lid clasp"),
+            ),
+        };
+        if ui
+            .add_enabled(enabled, egui::Button::new(label))
+            .on_hover_text(hint)
+            .on_disabled_hover_text(if supported {
+                t(
+                    z,
+                    "箱盖支承着上层，搭扣应保持扣合",
+                    "Keep the clasp fastened while the lid supports an upper member",
+                )
+            } else {
+                t(
+                    z,
+                    "完全闭合并停止开合后可操作",
+                    "Available when fully closed and stationary",
+                )
+            })
+            .clicked()
+            && let Err(error) = self.animate_latch_to(&m.child, release, ctx)
+        {
+            self.status = error;
         }
     }
 
@@ -168,6 +229,7 @@ impl App {
                 )
             });
         }
+        self.latch_toggle_ui(ui, &m, ctx);
     }
 
     pub(super) fn commit_motion_goal(&mut self, m: &Mechanism, goal: f32) -> Result<(), String> {
@@ -216,6 +278,14 @@ impl App {
         goal: f32,
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        self.ensure_motion_ready()?;
+        let plan = AssemblyRules::plan_motion(&self.scene, child, goal)?;
+        self.commit_motion_goal(&plan.mechanism, goal)?;
+        self.play_motion(plan, ctx);
+        Ok(())
+    }
+
+    fn ensure_motion_ready(&self) -> Result<(), String> {
         if self.busy || self.preview.has_pending() || !self.scene.assembly {
             return Err(t(
                 self.zh,
@@ -224,15 +294,37 @@ impl App {
             )
             .into());
         }
-        let plan = AssemblyRules::plan_motion(&self.scene, child, goal)?;
-        self.commit_motion_goal(&plan.mechanism, goal)?;
-        self.animation
-            .tracks
-            .retain(|t| t.plan.mechanism.child != *child);
+        Ok(())
+    }
+
+    fn animate_latch_to(
+        &mut self,
+        child: &crate::constraints::PartId,
+        released: bool,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        self.ensure_motion_ready()?;
+        let plan = AssemblyRules::plan_latch(&self.scene, child, released)?;
+        if self.animating_opening(child) {
+            return Err(t(
+                self.zh,
+                "请等待开合动作完成",
+                "Wait for the opening or closing motion to finish",
+            )
+            .into());
+        }
+        self.play_motion(plan, ctx);
+        Ok(())
+    }
+
+    fn play_motion(&mut self, plan: MotionPlan, ctx: &egui::Context) {
+        self.cancel_joint_animation(&plan.mechanism.child);
         self.explosion = 0.;
         self.dimensions = false;
         self.preview_modes.mode = preview_modes::Mode::Assembly;
-        self.fit_motion_path(&plan);
+        if plan.latch_only.is_none() {
+            self.fit_motion_path(&plan);
+        }
         let last = plan.sample(0.);
         self.animation.tracks.push(Track {
             plan,
@@ -241,7 +333,6 @@ impl App {
         });
         self.collision_report = None;
         ctx.request_repaint();
-        Ok(())
     }
 
     fn fit_motion_path(&mut self, plan: &MotionPlan) {
@@ -293,6 +384,13 @@ impl App {
             .retain(|t| &t.plan.mechanism.child != child);
     }
 
+    pub(super) fn animating_opening(&self, child: &crate::constraints::PartId) -> bool {
+        self.animation
+            .tracks
+            .iter()
+            .any(|t| &t.plan.mechanism.child == child && t.plan.latch_only.is_none())
+    }
+
     pub(super) fn animation_tick(&mut self, ctx: &egui::Context) {
         if self.smoke && std::env::args().any(|a| a == "--smoke-motion") {
             return;
@@ -339,7 +437,9 @@ impl App {
                     }
                 }
                 Err(error) => {
-                    let _ = self.commit_motion_goal(&track.plan.mechanism, track.last.value);
+                    if track.plan.latch_only.is_none() {
+                        let _ = self.commit_motion_goal(&track.plan.mechanism, track.last.value);
+                    }
                     self.status = error;
                     refresh = true;
                 }
@@ -390,6 +490,7 @@ impl App {
             {
                 requested = Some(m.min);
             }
+            self.latch_toggle_ui(ui, &m, ctx);
         });
         if blocked {
             ui.small(t(

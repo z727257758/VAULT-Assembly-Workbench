@@ -39,13 +39,19 @@ impl App {
     ) -> Result<(), String> {
         let mut candidate = self.scene.clone();
         let mechanism = AssemblyRules::set_joint_value(&mut candidate, child, value)?;
+        let owner = AssemblyRules::latch_owner(&candidate, child);
         if let Some(m) = &mechanism {
             self.commit_motion_goal(m, value)?;
+        } else if let Some(id) = &owner
+            && self.animating_opening(id)
+        {
+            let m = AssemblyRules::mechanism_for_joint(&candidate, id)?;
+            self.commit_motion_goal(&m, m.value)?;
         }
         self.scene = candidate;
         self.scene.calibrated = false;
         self.collision_report = None;
-        self.cancel_joint_animation(child);
+        self.cancel_joint_animation(owner.as_ref().unwrap_or(child));
         if mechanism.is_some() && (self.busy || self.preview.has_pending()) {
             // Replace any in-flight request captured before the preference changed.
             self.assembly(ctx);
