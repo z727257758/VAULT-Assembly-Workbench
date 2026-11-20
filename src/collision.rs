@@ -107,12 +107,22 @@ impl Tree {
         node
     }
     fn crossing(&self, other: &Self, eps: f32) -> Option<Vec3> {
-        self.crossings(other, eps, 1).into_iter().next()
+        let mut first = None;
+        self.visit_crossings(other, eps, |segment| {
+            first = Some(segment.midpoint());
+            false
+        });
+        first
     }
-    fn crossings(&self, other: &Self, eps: f32, limit: usize) -> Vec<Vec3> {
-        let mut hits = Vec::new();
+    /// Stops when the visitor returns false. Returns true on a complete traversal.
+    fn visit_crossings(
+        &self,
+        other: &Self,
+        eps: f32,
+        mut visit: impl FnMut(CrossingSegment) -> bool,
+    ) -> bool {
         if self.nodes.is_empty() || other.nodes.is_empty() {
-            return hits;
+            return true;
         }
         let mut stack = vec![(0, 0)];
         while let Some((a, b)) = stack.pop() {
@@ -137,21 +147,28 @@ impl Tree {
                             let b = &other.triangles[j];
                             if a.bounds.overlaps(b.bounds, eps)
                                 && let Some(p) = cross_triangles(a.p, b.p, eps)
+                                && !visit(p)
                             {
-                                hits.push(p);
-                                if hits.len() >= limit {
-                                    return hits;
-                                }
+                                return false;
                             }
                         }
                     }
                 }
             }
         }
-        hits
+        true
     }
 }
-fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
+struct CrossingSegment {
+    start: Vec3,
+    end: Vec3,
+}
+impl CrossingSegment {
+    fn midpoint(&self) -> Vec3 {
+        self.start.midpoint(self.end)
+    }
+}
+fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<CrossingSegment> {
     let a = a.map(|p| p.as_dvec3());
     let b = b.map(|p| p.as_dvec3());
     let na = (a[1] - a[0]).cross(a[2] - a[0]).normalize_or_zero();
@@ -197,7 +214,10 @@ fn cross_triangles(a: [Vec3; 3], b: [Vec3; 3], eps: f32) -> Option<Vec3> {
     let hi = ia[1].min(ib[1]);
     // Both finite plane-cut segments must overlap. An inclusive barycentric
     // edge test can mistake adjacent notch/flange boundaries for a crossing.
-    (hi - lo > eps).then(|| (origin + direction * ((lo + hi) / 2.)).as_vec3())
+    (hi - lo > eps).then(|| CrossingSegment {
+        start: (origin + direction * lo).as_vec3(),
+        end: (origin + direction * hi).as_vec3(),
+    })
 }
 #[derive(Clone)]
 pub struct Crossing {
@@ -346,11 +366,34 @@ fn check_between_members_with_budget(
     Ok(pairs)
 }
 
+/// Both ends of every intersection segment must lie in the convex contact
+/// region, so the entire segment is inside. Empty pairs have no contact.
+pub(crate) fn all_crossings_match(
+    a: &Part,
+    b: &Part,
+    tolerance: f32,
+    mut matches: impl FnMut(Vec3) -> bool,
+) -> bool {
+    let first = Tree::from_part(a, 0.);
+    let second = Tree::from_part(b, 0.);
+    let mut found = false;
+    let completed = first.visit_crossings(&second, tolerance, |segment| {
+        found = true;
+        matches(segment.start) && matches(segment.end)
+    });
+    found && completed
+}
+
 #[cfg(test)]
 pub fn audit_pair(scene: &Scene, a: usize, b: usize) -> Vec<Vec3> {
     let first = Tree::from_part(&scene.parts[a], 0.);
     let second = Tree::from_part(&scene.parts[b], 0.);
-    first.crossings(&second, 0.01, 100_000)
+    let mut hits = Vec::new();
+    first.visit_crossings(&second, 0.01, |segment| {
+        hits.push(segment.midpoint());
+        hits.len() < 100_000
+    });
+    hits
 }
 
 #[cfg(test)]
@@ -412,6 +455,27 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn localized_contact_requires_every_crossing_in_the_region() {
+        let mut scene = member_triangles();
+        let mesh = std::sync::Arc::make_mut(&mut scene.parts[1].mesh);
+        let mut second = mesh.vertices.clone();
+        for vertex in &mut second {
+            vertex.position[0] += 0.25;
+        }
+        mesh.vertices.extend(second);
+        mesh.max.x += 0.25;
+        mesh.size = mesh.max - mesh.min;
+        let [a, b] = &scene.parts[..] else {
+            unreachable!()
+        };
+        assert!(all_crossings_match(a, b, 0.01, |p| (-0.01..0.26).contains(&p.x)));
+        assert!(!all_crossings_match(a, b, 0.01, |p| p.x < 0.1));
+        assert!(!all_crossings_match(a, b, 0.01, |p| p.x > 0.1));
+        assert!(!all_crossings_match(a, b, 0.01, |p| p.y < 0.75));
+        assert!(!all_crossings_match(a, a, 0.01, |_| true));
+    }
+
     #[test]
     fn cross_member_check_uses_actual_triangles_and_the_requested_explosion_pose() {
         let mut scene = member_triangles();

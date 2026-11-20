@@ -2,6 +2,7 @@ mod drawer_locks;
 pub mod drawers;
 mod exterior;
 pub mod layouts;
+mod lid_latches;
 pub(crate) mod print_bed;
 mod target;
 use crate::{catalog::Bom, display::Rules, mesh::Mesh};
@@ -510,16 +511,28 @@ impl Scene {
                 .relations
                 .iter()
                 .any(|r| r.label == crate::sustainer::UPPER_SEAT);
-        let old_latch_defaults = !old.calibrated
-            && old.relations.iter().any(|r| {
-                r.label
-                    .starts_with("Sustainer datum: inner lock / small pins")
-                    && r.label != crate::sustainer::LOCK_INNER
+        let old_latch_members: std::collections::HashSet<_> = old
+            .relations
+            .iter()
+            .filter(|r| {
+                let label = crate::constraints::AssemblyRules::label(&r.label);
+                !old.calibrated
+                    && label.starts_with("Sustainer datum: inner lock / small pins")
+                    && crate::constraints::AssemblyRules::lid_latch_slot(label).is_none()
             })
-            && self
-                .relations
-                .iter()
-                .any(|r| r.label == crate::sustainer::LOCK_INNER);
+            .map(|r| r.child.instance / MEMBER_STRIDE)
+            .filter(|&member| {
+                self.relations.iter().any(|r| {
+                    r.child.instance / MEMBER_STRIDE == member
+                        && crate::constraints::AssemblyRules::label(&r.label)
+                            == crate::sustainer::LOCK_INNER
+                })
+            })
+            .collect();
+        let old_latch_defaults = |id: &PartId| {
+            id.path.contains("/Locks/")
+                && old_latch_members.contains(&(id.instance / MEMBER_STRIDE))
+        };
         let upgraded_stoppers: Vec<_> = self
             .relations
             .iter()
@@ -554,7 +567,8 @@ impl Scene {
             });
         let ids: Vec<_> = self.parts.iter().map(PartId::of).collect();
         let mut lock_upgrades = self.upgraded_drawer_locks(old);
-        let drawer_lock_changed = !lock_upgrades.is_empty();
+        lock_upgrades.extend(self.upgraded_lid_latches(old));
+        let lock_changed = !lock_upgrades.is_empty();
         let mut runner_joints = self.legacy_runner_joints(old);
         let runner_motion_changed = self.relations.iter().any(|r| {
             matches!(r.joint, crate::constraints::Joint::RunnerGuide { .. })
@@ -595,7 +609,7 @@ impl Scene {
                     || layout_owned
                     || old_sustainer_estimates
                     || old_sustainer_seats
-                    || old_latch_defaults && part.pose.path.contains("/Locks/");
+                    || old_latch_defaults(&id);
                 if old_parent == new_parent && !source_owned {
                     part.pose = previous.pose.clone();
                 }
@@ -606,7 +620,7 @@ impl Scene {
             if !(upgraded_stoppers.contains(&relation.child)
                 || old_sustainer_estimates
                 || old_sustainer_seats
-                || old_latch_defaults && relation.child.path.contains("/Locks/"))
+                || old_latch_defaults(&relation.child))
                 && ids.contains(&relation.parent)
                 && ids.contains(&relation.child)
                 && self
@@ -643,7 +657,7 @@ impl Scene {
             && self.geometry_stamps() == old.geometry_stamps()
             && !layout_changed
             && !runner_motion_changed
-            && !drawer_lock_changed
+            && !lock_changed
             && self.constraint_warning.is_none()
             && ids
                 .iter()

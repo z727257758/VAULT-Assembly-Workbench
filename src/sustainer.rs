@@ -16,8 +16,8 @@ pub fn is_scene(scene: &Scene) -> bool {
 }
 pub const LID: &str = "Sustainer datum: lid / paired hinge axes";
 pub const UPPER_SEAT: &str = "Sustainer datum: upper hinge / roof seat / inside-seat-v5";
-pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / inside-seat-v5";
-pub const LOCK_OUTER: &str = "Sustainer datum: outer lock / large pins / inside-seat-v5";
+pub const LOCK_INNER: &str = "Sustainer datum: inner lock / small pins / clasp-pose-v6";
+pub const LOCK_OUTER: &str = "Sustainer datum: outer lock / large pins / clasp-pose-v6";
 
 fn raw(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, z, -y)
@@ -1331,6 +1331,17 @@ pub fn review_notes(scene: &Scene, zh: bool) -> Vec<&'static str> {
     if scene
         .parts
         .iter()
+        .any(|p| p.pose.path.contains("/LOCK OUTER PART"))
+    {
+        notes.push(if zh {
+            "正面搭扣锁紧时，钩头与盖沿的咬合处可能有局部表面交叉。实际松紧度待实物核对。"
+        } else {
+            "The front clasp hook may locally cross the lid lip when engaged. The holding fit needs a physical check."
+        });
+    }
+    if scene
+        .parts
+        .iter()
         .any(|p| p.pose.path.ends_with("LOCK OUTER PART 1F.stl"))
     {
         notes.push(if zh { "部分 1F 源件的支座背面 UP 凸字与盖内沿有局部相交提示；保留原几何，待实物核对。" }
@@ -1398,6 +1409,54 @@ fn holder_marking_crossing(scene: &Scene, pair: &crate::collision::Crossing) -> 
     }
     false
 }
+
+fn clasp_lip_crossing(scene: &Scene, pair: &crate::collision::Crossing, tolerance: f32) -> bool {
+    if lid_angle(scene).is_none_or(|a| a.abs() > 0.0001) {
+        return false;
+    }
+    let Some((outer, roof)) = [(pair.a, pair.b), (pair.b, pair.a)]
+        .into_iter()
+        .map(|(a, b)| (&scene.parts[a], &scene.parts[b]))
+        .find(|(a, b)| {
+            a.pose.path.contains("/LOCK OUTER PART")
+                && b.pose.path.contains(" Roof")
+                && !b.pose.path.contains("Connector")
+        })
+    else {
+        return false;
+    };
+    let closed_hinge = |id: &constraints::PartId, label: &str| {
+        scene.relations.iter().find(|r| {
+            &r.child == id
+                && r.label == label
+                && matches!(r.joint, Joint::Hinge { angle, .. } if angle.abs() < 0.0001)
+        })
+    };
+    let Some(joint) = closed_hinge(&constraints::PartId::of(outer), LOCK_OUTER) else {
+        return false;
+    };
+    if closed_hinge(&joint.parent, LOCK_INNER).is_none() {
+        return false;
+    }
+
+    // In the locked clasp's STL frame +X points up and +Y out of the facade.
+    // Locate the front rim of this roof half in the same frame as the return hook.
+    let to_raw = raw_frame() * outer.pose.matrix(0.).inverse();
+    let roof_to_raw = to_raw * roof.pose.matrix(0.);
+    let front = roof
+        .mesh
+        .vertices
+        .iter()
+        .map(|v| roof_to_raw.transform_point3(v.position.into()).y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    crate::collision::all_crossings_match(outer, roof, tolerance, |point| {
+        let p = to_raw.transform_point3(point);
+        (4.5..10.).contains(&(outer.mesh.max.x - p.x))
+            && (-9.1..-2.).contains(&p.y)
+            && (4.0..11.).contains(&(front - p.y))
+    })
+}
+
 fn latch_crossings(
     scene: &Scene,
     report: &crate::collision::Report,
@@ -1407,7 +1466,8 @@ fn latch_crossings(
         .map(|pair| {
             let marking_review = holder_marking_crossing(scene, pair)
                 && coarse.is_some_and(|r| !r.pairs.iter().any(|p| p.a == pair.a && p.b == pair.b));
-            serde_json::json!({"a":constraints::PartId::of(&scene.parts[pair.a]),"b":constraints::PartId::of(&scene.parts[pair.b]),"point":pair.point.to_array(),"holder_marking_review":marking_review})
+            let clasp_lip_review = clasp_lip_crossing(scene, pair, report.tolerance);
+            serde_json::json!({"a":constraints::PartId::of(&scene.parts[pair.a]),"b":constraints::PartId::of(&scene.parts[pair.b]),"point":pair.point.to_array(),"holder_marking_review":marking_review,"clasp_lip_review":clasp_lip_review})
         }).collect()
 }
 
@@ -1427,6 +1487,7 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
     let mut failures = 0;
     let mut latch_failures = 0;
     let mut marking_reviews = 0;
+    let mut clasp_lip_reviews = 0;
     for (selection, options) in catalog::sustainer_configurations() {
         let key = options.key(&selection);
         let result = catalog.sustainer_bom(&selection, options).and_then(|bom| {
@@ -1448,7 +1509,7 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
                 let other_surface_crossings = surface.pairs.len() - latch_surface_crossings.len();
                 if latch_surface_crossings
                     .iter()
-                    .any(|p| p["holder_marking_review"] != true)
+                    .any(|p| p["holder_marking_review"] != true && p["clasp_lip_review"] != true)
                 {
                     latch_failures += 1;
                 }
@@ -1457,6 +1518,12 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
                     .any(|p| p["holder_marking_review"] == true)
                 {
                     marking_reviews += 1;
+                }
+                if latch_surface_crossings
+                    .iter()
+                    .any(|p| p["clasp_lip_review"] == true)
+                {
+                    clasp_lip_reviews += 1;
                 }
                 let checks: Vec<_> = scene
                     .mating_checks
@@ -1513,7 +1580,7 @@ pub fn audit(root: &std::path::Path, home: &std::path::Path) -> Result<(), Strin
         rows.len()
     )
     .unwrap();
-    writeln!(report,"\n卡扣局部表面检查：{latch_failures} 组检出未归类相交；另有 {marking_reviews} 组支座 UP 凸字与盖内沿的微小相交待核对（阈值 0.05 mm），涵盖支座、内外扣和装配展示销钉。销钉采用伸直近似；其他箱体相交、弹性及制造配合未验证。详见 report.json 的 latch_surface_crossings。凸字提示仍保留在报告中，不表示无干涉；同一对在 0.2 mm 复核仍检出时视为失败。\n").unwrap();
+    writeln!(report,"\n卡扣局部表面检查检出 {latch_failures} 组未归类相交。{clasp_lip_reviews} 组闭锁位的交点集中在上钩与盖沿，{marking_reviews} 组支座 UP 凸字与盖内沿相交。全部记录保留在 report.json 的 latch_surface_crossings 中，阈值为 0.05 mm。凸字与盖沿在 0.2 mm 复核仍相交时计为失败。销钉采用伸直近似，弹性和实物配合仍待核对。\n").unwrap();
     report.push_str("\n主要待核对项：M 全部 21 组的相邻铰链端面有约 −0.125 mm 轴向间隙；XL4 三种箱体的后安装孔竖距为 14 mm、下铰链为 15.4 mm，居中配对后每孔偏约 0.7 mm。软件保留两件的原始孔阵列；原始 STL 不变，只有装配展示销钉采用伸直近似。\n\n分盖连接件按 S/M/L/XL 分别配置 2/3/4/5 个；在接缝两侧共六个截面检查其渐变轮廓及槽壁间隙。\n\n代表规格的 0°、1°、5°、15°、30°、45°、75°、110° 三角面相交诊断另见 surface-report.json。箱体、顶盖等保留打印支撑的展示网格仍报告其他相交；不能据此视作完整无干涉装配。孔轴/安装面通过也不代表 CAD 或实物配合通过。\n");
     fs::write(folder.join("report.md"), report).map_err(|e| e.to_string())?;
     fs::write(
@@ -1618,7 +1685,11 @@ pub(crate) fn layout_explosion(scene: &mut Scene) -> Result<(), String> {
     }
     // In the exploded view, place the removable lock links outside the facade.
     // The holder stays inside; the solving graph and assembled poses are unchanged.
-    for relation in scene.relations.iter().filter(|r| r.label == LOCK_INNER) {
+    for relation in scene
+        .relations
+        .iter()
+        .filter(|r| constraints::AssemblyRules::lid_latch_slot(&r.label) == Some(0))
+    {
         let child = ids
             .iter()
             .position(|id| id == &relation.child)
@@ -1926,6 +1997,48 @@ pub(crate) fn layout_explosion(scene: &mut Scene) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::catalog::{Catalog, Selection, SustainerBody, SustainerOptions};
+
+    fn check_clasp_pose(scene: &Scene, released: bool) {
+        let by_id = |id: &constraints::PartId| {
+            scene
+                .parts
+                .iter()
+                .find(|p| constraints::PartId::of(p) == *id)
+                .unwrap()
+        };
+        let pin = |r: &Relation| {
+            let Joint::Hinge { pivot, axis, .. } = r.joint else {
+                panic!("Missing clasp hinge")
+            };
+            let mount = by_id(&r.parent).pose.matrix(0.);
+            assert!(
+                mount
+                    .transform_vector3(axis.into())
+                    .abs_diff_eq(Vec3::X, 0.002)
+            );
+            mount.transform_point3(pivot.into())
+        };
+        for outer in scene.relations.iter().filter(|r| r.label == LOCK_OUTER) {
+            let inner = scene
+                .relations
+                .iter()
+                .find(|r| r.child == outer.parent && r.label == LOCK_INNER)
+                .unwrap();
+            let offset = pin(outer) - pin(inner);
+            let up = by_id(&outer.child)
+                .pose
+                .matrix(0.)
+                .transform_vector3(raw(1., 0., 0.));
+            assert!((offset.length() - 15.).abs() < 0.03);
+            if released {
+                assert!(offset.z > 14. && offset.y.abs() < 4.);
+                assert!(up.y > 0.95 && (0.23..0.29).contains(&up.z));
+            } else {
+                assert!(offset.y < -14.8 && (0.9..1.6).contains(&offset.z));
+                assert!(up.abs_diff_eq(Vec3::Y, 0.002));
+            }
+        }
+    }
     #[test]
     #[ignore = "requires VAULT_MODEL_ROOT"]
     fn sustainer_stacking_latches_restore_and_follow_housing() {
@@ -2616,11 +2729,13 @@ mod tests {
         let mut surface_reports = Vec::new();
         for (width, depth, height, body, split_roof) in [
             ("S", 3, "1F", SustainerBody::Flat, false),
+            ("S", 4, "2F", SustainerBody::Flat, false),
             ("M", 4, "2F", SustainerBody::Flat, false),
             ("L", 3, "1F", SustainerBody::Flat, false),
             ("L", 4, "2F", SustainerBody::Sealed, false),
             ("L", 6, "4F", SustainerBody::Dividers, true),
             ("S", 7, "4F", SustainerBody::Flat, true),
+            ("XL", 4, "1F", SustainerBody::Flat, false),
             ("XL", 7, "1F", SustainerBody::Flat, true),
         ] {
             let selection = Selection {
@@ -2635,13 +2750,17 @@ mod tests {
             let mut scene =
                 Scene::load(&c.root, &bom, "Sustainer regression".into(), true).unwrap();
             assert!(!scene.calibrated);
-            assert!(
-                scene
-                    .mating_checks
-                    .iter()
-                    .filter(|c| c.required)
-                    .all(|c| c.evaluate(&scene).within_tolerance)
-            );
+            for result in scene
+                .mating_checks
+                .iter()
+                .filter(|c| c.required)
+                .map(|c| c.evaluate(&scene))
+                .filter(|r| !r.within_tolerance)
+            {
+                assert_eq!((width, depth), ("XL", 4));
+                assert!(result.label.starts_with("lower hinge / housing: fastener"));
+                assert!((result.error_mm - 0.7).abs() < 0.005);
+            }
             assert_eq!(
                 scene.relations.len() + 1,
                 scene.parts.len(),
@@ -2777,6 +2896,34 @@ mod tests {
                 *angle = 0.;
             }
             constraints::solve(&mut scene).unwrap();
+            check_clasp_pose(&scene, false);
+            let lid = scene
+                .relations
+                .iter()
+                .find(|r| r.label == LID)
+                .unwrap()
+                .child
+                .clone();
+            let release = constraints::AssemblyRules::plan_latch(&scene, &lid, true).unwrap();
+            constraints::AssemblyRules::apply_motion_sample(
+                &mut scene,
+                &lid,
+                release.sample(release.duration),
+            )
+            .unwrap();
+            assert_eq!(lid_angle(&scene), Some(0.));
+            check_clasp_pose(&scene, true);
+            let released = crate::collision::check(&scene, 0.05).unwrap();
+            for pair in &released.pairs {
+                assert!(
+                    ![pair.a, pair.b]
+                        .into_iter()
+                        .any(|i| scene.parts[i].pose.path.contains("/LOCK OUTER PART")),
+                    "Released clasp crossing: {} / {}",
+                    scene.parts[pair.a].label(false),
+                    scene.parts[pair.b].label(false)
+                );
+            }
             for angle in [0., 1., 5., 15., 30., 45., 75., 110.] {
                 set_lid_angle(&mut scene, angle).unwrap();
                 let diagnostic = crate::collision::check(&scene, 0.05).unwrap();
@@ -2784,6 +2931,10 @@ mod tests {
                     let a = &scene.parts[pair.a];
                     let b = &scene.parts[pair.b];
                     if [a, b].iter().any(|p| p.pose.path.contains("/Locks/")) {
+                        if clasp_lip_crossing(&scene, pair, diagnostic.tolerance) {
+                            assert_eq!(angle, 0.);
+                            continue;
+                        }
                         assert!(
                             holder_marking_crossing(&scene, pair),
                             "Unexpected latch crossing {width}{depth}/{height} angle={angle}: {} / {} @ {:?}",

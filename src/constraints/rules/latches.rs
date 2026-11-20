@@ -7,6 +7,53 @@ const DRAWER_ACTUATORS: [&str; 3] = [
 ];
 
 impl AssemblyRules {
+    pub(crate) const PREVIOUS_INNER: &str =
+        "Sustainer datum: inner lock / small pins / inside-seat-v5";
+    pub(crate) const PREVIOUS_OUTER: &str =
+        "Sustainer datum: outer lock / large pins / inside-seat-v5";
+
+    pub(crate) fn lid_latch_slot(label: &str) -> Option<usize> {
+        let label = Self::label(label);
+        if [crate::sustainer::LOCK_INNER, Self::PREVIOUS_INNER].contains(&label) {
+            Some(0)
+        } else if [crate::sustainer::LOCK_OUTER, Self::PREVIOUS_OUTER].contains(&label) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn previous_lid_latch(label: &str) -> bool {
+        [Self::PREVIOUS_INNER, Self::PREVIOUS_OUTER].contains(&Self::label(label))
+    }
+
+    /// Both recipe angles are measured in the same frame. The second hinge is
+    /// mounted on the moving inner link, so its coordinate is their difference.
+    pub(crate) fn lid_latch_angles(tall: bool, xl4: bool, previous: bool) -> ([f32; 2], [f32; 2]) {
+        let (closed, released) = if previous {
+            (
+                LatchDisplayPose {
+                    inner_degrees: -8.,
+                    outer_degrees: if xl4 { 10.5 } else { 9.5 },
+                },
+                LatchDisplayPose {
+                    inner_degrees: -90.,
+                    outer_degrees: 0.,
+                },
+            )
+        } else {
+            (
+                Self::latch_display_pose(tall, xl4),
+                Self::latch_release_pose(),
+            )
+        };
+        let relative =
+            |pose: LatchDisplayPose| [pose.inner_degrees, pose.outer_degrees - pose.inner_degrees];
+        let closed = relative(closed);
+        let released = relative(released);
+        (closed, [released[0] - closed[0], released[1] - closed[1]])
+    }
+
     pub(crate) fn is_drawer_lock(label: &str) -> bool {
         DRAWER_ACTUATORS.contains(&Self::label(label))
     }
@@ -31,7 +78,7 @@ impl AssemblyRules {
         if Self::is_drawer_lock(&r.label) {
             return Self::drawer_driver(scene, &r.parent).cloned();
         }
-        if [crate::sustainer::LOCK_INNER, crate::sustainer::LOCK_OUTER].contains(&label) {
+        if Self::lid_latch_slot(label).is_some() {
             let member = child.instance / crate::scene::MEMBER_STRIDE;
             return scene
                 .relations
@@ -51,7 +98,7 @@ impl AssemblyRules {
         driver: &PartId,
     ) -> Result<(Vec<LatchJoint>, f32), String> {
         let member = driver.instance / crate::scene::MEMBER_STRIDE;
-        let lid_travel = (kind == MotionKind::Lid).then(|| Self::lock_travel(scene, member));
+        let lid_variant = (kind == MotionKind::Lid).then(|| Self::latch_variant(scene, member));
         let mut joints = Vec::new();
         let mut fraction: Option<f32> = None;
         let mut count = [0; 3];
@@ -62,12 +109,13 @@ impl AssemblyRules {
             .filter(|(_, r)| r.child.instance / crate::scene::MEMBER_STRIDE == member)
         {
             let label = Self::label(&r.label);
-            let (slot, value, released) = if let Some((inner, outer)) = lid_travel {
-                let (slot, released) = match label {
-                    crate::sustainer::LOCK_INNER => (0, inner),
-                    crate::sustainer::LOCK_OUTER => (1, outer),
-                    _ => continue,
+            let (slot, value, released) = if let Some((tall, xl4)) = lid_variant {
+                let Some(slot) = Self::lid_latch_slot(label) else {
+                    continue;
                 };
+                let (_, travel) =
+                    Self::lid_latch_angles(tall, xl4, Self::previous_lid_latch(label));
+                let released = travel[slot];
                 let Joint::Hinge {
                     angle, min, max, ..
                 } = r.joint
@@ -125,6 +173,24 @@ impl AssemblyRules {
         }
         if kind == MotionKind::Lid && (count[0] == 0 || count[0] != count[1]) {
             return Err("Opening requires matching inner and outer lid locks".into());
+        }
+        if kind == MotionKind::Lid {
+            for inner in joints
+                .iter()
+                .map(|j| &scene.relations[j.relation])
+                .filter(|r| Self::lid_latch_slot(&r.label) == Some(0))
+            {
+                let pairs = joints
+                    .iter()
+                    .map(|j| &scene.relations[j.relation])
+                    .filter(|r| {
+                        r.parent == inner.child && Self::lid_latch_slot(&r.label) == Some(1)
+                    })
+                    .count();
+                if pairs != 1 {
+                    return Err("Each inner lock requires its own outer clasp".into());
+                }
+            }
         }
         if kind == MotionKind::Drawer && !matches!(count, [0, 0, 0] | [1, 0, 0] | [1, 1, 1]) {
             return Err(

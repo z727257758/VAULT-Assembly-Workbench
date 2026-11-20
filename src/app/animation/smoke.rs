@@ -2,6 +2,8 @@ use super::*;
 use crate::constraints::{Joint, PartId};
 use std::collections::HashMap;
 
+mod clasp;
+
 #[derive(Default)]
 pub(super) struct State {
     meshes: Vec<usize>,
@@ -28,10 +30,14 @@ impl App {
             };
             let p = &mut member.preset;
             p.selection.width = "S".into();
-            p.selection.depth = 3;
+            p.selection.depth = 4;
             if index != 1 {
                 p.assembly_kind = AssemblyKind::Sustainer;
                 p.drawers.clear();
+            }
+            if index == 2 {
+                p.selection.height = "2F".into();
+                p.label.text = "S4-2F".into();
             }
             if let Err(error) = tower::configure(p, &self.catalog, true) {
                 self.animation.smoke.error = Some(error);
@@ -305,7 +311,7 @@ impl App {
                     .map(|p| (PartId::of(p), p.pose.matrix(0.)))
                     .collect();
             }
-            let wait_for_endpoint = matches!(self.smoke_stage, 3 | 5 | 6 | 8 | 9 | 11..=14);
+            let wait_for_endpoint = matches!(self.smoke_stage, 3 | 5 | 6 | 8 | 9 | 11..=15);
             if wait_for_endpoint || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0) {
                 self.advance_motion(0.05, ctx);
             }
@@ -406,7 +412,13 @@ impl App {
                     member: 2,
                     drawer: None,
                 }))?,
+                15 if (lid.value - 65.).abs() > 0.01 || lid.latch < 0.999 => {
+                    return Err("Lid did not clear the released clasp".into());
+                }
                 _ => {}
+            }
+            if (13..=15).contains(&self.smoke_stage) && self.smoke_frame == 0 {
+                self.check_and_frame_s4_clasp()?;
             }
             Ok(true)
         })();
@@ -580,8 +592,12 @@ impl App {
                     let lid = self.smoke_mechanism(2, None)?;
                     self.animate_latch_to(&lid.child, false, ctx)?;
                 }
+                14 => {
+                    let lid = self.smoke_mechanism(2, None)?;
+                    self.animate_joint_to(&lid.child, 65., ctx)?;
+                }
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: both visible drawer grips stand vertically when locked and turn horizontally when released. Independent key/cap rotation and opposing rack travel on a seated drawer. Independent lid lock release and return to its original pose after closing. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: both visible drawer grips stand vertically when locked and turn horizontally when released. Independent key/cap rotation and opposing rack travel on a seated drawer. The S4 2F display hook reaches over the roof lip when locked and clears it when released. Pin displacement and plate tilt checked with the lid seated and lifted. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

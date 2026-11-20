@@ -43,9 +43,9 @@ impl AssemblyRules {
         }
     }
 
-    fn lock_travel(scene: &Scene, member: u32) -> (f32, f32) {
+    pub(crate) fn latch_variant(scene: &Scene, member: u32) -> (bool, bool) {
         let own = |p: &&Part| p.pose.instance / crate::scene::MEMBER_STRIDE == member;
-        let closed = Self::latch_display_pose(
+        (
             scene
                 .parts
                 .iter()
@@ -56,10 +56,7 @@ impl AssemblyRules {
                 .iter()
                 .filter(own)
                 .any(|p| p.pose.path.contains("/Modules/") && p.pose.path.contains("/XL4/")),
-        );
-        let released = Self::latch_release_pose();
-        let inner = released.inner_degrees - closed.inner_degrees;
-        (inner, released.outer_degrees - closed.outer_degrees - inner)
+        )
     }
 
     pub fn mechanism_for_joint(scene: &Scene, child: &PartId) -> Result<Mechanism, String> {
@@ -564,7 +561,7 @@ impl AssemblyRules {
         Ok(())
     }
 
-    fn label(label: &str) -> &str {
+    pub(crate) fn label(label: &str) -> &str {
         label
             .strip_prefix("Member ")
             .and_then(|text| text.split_once(": "))
