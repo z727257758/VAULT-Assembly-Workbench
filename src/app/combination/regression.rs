@@ -983,6 +983,7 @@ fn library_exterior_spacing_and_export_regression() {
         crate::export::Format::Stl,
         &saved,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(target.join("hardware.txt").is_file());

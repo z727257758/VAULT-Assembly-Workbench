@@ -193,6 +193,10 @@ powershell -ExecutionPolicy Bypass -File tools/setup-gridfinity.ps1
 
 在“设置 → 材料”中按材料添加、编辑、移除常用色，也可恢复该材料的默认色板。色板保存在本机设置中，各项目分别保存已选的颜色和材料。
 
+在同一页面选择“导入 Bambu Studio 预设”，可选 PLA、PETG 或 PETG-CF 耗材的 JSON，或 ZIP、`.bbsflmt`、`.bbscfg` 预设包。导入时解析预设继承，优先使用随文件提供或已导入的父预设，也可读取本机 Bambu Studio 的工厂预设。缺少所需父预设时，选择含有父预设的文件一并导入。[Bambu Studio 耗材包导出](https://github.com/bambulab/BambuStudio/blob/master/src/slic3r/GUI/CreatePresetsDialog.cpp#L3831-L3903)
+
+导入后，可在搭建页的颜色分组或当前成员的耗材槽中选择预设。3MF 会按槽写入支持的温度、流量、冷却等参数，并检查 0.4 mm 机型兼容性。预设保存在本机材料库。换电脑打开 VAULT 项目时，需在新电脑导入项目所用的同名预设。
+
 - 新建成员默认跟随整体，复制成员保留来源的跟随 / 自定义状态。
 - 单独修改成员颜色后转为“自定义”，整体配色不再覆盖它；成员属性可恢复跟随。
 - 左侧勾选多个成员，可批量恢复跟随，或将当前成员配色一次性复制到勾选成员。一次性复制后为自定义；用途配色跨规格生效，单独源文件的覆盖仅匹配相同源文件。

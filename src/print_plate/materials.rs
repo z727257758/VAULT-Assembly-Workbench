@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::LazyLock,
+};
+
+mod bambu;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FilamentMaterial {
@@ -9,6 +16,7 @@ pub enum FilamentMaterial {
     PetgBasic,
     PetgMatte,
     PetgHf,
+    Imported(u64),
 }
 
 impl FilamentMaterial {
@@ -27,6 +35,7 @@ impl FilamentMaterial {
             Self::PetgBasic => "PETG Basic",
             Self::PetgMatte => "PETG Matte",
             Self::PetgHf => "PETG HF",
+            Self::Imported(_) => "Imported filament",
         }
     }
 
@@ -34,6 +43,7 @@ impl FilamentMaterial {
         match self {
             Self::PlaBasic | Self::PlaMatte => "PLA",
             Self::PetgBasic | Self::PetgMatte | Self::PetgHf => "PETG",
+            Self::Imported(_) => "Imported",
         }
     }
 
@@ -59,6 +69,18 @@ impl FilamentMaterial {
             (Self::PetgBasic | Self::PetgMatte, Printer::A1Mini) => {
                 "Bambu PETG Basic @BBL A1M 0.4 nozzle"
             }
+            (Self::Imported(_), _) => "Imported filament",
+        }
+    }
+
+    fn swatch_key(self) -> Cow<'static, str> {
+        match self {
+            Self::PlaBasic => "PlaBasic".into(),
+            Self::PlaMatte => "PlaMatte".into(),
+            Self::PetgBasic => "PetgBasic".into(),
+            Self::PetgMatte => "PetgMatte".into(),
+            Self::PetgHf => "PetgHf".into(),
+            Self::Imported(id) => format!("imported-{id:016x}").into(),
         }
     }
 
@@ -70,6 +92,7 @@ impl FilamentMaterial {
             Self::PetgBasic => &PETG_BASIC,
             Self::PetgMatte => &PETG_MATTE,
             Self::PetgHf => &PETG_HF,
+            Self::Imported(_) => &[],
         }
     }
 }
@@ -107,25 +130,161 @@ const PETG_HF: [[u8; 3]; 14] = rgb([
     0xFFCF00, 0xB5CFA3, 0x8E9089, 0x6C4936, 0xB9D6EC,
 ]);
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BambuPreset {
+    pub name: String,
+    pub base: FilamentMaterial,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub printers: Vec<super::Printer>,
+    pub options: BTreeMap<String, String>,
+    pub color: Option<[u8; 3]>,
+    pub filament_id: Option<String>,
+}
+
+impl BambuPreset {
+    pub fn material(&self) -> FilamentMaterial {
+        // A preset keeps its slot identity when reimported. Keep the value within TOML's integer range.
+        let hash = self
+            .name
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        FilamentMaterial::Imported(hash & i64::MAX as u64)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MaterialLibrary(BTreeMap<FilamentMaterial, Vec<[u8; 3]>>);
+#[serde(default)]
+pub struct MaterialLibrary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    presets: Vec<BambuPreset>,
+    #[serde(flatten)]
+    swatches: BTreeMap<String, Vec<[u8; 3]>>,
+}
 
 impl MaterialLibrary {
+    pub fn choices(&self) -> impl Iterator<Item = FilamentMaterial> + '_ {
+        FilamentMaterial::ALL
+            .into_iter()
+            .chain(self.presets.iter().map(BambuPreset::material))
+    }
+
+    pub fn preset(&self, material: FilamentMaterial) -> Option<&BambuPreset> {
+        if matches!(material, FilamentMaterial::Imported(_)) {
+            self.presets
+                .iter()
+                .find(|preset| preset.material() == material)
+        } else {
+            None
+        }
+    }
+
+    pub fn name(&self, material: FilamentMaterial) -> &str {
+        self.preset(material)
+            .map_or(material.name(), |preset| &preset.name)
+    }
+
+    pub fn family(&self, material: FilamentMaterial) -> &str {
+        self.preset(material).map_or(material.family(), |preset| {
+            preset
+                .options
+                .get("filament_type")
+                .map_or(preset.base.family(), String::as_str)
+        })
+    }
+
+    pub fn profile_name(&self, material: FilamentMaterial, printer: super::Printer) -> &str {
+        self.preset(material)
+            .map_or(material.profile_name(printer), |preset| &preset.name)
+    }
+
+    pub(super) fn for_export(
+        &self,
+        material: FilamentMaterial,
+        printer: super::Printer,
+        slot: u32,
+    ) -> Result<Option<&BambuPreset>, String> {
+        if !matches!(material, FilamentMaterial::Imported(_)) {
+            return Ok(None);
+        }
+        let preset = self.preset(material).ok_or_else(|| {
+            format!("耗材槽 {slot} 缺少导入预设，请在设置中重新导入 / Slot {slot} needs its imported filament preset")
+        })?;
+        if !preset.printers.is_empty() && !preset.printers.contains(&printer) {
+            return Err(format!(
+                "耗材槽 {slot} 的预设与 {} 不兼容 / Slot {slot} preset is incompatible with {}: {}",
+                printer.name(),
+                printer.name(),
+                preset.name
+            ));
+        }
+        Ok(Some(preset))
+    }
+
+    pub fn read_bambu_presets(&self, paths: &[PathBuf]) -> Result<Vec<BambuPreset>, String> {
+        bambu::read_presets(paths, &self.presets)
+    }
+
+    pub fn import_presets(&mut self, presets: Vec<BambuPreset>) -> Result<usize, String> {
+        let mut next = self.presets.clone();
+        let count = presets.len();
+        for preset in presets {
+            if let Some(previous) = next
+                .iter_mut()
+                .find(|old| old.material() == preset.material())
+            {
+                if previous.name != preset.name {
+                    return Err(format!(
+                        "耗材预设标识冲突 / Filament preset ID collision: {}",
+                        preset.name
+                    ));
+                }
+                *previous = preset;
+            } else {
+                next.push(preset);
+            }
+        }
+        next.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.name.cmp(&b.name))
+        });
+        self.presets = next;
+        Ok(count)
+    }
+
+    fn default_swatches(&self, material: FilamentMaterial) -> &[[u8; 3]] {
+        self.preset(material).map_or_else(
+            || material.default_swatches(),
+            |preset| {
+                preset
+                    .color
+                    .as_ref()
+                    .map_or_else(|| preset.base.default_swatches(), std::slice::from_ref)
+            },
+        )
+    }
+
     pub fn swatches(&self, material: FilamentMaterial) -> &[[u8; 3]] {
-        self.0
-            .get(&material)
-            .map_or_else(|| material.default_swatches(), Vec::as_slice)
+        self.swatches
+            .get(material.swatch_key().as_ref())
+            .map_or_else(|| self.default_swatches(material), Vec::as_slice)
     }
 
     pub fn swatches_mut(&mut self, material: FilamentMaterial) -> &mut Vec<[u8; 3]> {
-        self.0
-            .entry(material)
-            .or_insert_with(|| material.default_swatches().to_vec())
+        let key = material.swatch_key();
+        if !self.swatches.contains_key(key.as_ref()) {
+            let defaults = self.default_swatches(material).to_vec();
+            self.swatches.insert(key.clone().into_owned(), defaults);
+        }
+        self.swatches.get_mut(key.as_ref()).unwrap()
     }
 
     pub fn restore(&mut self, material: FilamentMaterial) {
-        self.0.remove(&material);
+        self.swatches.remove(material.swatch_key().as_ref());
     }
 }
 
@@ -146,6 +305,50 @@ const FILAMENT_OPTIONS: &str = "
     pressure_advance reduce_fan_stop_start_freq required_nozzle_HRC retraction_distances_when_ec slow_down_for_layer_cooling
     slow_down_layer_time slow_down_min_speed supertack_plate_temp supertack_plate_temp_initial_layer
     temperature_vitrification textured_plate_temp textured_plate_temp_initial_layer volumetric_speed_coefficients";
+
+pub(super) fn is_importable_option(key: &str) -> bool {
+    static COLUMNS: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
+        let templates: Vec<Value> = super::Printer::ALL
+            .into_iter()
+            .map(|printer| {
+                serde_json::from_str(printer.template())
+                    .expect("embedded printer template is valid")
+            })
+            .collect();
+        templates[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| {
+                (key.starts_with("filament_")
+                    || FILAMENT_OPTIONS
+                        .split_whitespace()
+                        .any(|option| option == *key))
+                    && !matches!(
+                        key.as_str(),
+                        "default_filament_colour"
+                            | "filament_colour"
+                            | "filament_colour_type"
+                            | "filament_multi_colour"
+                            | "filament_extruder_variant"
+                            | "filament_ids"
+                            | "filament_settings_id"
+                            | "filament_map"
+                            | "filament_nozzle_map"
+                            | "filament_self_index"
+                            | "filament_volume_map"
+                    )
+                    && templates.iter().all(|template| {
+                        template[*key]
+                            .as_array()
+                            .is_some_and(|column| column.len() == 6)
+                    })
+            })
+            .cloned()
+            .collect()
+    });
+    COLUMNS.contains(key)
+}
 
 pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<(), String> {
     const ORIGINAL: usize = 6;
@@ -215,6 +418,34 @@ pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_slot_and_legacy_swatches_roundtrip() {
+        let mut library: MaterialLibrary = toml::from_str("PlaBasic = [[9, 8, 7]]").unwrap();
+        let preset = BambuPreset {
+            name: "Workshop PLA @ P1S".into(),
+            base: FilamentMaterial::PlaBasic,
+            parent: None,
+            printers: vec![crate::print_plate::Printer::P1s],
+            options: [("filament_flow_ratio".into(), "0.96".into())].into(),
+            color: Some([1, 2, 3]),
+            filament_id: None,
+        };
+        let material = preset.material();
+        library.import_presets(vec![preset.clone()]).unwrap();
+        assert_eq!(library.swatches(material), &[[1, 2, 3]]);
+        library.swatches_mut(material).push([4, 5, 6]);
+        let saved: MaterialLibrary = toml::from_str(&toml::to_string(&library).unwrap()).unwrap();
+        assert_eq!(saved.preset(material), Some(&preset));
+        assert_eq!(saved.swatches(material), &[[1, 2, 3], [4, 5, 6]]);
+        assert_eq!(saved.swatches(FilamentMaterial::PlaBasic), &[[9, 8, 7]]);
+
+        let mut config = crate::print_plate::Config::default();
+        config.materials[1] = material;
+        let config: crate::print_plate::Config =
+            toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config.appearance(2).material, material);
+    }
 
     #[test]
     fn material_swatches_roundtrip_independently_and_can_be_restored() {

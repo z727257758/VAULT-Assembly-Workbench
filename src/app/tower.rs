@@ -3126,6 +3126,7 @@ mod tests {
                 &crate::export::Options {
                     format: crate::export::Format::ThreeMf,
                     plate: job.preset.print_config.clone().unwrap(),
+                    ..Default::default()
                 },
                 &job.preset.label,
                 Some((&home, &job.preset.gridfinity, &job.preset.selection)),

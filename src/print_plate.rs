@@ -3,7 +3,7 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 mod materials;
 mod printer;
-pub use materials::{FilamentMaterial, MaterialLibrary};
+pub use materials::{BambuPreset, FilamentMaterial, MaterialLibrary};
 pub use printer::Printer;
 pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 // The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
@@ -223,11 +223,19 @@ impl Config {
         );
     }
     pub fn project_json(&self) -> Result<Vec<u8>, String> {
+        self.project_json_with_materials(&MaterialLibrary::default())
+    }
+
+    pub fn project_json_with_materials(
+        &self,
+        library: &MaterialLibrary,
+    ) -> Result<Vec<u8>, String> {
         self.validate()?;
         let mut d: serde_json::Value =
             serde_json::from_str(self.printer.template()).map_err(|e| e.to_string())?;
+        let process_parent = d["print_settings_id"].clone();
         if d["inherits_group"].is_array() {
-            d["inherits_group"][0] = d["print_settings_id"].clone();
+            d["inherits_group"][0] = process_parent.clone();
         }
         for (key, value) in [
             ("layer_height", self.layer.to_string()),
@@ -279,13 +287,40 @@ impl Config {
         > = serde_json::from_str(self.printer.filament_overrides()).map_err(|e| e.to_string())?;
         for slot in 1..=count {
             let material = self.appearance(slot).material;
-            if material != FilamentMaterial::PetgBasic && material != FilamentMaterial::PetgMatte {
+            let preset = library.for_export(material, self.printer, slot)?;
+            let base = preset.map_or(material, |preset| preset.base);
+            let i = (slot - 1) as usize;
+            if base != FilamentMaterial::PetgBasic && base != FilamentMaterial::PetgMatte {
                 let profile = profiles
-                    .get(material.name())
-                    .ok_or_else(|| format!("Missing embedded profile for {}", material.name()))?;
+                    .get(base.name())
+                    .ok_or_else(|| format!("Missing embedded profile for {}", base.name()))?;
                 for (key, value) in profile {
-                    d[key][(slot - 1) as usize] = serde_json::Value::String(value.clone());
+                    d[key][i] = serde_json::Value::String(value.clone());
                 }
+            }
+            if let Some(preset) = preset {
+                let parent = preset.parent.as_ref().map_or_else(
+                    || d["filament_settings_id"][i].clone(),
+                    |name| serde_json::json!(name),
+                );
+                if !d["inherits_group"].is_array() {
+                    d["inherits_group"] = serde_json::json!(vec![""; count as usize + 2]);
+                    d["inherits_group"][0] = process_parent.clone();
+                }
+                d["inherits_group"][slot as usize] = parent;
+                d["filament_settings_id"][i] = serde_json::json!(preset.name);
+                if let Some(id) = &preset.filament_id {
+                    d["filament_ids"][i] = serde_json::json!(id);
+                }
+                let mut changed = Vec::new();
+                for (key, value) in &preset.options {
+                    if materials::is_importable_option(key) {
+                        d[key][i] = serde_json::json!(value);
+                        changed.push(key.as_str());
+                    }
+                }
+                d["different_settings_to_system"][slot as usize] =
+                    serde_json::json!(changed.join(";"));
             }
         }
         d["default_filament_profile"][0] = d["filament_settings_id"][0].clone();

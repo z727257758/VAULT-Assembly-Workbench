@@ -1,5 +1,5 @@
 use super::*;
-use crate::print_plate::{FilamentMaterial, MaterialLibrary, Printer};
+use crate::print_plate::{BambuPreset, FilamentMaterial, MaterialLibrary, Printer};
 use crate::ui_style;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,12 @@ impl Page {
     }
 }
 
+#[derive(Default)]
+pub(super) struct MaterialImport {
+    pending: Option<Receiver<Result<Vec<BambuPreset>, String>>>,
+    feedback: Option<Result<usize, String>>,
+}
+
 #[derive(Clone)]
 struct MaterialEditor {
     material: FilamentMaterial,
@@ -50,20 +56,64 @@ impl MaterialEditor {
 fn material_settings_ui(
     ui: &mut egui::Ui,
     library: &mut MaterialLibrary,
+    import: &MaterialImport,
     printer: Printer,
     zh: bool,
-) {
+) -> bool {
+    let pick_files = ui
+        .horizontal_wrapped(|ui| {
+            if import.pending.is_some() {
+                ui.spinner();
+            }
+            ui.add_enabled(
+                import.pending.is_none(),
+                egui::Button::new(t(
+                    zh,
+                    "导入 Bambu Studio 预设…",
+                    "Import Bambu Studio presets…",
+                )),
+            )
+            .clicked()
+        })
+        .inner;
+    match &import.feedback {
+        Some(Ok(count)) => {
+            ui.small(if zh {
+                format!("已导入 {count} 项耗材预设，可在颜色组的材料列表中使用。")
+            } else {
+                format!("Imported {count} filament presets. Select them in the color group’s material list.")
+            });
+        }
+        Some(Err(error)) => {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        None => {}
+    }
+    ui.add_space(8.);
     let id = ui.id().with("material-editor");
     let mut editor = ui
         .data_mut(|data| data.get_temp::<MaterialEditor>(id))
         .unwrap_or_else(|| MaterialEditor::first(FilamentMaterial::PlaBasic, library));
     let mut material = editor.material;
     egui::ComboBox::from_id_salt("settings-material")
-        .selected_text(material.name())
-        .width(205.)
+        .selected_text(library.name(material))
+        .width(270.)
+        .truncate()
         .show_ui(ui, |ui| {
+            ui.small(RichText::new("Bambu Lab").weak());
             for option in FilamentMaterial::ALL {
-                ui.selectable_value(&mut material, option, option.name());
+                ui.selectable_value(&mut material, option, library.name(option));
+            }
+            let mut imported = library
+                .choices()
+                .filter(|option| matches!(option, FilamentMaterial::Imported(_)))
+                .peekable();
+            if imported.peek().is_some() {
+                ui.separator();
+                ui.small(RichText::new(t(zh, "已导入", "Imported")).weak());
+                for option in imported {
+                    ui.selectable_value(&mut material, option, library.name(option));
+                }
             }
         });
     if material != editor.material
@@ -76,8 +126,60 @@ fn material_settings_ui(
     ui.small(format!(
         "{} · {}",
         t(zh, "3MF 耗材预设", "3MF filament profile"),
-        material.profile_name(printer)
+        library.profile_name(material, printer)
     ));
+    if let Some(preset) = library.preset(material) {
+        ui.small(format!(
+            "{} · {}",
+            t(zh, "继承预设", "Base preset"),
+            preset
+                .parent
+                .as_deref()
+                .unwrap_or_else(|| preset.base.profile_name(printer))
+        ));
+        if !preset.printers.is_empty() {
+            let names = preset
+                .printers
+                .iter()
+                .map(|printer| printer.name())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            ui.small(format!(
+                "{} · {names}",
+                t(zh, "适用机型", "Compatible printers")
+            ));
+            if !preset.printers.contains(&printer) {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    t(
+                        zh,
+                        "此预设不适用于当前机型。",
+                        "This preset is unavailable for the current printer.",
+                    ),
+                );
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (key, title, unit) in [
+                ("nozzle_temperature", t(zh, "喷嘴", "Nozzle"), " °C"),
+                (
+                    "textured_plate_temp",
+                    t(zh, "纹理 PEI", "Textured PEI"),
+                    " °C",
+                ),
+                ("filament_flow_ratio", t(zh, "流量比", "Flow ratio"), ""),
+                (
+                    "filament_max_volumetric_speed",
+                    t(zh, "最大体积流量", "Max flow"),
+                    " mm³/s",
+                ),
+            ] {
+                if let Some(value) = preset.options.get(key) {
+                    ui.small(format!("{title} {value}{unit}"));
+                }
+            }
+        });
+    }
     if material == FilamentMaterial::PetgMatte {
         ui.small(t(
             zh,
@@ -162,10 +264,57 @@ fn material_settings_ui(
         }
     });
     ui.data_mut(|data| data.insert_temp(id, editor));
+    pick_files
 }
 
 impl App {
+    fn start_material_import(&mut self, ctx: &egui::Context) {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Bambu Studio", &["json", "zip", "bbsflmt", "bbscfg"])
+            .pick_files()
+        else {
+            return;
+        };
+        let library = self.material_library.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.material_import.pending = Some(receiver);
+        self.material_import.feedback = None;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(library.read_bambu_presets(&paths));
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_material_import(&mut self) {
+        let Some(receiver) = &self.material_import.pending else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(t(
+                self.zh,
+                "材料预设读取中断。",
+                "Filament preset import was interrupted.",
+            )
+            .into()),
+        };
+        self.material_import.pending = None;
+        self.material_import.feedback = Some(result.and_then(|presets| {
+            let mut next = self.material_library.clone();
+            let count = next.import_presets(presets)?;
+            let previous = std::mem::replace(&mut self.material_library, next);
+            if let Err(error) = self.save_settings() {
+                self.material_library = previous;
+                return Err(error);
+            }
+            Ok(count)
+        }));
+    }
+
     pub(super) fn settings_panel(&mut self, ctx: &egui::Context) {
+        self.poll_material_import();
         let Some(mut page) = self.settings_page else {
             return;
         };
@@ -176,6 +325,7 @@ impl App {
         let previous_materials = self.material_library.clone();
         let mut done = false;
         let mut library = false;
+        let mut import_materials = false;
         let mut apply_project_printer = false;
         let size = ctx.content_rect().size();
         let width = (size.x - 48.).clamp(680., 820.);
@@ -268,7 +418,15 @@ impl App {
                                             self.export_rx.is_none(), |ui| self.printer_settings_ui(ui)
                                         ).inner;
                                     }
-                                    Page::Materials => material_settings_ui(ui, &mut self.material_library, self.export_options.plate.printer, zh),
+                                    Page::Materials => {
+                                        import_materials = material_settings_ui(
+                                            ui,
+                                            &mut self.material_library,
+                                            &self.material_import,
+                                            self.export_options.plate.printer,
+                                            zh,
+                                        );
+                                    }
                                     Page::Print => {
                                         if ui.link(format!("{} · {}", t(zh, "打印机", "Printer"), self.export_options.plate.printer.name())).clicked() {
                                             page = Page::Printer;
@@ -299,6 +457,9 @@ impl App {
                 });
             });
         self.settings_page = (!(done || modal.should_close())).then_some(page);
+        if import_materials {
+            self.start_material_import(ctx);
+        }
 
         let plate_changed = self.export_options.plate != previous_export.plate;
         let font_changed = self.label_font != previous_font;
@@ -473,7 +634,8 @@ impl App {
         let (page, filename) = match self.smoke_stage {
             1 => (Page::Appearance, "appearance-light.png"),
             2 => (Page::Print, "print-dark-compact.png"),
-            _ => (Page::Printer, "printer-a1-mini.png"),
+            3 => (Page::Printer, "printer-a1-mini.png"),
+            _ => (Page::Materials, "materials-dark-compact.png"),
         };
         assert!(self.settings_page == Some(page));
         let folder = self.home.join("output/settings-ui");
@@ -502,6 +664,10 @@ impl App {
             self.export_options.plate.printer = Printer::A1Mini;
             self.settings_page = Some(Page::Printer);
             self.smoke_stage = 3;
+            self.smoke_frame = 0;
+        } else if self.smoke_stage == 3 {
+            self.settings_page = Some(Page::Materials);
+            self.smoke_stage = 4;
             self.smoke_frame = 0;
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

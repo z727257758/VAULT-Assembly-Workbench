@@ -1,6 +1,6 @@
 //! Overall workflow, color inheritance and reversible member operations.
 use super::*;
-use crate::print_plate::{ColorTheme, Config};
+use crate::print_plate::{ColorTheme, Config, FilamentMaterial, MaterialLibrary};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum ExportScope {
@@ -387,13 +387,22 @@ pub(super) fn color_component_name(path: &str, z: bool) -> String {
 pub(super) fn material_picker(
     ui: &mut egui::Ui,
     i: usize,
-    material: &mut crate::print_plate::FilamentMaterial,
+    material: &mut FilamentMaterial,
+    library: &MaterialLibrary,
+    z: bool,
 ) {
     egui::ComboBox::from_id_salt(("filament-material", i))
-        .selected_text(format!("{} · {}", i + 1, material.name()))
+        .selected_text(format!("{} · {}", i + 1, library.name(*material)))
+        .truncate()
         .show_ui(ui, |ui| {
-            for option in crate::print_plate::FilamentMaterial::ALL {
-                ui.selectable_value(material, option, option.name());
+            let mut imported = false;
+            for option in library.choices() {
+                if !imported && library.preset(option).is_some() {
+                    imported = true;
+                    ui.separator();
+                    ui.small(t(z, "导入的预设", "Imported presets"));
+                }
+                ui.selectable_value(material, option, library.name(option));
             }
         });
 }

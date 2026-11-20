@@ -185,6 +185,7 @@ pub struct App {
     appearance: appearance::Appearance,
     label_font: Option<crate::label::Font>,
     settings_page: Option<settings_panel::Page>,
+    material_import: settings_panel::MaterialImport,
     tower: tower::State,
     active_drawer: Option<usize>,
     preview_modes: preview_modes::State,
@@ -328,6 +329,7 @@ impl App {
             appearance,
             label_font: settings.as_ref().and_then(|s| s.label_font),
             settings_page: None,
+            material_import: Default::default(),
             tower: Default::default(),
             active_drawer: None,
             preview_modes: Default::default(),
@@ -881,10 +883,15 @@ impl App {
             language: if self.zh { "zh" } else { "en" }.into(),
             label_font: self.label_font,
         };
-        self.write_state(
-            "settings.toml",
-            toml::to_string_pretty(&settings).map_err(|e| e.to_string())?,
-        )
+        let text = toml::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+        let folder = self.home.join("state");
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let mut file = tempfile::NamedTempFile::new_in(&folder).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| e.to_string())?;
+        file.as_file().sync_all().map_err(|e| e.to_string())?;
+        file.persist(folder.join("settings.toml"))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
     fn gridfinity_with_label_font(&self) -> crate::gridfinity::Layout {
         let mut layout = self.gridfinity.clone();
@@ -2520,7 +2527,7 @@ impl App {
                 egui::Grid::new("color-palette").num_columns(3).show(ui,|ui| {
                     for slot in 1..=c.slot_count() {
                         let mut appearance = c.appearance(slot);
-                        workflow::material_picker(ui, (slot - 1) as usize, &mut appearance.material);
+                         workflow::material_picker(ui, (slot - 1) as usize, &mut appearance.material, &self.material_library, z);
                         ui.color_edit_button_srgb(&mut appearance.rgb);
                         if appearance != c.appearance(slot) {
                             c.set_appearance(slot, appearance);
@@ -2719,7 +2726,8 @@ impl App {
             }
         };
         let root = self.catalog.root.clone();
-        let options = self.export_options.clone();
+        let mut options = self.export_options.clone();
+        options.material_library = std::sync::Arc::new(self.material_library.clone());
         let label = self.label.with_font(self.label_font);
         let gf = if self.assembly_kind == AssemblyKind::Drawer {
             self.gridfinity_with_label_font()

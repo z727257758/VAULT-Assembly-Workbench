@@ -1,6 +1,8 @@
 use super::*;
 use crate::catalog::colors as catalog_colors;
-use crate::print_plate::{ColorGroup, ColorTheme, GroupAppearance, PaletteGroup as Group};
+use crate::print_plate::{
+    ColorGroup, ColorTheme, GroupAppearance, MaterialLibrary, PaletteGroup as Group,
+};
 mod card;
 use std::collections::BTreeSet;
 
@@ -283,7 +285,8 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let appearance = draft.group_appearance(row.group);
-                        match card::header(ui, &row, appearance, open, z) {
+                        let material_name = app.material_library.name(appearance.material);
+                        match card::header(ui, &row, appearance, material_name, open, z) {
                             Some(card::HeaderAction::Toggle) => {
                                 app.tower.open_color = (!open).then(|| row.name.clone());
                                 edit = None;
@@ -400,7 +403,13 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.);
 }
 
-fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool) -> bool {
+fn group_choices(
+    ui: &mut egui::Ui,
+    theme: &mut ColorTheme,
+    library: &MaterialLibrary,
+    path: &str,
+    z: bool,
+) -> bool {
     let key = catalog_colors::component(path);
     let current = component_group(theme, &key, path);
     for row in groups(theme, z) {
@@ -419,7 +428,7 @@ fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool)
                     .on_hover_text(format!(
                         "{} · {}",
                         color_label(rgb, z),
-                        appearance.material.name()
+                        library.name(appearance.material)
                     ))
                     .clicked()
             })
@@ -449,7 +458,13 @@ fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool)
     false
 }
 
-fn text_color_menu(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool) -> bool {
+fn text_color_menu(
+    ui: &mut egui::Ui,
+    theme: &mut ColorTheme,
+    library: &MaterialLibrary,
+    path: &str,
+    z: bool,
+) -> bool {
     let key = catalog_colors::component(path);
     let selected = theme.component_text.get(&key).copied();
     let mut changed = false;
@@ -486,7 +501,7 @@ fn text_color_menu(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: boo
                         format!(
                             "{slot} · {} · {}",
                             color_label([r, g, b], z),
-                            appearance.material.name()
+                            library.name(appearance.material)
                         ),
                     )
                     .clicked()
@@ -519,9 +534,9 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
             let theme = &app.global_colors;
             ui.strong(workflow::color_component_name(path, z));
             let mut draft = theme.clone();
-            let mut changed = group_choices(ui, &mut draft, path, z);
+            let mut changed = group_choices(ui, &mut draft, &app.material_library, path, z);
             if crate::label::is_label(path) || path.starts_with(crate::gridfinity::PREFIX) {
-                changed |= text_color_menu(ui, &mut draft, path, z);
+                changed |= text_color_menu(ui, &mut draft, &app.material_library, path, z);
             }
             if changed {
                 changed_theme = Some(draft);

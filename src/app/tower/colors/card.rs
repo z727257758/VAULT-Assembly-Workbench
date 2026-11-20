@@ -27,6 +27,7 @@ pub(super) fn header(
     ui: &mut egui::Ui,
     row: &Row,
     appearance: GroupAppearance,
+    material_name: &str,
     open: bool,
     z: bool,
 ) -> Option<HeaderAction> {
@@ -42,8 +43,16 @@ pub(super) fn header(
         small.clone(),
     );
     let color = text(color_label(rgb, z).into(), small.clone());
-    let material = text(appearance.material.name().into(), small);
     let width = ui.available_width();
+    let mut layout = egui::text::LayoutJob::simple(
+        material_name.to_owned(),
+        small,
+        weak,
+        (width - color.size().x - 62.).max(1.),
+    );
+    layout.wrap.max_rows = 1;
+    layout.wrap.break_anywhere = true;
+    let material = painter.layout_job(layout);
     let meta_width = color.size().x + 6. + material.size().x;
     let label_space = width - 31. - count.size().x - 8. - meta_width - 28.;
     let stacked = !open && label_space < if z { 55. } else { 82. };
@@ -171,20 +180,30 @@ fn material_picker(
     egui::ComboBox::from_id_salt("material")
         .width(width)
         .height(ui.ctx().content_rect().height() * 0.65)
-        .selected_text(material.name())
+        .selected_text(library.name(*material))
+        .truncate()
         .show_ui(ui, |ui| {
-            let mut family = "";
-            for option in FilamentMaterial::ALL {
-                if family != option.family() {
-                    family = option.family();
-                    ui.label(RichText::new(family).small().weak());
+            let mut section = "";
+            for option in library.choices() {
+                let name = library.name(option);
+                let imported = library.preset(option).is_some();
+                let group = if imported {
+                    t(z, "导入的预设", "Imported presets")
+                } else {
+                    library.family(option)
+                };
+                if section != group {
+                    section = group;
+                    ui.label(RichText::new(section).small().weak());
                 }
                 let selected = *material == option;
                 let row_width = ui.available_width();
                 let (rect, row) =
                     ui.allocate_exact_size(egui::vec2(row_width, 27.), egui::Sense::click());
-                let mut row = button_info(row, option.name());
-                if option == FilamentMaterial::PetgMatte {
+                let mut row = button_info(row, name);
+                if imported {
+                    row = row.on_hover_text(name);
+                } else if option == FilamentMaterial::PetgMatte {
                     row = row.on_hover_text(t(
                         z,
                         "使用 PETG Basic 打印预设",
@@ -202,15 +221,25 @@ fn material_picker(
                         egui::StrokeKind::Inside,
                     );
                 }
-                let name = ui.painter().text(
-                    rect.left_center() + egui::vec2(7., 0.),
-                    egui::Align2::LEFT_CENTER,
-                    option.name(),
+                let colors = library.swatches(option);
+                let n = colors.len().min(5);
+                let mut layout = egui::text::LayoutJob::simple(
+                    name.to_owned(),
                     egui::TextStyle::Body.resolve(ui.style()),
+                    ink,
+                    (row_width - 32. - n as f32 * 9.).max(1.),
+                );
+                layout.wrap.max_rows = 1;
+                layout.wrap.break_anywhere = true;
+                let name = ui.painter().layout_job(layout);
+                let name_right = rect.left() + 7. + name.size().x;
+                ui.painter().galley(
+                    rect.left_center() + egui::vec2(7., -0.5 * name.size().y),
+                    name,
                     ink,
                 );
                 if selected {
-                    let c = egui::pos2(name.right() + 10., rect.center().y);
+                    let c = egui::pos2(name_right + 10., rect.center().y);
                     ui.painter().line(
                         vec![
                             c + egui::vec2(-3., 0.),
@@ -220,8 +249,6 @@ fn material_picker(
                         egui::Stroke::new(1.5, ink),
                     );
                 }
-                let colors = library.swatches(option);
-                let n = colors.len().min(5);
                 for i in 0..n {
                     let [r, g, b] = colors[i * colors.len() / n];
                     let center = egui::pos2(

@@ -1,5 +1,5 @@
 //! Export original manufacturing geometry, never the display-only assembly meshes.
-use crate::{catalog::Bom, mesh::Mesh};
+use crate::{catalog::Bom, mesh::Mesh, print_plate::MaterialLibrary};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -21,12 +21,15 @@ pub enum Format {
 pub struct Options {
     pub format: Format,
     pub plate: crate::print_plate::Config,
+    #[serde(skip)]
+    pub material_library: std::sync::Arc<MaterialLibrary>,
 }
 impl Default for Options {
     fn default() -> Self {
         Self {
             format: Format::ThreeMf,
             plate: Default::default(),
+            material_library: Default::default(),
         }
     }
 }
@@ -195,6 +198,7 @@ pub fn run_configured(
             &generated,
             &options.plate,
             gridfinity.map(|(_, layout, selection)| (layout, selection)),
+            &options.material_library,
         )?;
         staging.as_file().sync_all().map_err(err)?;
         staging.persist(destination).map_err(err)?;
@@ -450,7 +454,9 @@ fn write_3mf(
     generated: &HashMap<String, std::sync::Arc<Mesh>>,
     plate: &crate::print_plate::Config,
     gridfinity: Option<(&crate::gridfinity::Layout, &crate::catalog::Selection)>,
+    materials: &MaterialLibrary,
 ) -> Result<(), String> {
+    let project_settings = plate.project_json_with_materials(materials)?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, content) in [
@@ -621,7 +627,7 @@ fn write_3mf(
     zip.write_all(config.as_bytes()).map_err(err)?;
     zip.start_file("Metadata/project_settings.config", options)
         .map_err(err)?;
-    zip.write_all(&plate.project_json()?).map_err(err)?;
+    zip.write_all(&project_settings).map_err(err)?;
     zip.finish().map_err(err)?.flush().map_err(err)?;
     Ok(())
 }
@@ -684,6 +690,7 @@ endsolid t";
             &generated,
             &c,
             Some((&layout, &selection)),
+            &Default::default(),
         )
         .unwrap();
         let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
@@ -813,6 +820,7 @@ endsolid t";
                     &generated,
                     &c,
                     Some((&layout, &Default::default())),
+                    &Default::default(),
                 )
                 .unwrap();
                 let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
@@ -958,6 +966,7 @@ endsolid t";
             &generated,
             &c,
             Some((&layout, &Default::default())),
+            &Default::default(),
         )
         .unwrap();
         let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
@@ -1006,6 +1015,7 @@ endsolid t";
                 &generated,
                 &Default::default(),
                 None,
+                &Default::default(),
             );
             if width == 300. {
                 assert!(
@@ -1065,6 +1075,7 @@ endsolid t";
                 &generated,
                 &config,
                 None,
+                &Default::default(),
             )
             .unwrap();
             let mut zip = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
@@ -1281,6 +1292,86 @@ endsolid t";
         }
     }
     #[test]
+    fn three_mf_embeds_imported_filament_parameters_in_the_assigned_slot() {
+        use crate::print_plate::{BambuPreset, FilamentMaterial, Printer};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("part.stl"), TRI).unwrap();
+        let items = [Bom {
+            path: "part.stl".into(),
+            qty: 1,
+            group: "test".into(),
+            enabled: true,
+        }];
+        let preset = BambuPreset {
+            name: "Workshop PLA".into(),
+            base: FilamentMaterial::PlaBasic,
+            parent: None,
+            printers: vec![Printer::P1s],
+            options: [
+                ("nozzle_temperature".into(), "218".into()),
+                ("nozzle_temperature_initial_layer".into(), "220".into()),
+                ("filament_flow_ratio".into(), "0.96".into()),
+                ("machine_max_speed_x".into(), "99999".into()),
+            ]
+            .into(),
+            color: Some([1, 2, 3]),
+            filament_id: Some("PTEST".into()),
+        };
+        let mut options = Options::default();
+        options.plate.materials[1] = preset.material();
+        options.plate.set_part_slot("part.stl", 2);
+        std::sync::Arc::make_mut(&mut options.material_library)
+            .import_presets(vec![preset])
+            .unwrap();
+        let path = temp.path().join("imported.3mf");
+        run_configured(&root, &items, &path, &options, &Default::default(), None).unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_reader(zip.by_name("Metadata/project_settings.config").unwrap())
+                .unwrap();
+        let baseline: serde_json::Value = serde_json::from_slice(
+            &crate::print_plate::Config::default()
+                .project_json()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["filament_settings_id"][1], "Workshop PLA");
+        assert_eq!(settings["filament_ids"][1], "PTEST");
+        assert_eq!(settings["filament_flow_ratio"][1], "0.96");
+        assert_eq!(settings["nozzle_temperature"][1], "218");
+        assert_eq!(settings["nozzle_temperature_initial_layer"][1], "220");
+        assert!(
+            settings["different_settings_to_system"][2]
+                .as_str()
+                .unwrap()
+                .split(';')
+                .any(|key| key == "nozzle_temperature_initial_layer")
+        );
+        assert_eq!(settings["filament_max_volumetric_speed"][1], "21");
+        assert_eq!(
+            settings["nozzle_temperature"][0],
+            baseline["nozzle_temperature"][0]
+        );
+        assert_eq!(
+            settings["machine_max_speed_x"],
+            baseline["machine_max_speed_x"]
+        );
+        assert_eq!(settings["filament_colour"], baseline["filament_colour"]);
+        assert!(options.plate.project_json().unwrap_err().contains("Slot 2"));
+        options.plate.printer = Printer::A1;
+        assert!(
+            options
+                .plate
+                .project_json_with_materials(&options.material_library)
+                .unwrap_err()
+                .contains("incompatible")
+        );
+    }
+
+    #[test]
     fn three_mf_export_uses_matching_machine_process_and_filaments() {
         use crate::print_plate::{Config, FilamentMaterial, GroupAppearance, Printer};
         let temp = tempfile::tempdir().unwrap();
@@ -1477,6 +1568,9 @@ endsolid t";
                     PlaMatte => matte,
                     PetgHf => hf,
                     PetgBasic | PetgMatte => petg,
+                    crate::print_plate::FilamentMaterial::Imported(_) => {
+                        unreachable!("This fixture covers factory presets")
+                    }
                 });
                 assert_eq!(json[key], serde_json::json!(expected), "{name}: {key}");
             }

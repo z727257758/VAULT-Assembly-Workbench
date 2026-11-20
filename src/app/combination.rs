@@ -1178,6 +1178,7 @@ impl App {
         let root = self.catalog.root.clone();
         let home = self.home.clone();
         let format = self.export_options.format;
+        let materials = std::sync::Arc::new(self.material_library.clone());
         let (tx, rx) = mpsc::channel();
         self.export_rx = Some(rx);
         self.export_last = None;
@@ -1191,6 +1192,7 @@ impl App {
                 format,
                 &saved,
                 Some(&indices),
+                &materials,
             ));
             ctx.request_repaint();
         });
@@ -1203,6 +1205,7 @@ fn export_members(
     format: crate::export::Format,
     saved: &CombinationPreset,
     selection: Option<&[usize]>,
+    materials: &std::sync::Arc<crate::print_plate::MaterialLibrary>,
 ) -> Result<PathBuf, String> {
     if selection.is_some_and(|ids| ids.is_empty() || ids.iter().any(|&i| i >= saved.members.len()))
     {
@@ -1258,6 +1261,7 @@ fn export_members(
             &crate::export::Options {
                 format,
                 plate: p.print_config.clone().unwrap_or_default(),
+                material_library: materials.clone(),
             },
             &p.label,
             Some((home, &p.gridfinity, &p.selection)),
@@ -2167,6 +2171,7 @@ mod tests {
             crate::export::Format::Stl,
             &saved,
             None,
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(
@@ -2186,6 +2191,7 @@ mod tests {
             crate::export::Format::Stl,
             &saved,
             Some(&[1]),
+            &Default::default(),
         )
         .unwrap();
         assert!(!subset.join("01-S3-1F").exists());
@@ -2205,7 +2211,8 @@ mod tests {
                 &temp.path().join("empty"),
                 crate::export::Format::Stl,
                 &saved,
-                Some(&[])
+                Some(&[]),
+                &Default::default(),
             )
             .is_err()
         );
@@ -2220,7 +2227,8 @@ mod tests {
                 &library.join("bad"),
                 crate::export::Format::Stl,
                 &saved,
-                None
+                None,
+                &Default::default(),
             )
             .is_err()
         );
