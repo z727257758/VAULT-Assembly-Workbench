@@ -37,12 +37,28 @@ impl FilamentMaterial {
         }
     }
 
-    pub fn profile_name(self) -> &'static str {
-        match self {
-            Self::PlaBasic => "Bambu PLA Basic @BBL P1S 0.4 nozzle",
-            Self::PlaMatte => "Bambu PLA Matte @BBL P1S 0.4 nozzle",
-            Self::PetgBasic | Self::PetgMatte => "Bambu PETG Basic @BBL X1C",
-            Self::PetgHf => "Bambu PETG HF @BBL P1S 0.4 nozzle",
+    pub fn profile_name(self, printer: super::Printer) -> &'static str {
+        use super::Printer;
+        match (self, printer) {
+            (Self::PlaBasic, Printer::P1s) => "Bambu PLA Basic @BBL P1S 0.4 nozzle",
+            (Self::PlaMatte, Printer::P1s) => "Bambu PLA Matte @BBL P1S 0.4 nozzle",
+            (Self::PetgHf, Printer::P1s) => "Bambu PETG HF @BBL P1S 0.4 nozzle",
+            (Self::PlaBasic, Printer::X1c) => "Bambu PLA Basic @BBL X1C",
+            (Self::PlaMatte, Printer::X1c) => "Bambu PLA Matte @BBL X1C",
+            (Self::PetgHf, Printer::X1c) => "Bambu PETG HF @BBL X1C",
+            (Self::PetgBasic | Self::PetgMatte, Printer::P1s | Printer::X1c) => {
+                "Bambu PETG Basic @BBL X1C"
+            }
+            (Self::PlaBasic, Printer::A1) => "Bambu PLA Basic @BBL A1",
+            (Self::PlaMatte, Printer::A1) => "Bambu PLA Matte @BBL A1",
+            (Self::PetgHf, Printer::A1) => "Bambu PETG HF @BBL A1",
+            (Self::PetgBasic | Self::PetgMatte, Printer::A1) => "Bambu PETG Basic @BBL A1",
+            (Self::PlaBasic, Printer::A1Mini) => "Bambu PLA Basic @BBL A1M",
+            (Self::PlaMatte, Printer::A1Mini) => "Bambu PLA Matte @BBL A1M",
+            (Self::PetgHf, Printer::A1Mini) => "Bambu PETG HF @BBL A1M",
+            (Self::PetgBasic | Self::PetgMatte, Printer::A1Mini) => {
+                "Bambu PETG Basic @BBL A1M 0.4 nozzle"
+            }
         }
     }
 
@@ -113,7 +129,7 @@ impl MaterialLibrary {
     }
 }
 
-// Each listed option and each filament_* array in this P1S template contains
+// Each listed option and each filament_* array in the project templates contains
 // one value per filament. Printer, nozzle, process and plate arrays have their
 // own dimensions and stay independent of the number of filament slots.
 const FILAMENT_OPTIONS: &str = "
@@ -133,14 +149,14 @@ const FILAMENT_OPTIONS: &str = "
 
 pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<(), String> {
     const ORIGINAL: usize = 6;
-    let fields = project.as_object_mut().ok_or("Invalid P1S template")?;
+    let fields = project.as_object_mut().ok_or("Invalid printer template")?;
     for (key, value) in fields {
         let Some(entries) = value.as_array_mut() else {
             continue;
         };
         if key.starts_with("filament_") || FILAMENT_OPTIONS.split_whitespace().any(|k| k == key) {
             if entries.len() != ORIGINAL {
-                return Err(format!("Unexpected P1S filament column {key}"));
+                return Err(format!("Unexpected filament column {key}"));
             }
             entries.resize(count, entries[0].clone());
         }
@@ -162,7 +178,7 @@ pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<
         .iter()
         .filter_map(|v| v.as_str()?.parse::<u32>().ok())
         .max()
-        .ok_or("Missing P1S flush volume")?
+        .ok_or("Missing flush volume")?
         .to_string();
     let mut expanded = Vec::with_capacity(count * count);
     for from in 0..count {
@@ -185,6 +201,14 @@ pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<
     let printer = changed.pop().ok_or("Missing printer profile differences")?;
     changed.resize(count + 1, json!(""));
     changed.push(printer);
+    if let Some(parents) = project
+        .get_mut("inherits_group")
+        .and_then(Value::as_array_mut)
+    {
+        let printer = parents.pop().ok_or("Missing printer preset parent")?;
+        parents.resize(count + 1, json!(""));
+        parents.push(printer);
+    }
     Ok(())
 }
 
@@ -241,12 +265,12 @@ mod tests {
         assert_eq!(project["filament_self_index"][7], "8");
         assert_eq!(
             project["filament_settings_id"][6],
-            FilamentMaterial::PlaMatte.profile_name()
+            FilamentMaterial::PlaMatte.profile_name(config.printer)
         );
         assert_eq!(project["filament_ids"][6], "GFA01");
         assert_eq!(
             project["filament_settings_id"][7],
-            FilamentMaterial::PetgBasic.profile_name()
+            FilamentMaterial::PetgBasic.profile_name(config.printer)
         );
         assert_eq!(project["filament_colour"][6], "#2B4B51");
         assert_eq!(project["filament_colour"][7], "#7C1D24");

@@ -136,22 +136,36 @@ impl App {
                     }
                     let count: u32 = items.iter().filter(|b| b.enabled).map(|b| b.qty).sum();
                     total += count;
-                    ui.collapsing(
-                        format!("{} · {} {}", m.name, count, t(z, "份", "copies")),
-                        |ui| {
-                            for b in items.iter().filter(|b| b.enabled) {
-                                ui.label(format!("{} × {}", b.name(), b.qty));
+                    let mut title = format!("{} · {} {}", m.name, count, t(z, "份", "copies"));
+                    if self.export_options.format == crate::export::Format::ThreeMf {
+                        let printers = if leaf {
+                            vec![self.export_options.plate.printer.name()]
+                        } else {
+                            let mut names = vec![m.preset.printer().name()];
+                            for drawer in &m.preset.drawers {
+                                let name = drawer.printer().name();
+                                if !names.contains(&name) {
+                                    names.push(name);
+                                }
                             }
-                            let omitted = items.iter().filter(|b| !b.enabled).count();
-                            if omitted > 0 {
-                                ui.label(format!(
-                                    "{} {}",
-                                    omitted,
-                                    t(z, "项未勾选，不会导出", "unchecked items will not export")
-                                ));
-                            }
-                        },
-                    );
+                            names
+                        };
+                        title.push_str(" · ");
+                        title.push_str(&printers.join(" / "));
+                    }
+                    ui.collapsing(title, |ui| {
+                        for b in items.iter().filter(|b| b.enabled) {
+                            ui.label(format!("{} × {}", b.name(), b.qty));
+                        }
+                        let omitted = items.iter().filter(|b| !b.enabled).count();
+                        if omitted > 0 {
+                            ui.label(format!(
+                                "{} {}",
+                                omitted,
+                                t(z, "项未勾选，不会导出", "unchecked items will not export")
+                            ));
+                        }
+                    });
                 }
             });
         ui.label(format!(

@@ -68,6 +68,30 @@ pub(super) fn validated_layout(
     )
 }
 impl Preset {
+    pub(super) fn printer(&self) -> crate::print_plate::Printer {
+        self.print_config
+            .as_ref()
+            .map(|c| c.printer)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn uses_printer(&self, printer: crate::print_plate::Printer) -> bool {
+        self.printer() == printer
+            && self
+                .drawers
+                .iter()
+                .all(|drawer| drawer.uses_printer(printer))
+    }
+
+    pub(super) fn set_printer(&mut self, printer: crate::print_plate::Printer) {
+        self.print_config
+            .get_or_insert_with(Default::default)
+            .printer = printer;
+        for drawer in &mut self.drawers {
+            drawer.set_printer(printer);
+        }
+    }
+
     pub(super) fn apply_label_font(&mut self, font: Option<crate::label::Font>) {
         if let Some(font) = font {
             self.label.font = font;
@@ -1901,6 +1925,29 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn printer_selection_round_trips_with_each_drawer_and_preserves_its_parameters() {
+        use crate::print_plate::Printer;
+        let mut module = preset();
+        let mut legacy_drawer = preset();
+        legacy_drawer.print_config = None;
+        module.drawers = vec![legacy_drawer, preset()];
+        let child_config = module.drawers[1].print_config.as_mut().unwrap();
+        child_config.gap = 9.;
+        assert!(module.uses_printer(Printer::P1s));
+        module.set_printer(Printer::A1);
+        assert!(module.uses_printer(Printer::A1));
+        module.drawers[1].set_printer(Printer::A1Mini);
+        let restored: Preset = toml::from_str(&toml::to_string(&module).unwrap()).unwrap();
+        let jobs = restored.print_jobs("模块");
+        assert_eq!(
+            jobs.iter().map(|j| j.preset.printer()).collect::<Vec<_>>(),
+            [Printer::A1, Printer::A1, Printer::A1Mini]
+        );
+        assert_eq!(jobs[2].preset.print_config.as_ref().unwrap().gap, 9.);
+        assert!(!restored.uses_printer(Printer::A1));
     }
     #[test]
     fn moving_and_swapping_preserve_member_configuration_and_fail_atomically() {

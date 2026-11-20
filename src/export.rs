@@ -477,7 +477,7 @@ fn write_3mf(
         zip.write_all(content.as_bytes()).map_err(err)?;
     }
     zip.start_file("3D/3dmodel.model", options).map_err(err)?;
-    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="BambuStudio:FdmSupportsPaintingVersion">0</metadata><metadata name="VAULT:Generator">VAULT 装配工作台 · P1S exporter</metadata><resources>"#).map_err(err)?;
+    writeln!(zip,r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Application">BambuStudio-02.05.00.66</metadata><metadata name="BambuStudio:3mfVersion">1</metadata><metadata name="BambuStudio:FdmSupportsPaintingVersion">0</metadata><metadata name="VAULT:Generator">VAULT 装配工作台</metadata><resources>"#).map_err(err)?;
     let PreparedPrint {
         sizes,
         materials,
@@ -572,7 +572,7 @@ fn write_3mf(
     writeln!(zip, "</resources><build>").map_err(err)?;
     for (i, p) in placements.iter().enumerate() {
         let object = resources.len() + i + 1;
-        let [ox, oy] = crate::print_plate::plate_origin(p.plate, plate_count);
+        let [ox, oy] = plate.printer.plate_origin(p.plate, plate_count);
         let (x, y) = (ox + p.x, oy + p.y);
         let rotation = build_orientation(p.rotated, face_down[p.input]);
         let z = if face_down[p.input] {
@@ -1288,6 +1288,107 @@ endsolid t";
                     .count(),
                 if multicolor { 2 } else { 1 }
             );
+        }
+    }
+    #[test]
+    fn three_mf_export_uses_matching_machine_process_and_filaments() {
+        use crate::print_plate::{Config, FilamentMaterial, GroupAppearance, Printer};
+        let temp = tempfile::tempdir().unwrap();
+        let models = temp.path().join("models");
+        std::fs::create_dir(&models).unwrap();
+        let mut tetra = String::from("solid sample\n");
+        let vertices = ["0 0 0", "15 0 0", "0 15 0", "3 3 3"];
+        for [a, b, c] in [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]] {
+            tetra.push_str(&format!("facet normal 0 0 0\nouter loop\nvertex {}\nvertex {}\nvertex {}\nendloop\nendfacet\n",vertices[a],vertices[b],vertices[c]));
+        }
+        tetra.push_str("endsolid sample");
+        std::fs::write(models.join("sample.stl"), tetra).unwrap();
+        let bom = [Bom {
+            path: "sample.stl".into(),
+            qty: 1,
+            enabled: true,
+            group: "Sample".into(),
+        }];
+        let keep = std::env::var_os("VAULT_VERIFY_PRINTER_3MF").is_some();
+        let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/printer-profiles");
+        if keep {
+            std::fs::create_dir_all(&output).unwrap();
+        }
+        for (printer, slug, machine_tag, process) in [
+            (Printer::P1s, "p1s", "machine: P1S-0.4", "X1C"),
+            (Printer::A1, "a1", "machine: A1 ", "A1"),
+            (Printer::A1Mini, "a1-mini", "machine: A1 mini", "A1M"),
+            (Printer::X1c, "x1c", "machine: X1-0.4", "X1C"),
+        ] {
+            let config = Config {
+                printer,
+                materials: [
+                    FilamentMaterial::PlaBasic,
+                    FilamentMaterial::PetgHf,
+                    FilamentMaterial::PlaMatte,
+                    FilamentMaterial::PetgBasic,
+                    FilamentMaterial::PetgMatte,
+                    FilamentMaterial::PlaBasic,
+                ],
+                extra_filaments: vec![GroupAppearance {
+                    rgb: [135, 69, 12],
+                    material: FilamentMaterial::PetgHf,
+                }],
+                ..Default::default()
+            };
+            let path = temp.path().join(format!("{slug}.3mf"));
+            let options = Options {
+                plate: config,
+                ..Default::default()
+            };
+            run_configured(&models, &bom, &path, &options, &Default::default(), None).unwrap();
+            let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+            let settings: serde_json::Value =
+                serde_json::from_reader(zip.by_name("Metadata/project_settings.config").unwrap())
+                    .unwrap();
+            assert_eq!(
+                settings["printer_settings_id"],
+                format!("{} 0.4 nozzle", printer.name())
+            );
+            assert_eq!(
+                settings["default_print_profile"],
+                format!("0.20mm Standard @BBL {process}")
+            );
+            assert!(
+                settings["machine_start_gcode"]
+                    .as_str()
+                    .unwrap()
+                    .contains(machine_tag)
+            );
+            assert_eq!(settings["printable_height"], printer.height().to_string());
+            let [x, y] = printer.bed_size();
+            assert_eq!(settings["printable_area"][2], format!("{x}x{y}"));
+            let [dx, dy] = printer.nozzle_offset();
+            assert_eq!(settings["extruder_offset"][0], format!("{dx}x{dy}"));
+            let [cx, cy] = printer.excluded_corner();
+            if cx == 0. {
+                assert_eq!(settings["bed_exclude_area"], serde_json::json!([]));
+            } else {
+                assert_eq!(settings["bed_exclude_area"][2], format!("{cx}x{cy}"));
+            }
+            assert_eq!(
+                settings["flush_volumes_matrix"].as_array().unwrap().len(),
+                49
+            );
+            for slot in 1..=options.plate.slot_count() {
+                let material = options.plate.appearance(slot).material;
+                assert_eq!(
+                    settings["filament_settings_id"][(slot - 1) as usize],
+                    material.profile_name(printer)
+                );
+                assert_eq!(
+                    settings["filament_type"][(slot - 1) as usize],
+                    material.family()
+                );
+            }
+            if keep {
+                std::fs::copy(&path, output.join(path.file_name().unwrap())).unwrap();
+            }
         }
     }
     #[test]

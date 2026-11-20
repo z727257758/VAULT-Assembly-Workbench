@@ -1,5 +1,5 @@
 struct Camera { view_projection: mat4x4<f32>, };
-struct Object { model: mat4x4<f32>, color: vec4<f32>, text_color: vec4<f32>, bed: vec4<f32>, };
+struct Object { model: mat4x4<f32>, color: vec4<f32>, ink: vec4<f32>, bed: vec4<f32>, };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
 struct VertexOut { @builtin(position) position: vec4<f32>, @location(0) normal: vec3<f32>, @location(1) shade: f32, @location(2) bed_mm: vec2<f32>, };
@@ -30,14 +30,14 @@ fn print_surface(in: VertexOut, pixel: vec2<f32>) -> vec3<f32> {
    return select(vec3<f32>(0.84,0.85,0.81), vec3<f32>(0.39), base.r > 0.70);
  }
  let mm = in.bed_mm;
- let edges = min(mm, vec2<f32>(object.bed.x) - mm) / pixel;
+ let edges = min(mm, object.bed.xy - mm) / pixel;
  let border = min(edges.x, edges.y);
  let inside = clamp(border + 0.5, 0., 1.);
  let minor = grid_coverage(mm, pixel, 10., 0.42);
  let major = grid_coverage(mm, pixel, 50., 0.85);
- let ink = vec3<f32>(object.bed.w);
+ let ink = object.ink.rgb;
  var face = mix(base, ink, max(minor * 0.63, major));
- if all(mm <= object.bed.yz) && all(mm >= vec2<f32>(0.)) {
+ if all(mm < object.bed.zw) && all(mm >= vec2<f32>(0.)) {
    let pitch = 5.;
    let diagonal = abs(fract((mm.x + mm.y) / pitch + 0.5) - 0.5) * pitch;
    let footprint = pixel.x + pixel.y;
@@ -55,8 +55,8 @@ fn print_surface(in: VertexOut, pixel: vec2<f32>) -> vec3<f32> {
  }
  let n=normalize(select(-in.normal,in.normal,front));
  let light=0.32+0.52*max(dot(n,normalize(vec3<f32>(-0.4,0.9,0.6))),0.0)+0.18*max(dot(n,normalize(vec3<f32>(0.7,0.2,-0.6))),0.0);
- if object.text_color.a > 0.0 {
-   return vec4<f32>(select(object.color.rgb,object.text_color.rgb,in.shade < 0.9)*light,object.color.a);
+ if object.ink.a > 0.0 {
+   return vec4<f32>(select(object.color.rgb,object.ink.rgb,in.shade < 0.9)*light,object.color.a);
  }
  return vec4<f32>(object.color.rgb*light*in.shade,object.color.a);
 }

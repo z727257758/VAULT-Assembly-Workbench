@@ -2990,10 +2990,14 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.strong(match self.export_options.format {
                             crate::export::Format::Stl => t(z, "STL 文件夹", "STL folder"),
-                            crate::export::Format::ThreeMf => t(z, "3MF 工程 · P1S", "3MF project · P1S"),
+                            crate::export::Format::ThreeMf => t(z, "3MF 工程", "3MF project"),
                         });
                         if ui.button(t(z, "导出设置…", "Export settings…")).clicked() {
                             self.settings_page = Some(settings_panel::Page::Export);
+                        }
+                        if self.export_options.format == crate::export::Format::ThreeMf
+                            && ui.button(t(z, "打印机…", "Printer…")).clicked() {
+                            self.settings_page = Some(settings_panel::Page::Printer);
                         }
                         if self.export_options.format == crate::export::Format::ThreeMf
                             && self.export_scope == workflow::ExportScope::Current

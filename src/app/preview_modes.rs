@@ -364,6 +364,7 @@ impl App {
                                 ),
                             );
                             response.on_hover_ui(|ui| {
+                                ui.label(plate.printer.name());
                                 ui.label(if plate.textured {
                                     t(z, "纹理 PEI 板", "Textured PEI Plate")
                                 } else {
@@ -637,6 +638,7 @@ impl App {
                 print_beds: Some(crate::render::PrintBedView {
                     active: self.preview_modes.active_plate,
                     dark: ui.visuals().dark_mode,
+                    plates: &layout.plates,
                 }),
                 ..ViewOptions::default()
             },
@@ -732,14 +734,6 @@ fn paint_plate_titles(
     });
     let ink = ui.visuals().text_color();
     let direction = camera.direction();
-    // Anchor to the outer edge facing the viewer, including after a quarter turn.
-    let (start, end) = if direction.x.abs() > direction.z.abs() {
-        let side = if direction.x > 0. { 258. } else { 0. };
-        ([side, 0.], [side, -258.])
-    } else {
-        let edge = if direction.z >= 0. { 10. } else { -266. };
-        ([0., edge], [258., edge])
-    };
     for (i, plate) in layout
         .plates
         .iter()
@@ -747,13 +741,31 @@ fn paint_plate_titles(
         .filter(|(i, _)| filter.is_none_or(|f| *i == f))
     {
         let [x, y] = plate.origin;
+        // The physical rim extends beyond the printable rectangle by different
+        // amounts on each model. Put the title beyond the edge facing the camera.
+        let bed = &layout.bed(i).mesh;
+        let (start, end) = if direction.x.abs() > direction.z.abs() {
+            let side = if direction.x > 0. {
+                bed.max.x
+            } else {
+                bed.min.x
+            };
+            ([side, 0.], [side, -plate.printer.bed_size()[1]])
+        } else {
+            let edge = if direction.z >= 0. {
+                bed.max.z
+            } else {
+                bed.min.z
+            };
+            ([bed.min.x, edge], [bed.max.x, edge])
+        };
         let edge = |[dx, dz]: [f32; 2]| project(camera, rect, Vec3::new(x + dx, 0., -y + dz));
         let (Some(left), Some(right)) = (edge(start), edge(end)) else {
             continue;
         };
         let number = format!("{} {:02}", t(zh, "盘", "Plate"), i + 1);
         let copies = format!("{} {}", plate.copies, t(zh, "份", "copies"));
-        let full = format!(
+        let mut full = format!(
             "{number} · {} / {} · {copies}{}",
             plate.name,
             plate.number + 1,
@@ -763,6 +775,10 @@ fn paint_plate_titles(
                 ""
             }
         );
+        if filter.is_some() {
+            full.push_str(" · ");
+            full.push_str(plate.printer.name());
+        }
         let font = egui::FontId::proportional(if filter.is_some() { 13. } else { 11. });
         let width = (right.x - left.x).abs() - 6.;
         let mut title = painter.layout(full, font.clone(), ink, (rect.width() - 36.).max(1.));
@@ -846,7 +862,7 @@ fn paint_plate_numbers(
             continue;
         }
         let [ox, oy] = plate.origin;
-        let center = Vec3::new(ox + 267., 0., -oy - 8.);
+        let center = Vec3::new(ox + layout.bed(i).mesh.max.x + 9., 0., -oy - 8.);
         let Some(p) = project(camera, rect, center) else {
             continue;
         };
@@ -946,7 +962,7 @@ impl App {
         self.smoke_frame += 1;
         if self.smoke_frame == 5 {
             self.preview_mode_fit();
-            if self.smoke_stage == 4 {
+            if matches!(self.smoke_stage, 4 | 10) {
                 self.preview_modes.camera.yaw = 0.;
                 self.preview_modes.camera.pitch = std::f32::consts::FRAC_PI_2 - 0.0001;
             } else if self.smoke_stage == 8 {
@@ -1009,13 +1025,36 @@ impl App {
                         .filter(|p| p.member == member)
                         .peekable();
                     if parts.peek().is_none()
-                        || parts.any(|p| layout.plates[p.plate].textured != config.textured)
+                        || parts.any(|p| {
+                            let plate = &layout.plates[p.plate];
+                            plate.textured != config.textured || plate.printer != config.printer
+                        })
                     {
                         return Err("Missing member geometry or incorrect plate surface".into());
                     }
                 }
             }
-            if self.smoke_stage == 4 || self.smoke_stage == 8 {
+            if self.smoke_stage == 9 {
+                let layout = self
+                    .preview_modes
+                    .layout
+                    .as_ref()
+                    .ok_or("Missing mixed-printer overview")?;
+                if !layout
+                    .plates
+                    .iter()
+                    .any(|p| p.printer == crate::print_plate::Printer::A1Mini)
+                    || !layout
+                        .plates
+                        .iter()
+                        .any(|p| p.printer == crate::print_plate::Printer::P1s)
+                {
+                    return Err(
+                        "Changing one member's printer did not rebuild the mixed overview".into(),
+                    );
+                }
+            }
+            if matches!(self.smoke_stage, 4 | 8 | 10) {
                 let layout = self
                     .preview_modes
                     .layout
@@ -1034,6 +1073,12 @@ impl App {
                         self.preview_modes.active_plate,
                         layout.plates[filter].textured
                     ));
+                }
+                if self.smoke_stage == 10
+                    && (layout.plates[filter].printer != crate::print_plate::Printer::A1Mini
+                        || (layout.bed(filter).mesh.size.x - 184.).abs() > 0.1)
+                {
+                    return Err("The A1 mini preview retained the larger printer's bed".into());
                 }
                 let mut visible_beds = 0;
                 let mut visible_parts = 0;
@@ -1117,11 +1162,29 @@ impl App {
                     .max_by_key(|(_, p)| p.copies)
                     .map(|(i, _)| i);
             }
+            8 => {
+                self.export_options.plate.printer = crate::print_plate::Printer::A1Mini;
+                for item in &mut self.bom {
+                    item.enabled = crate::label::is_label(&item.path);
+                }
+                self.preview_modes.scope = 0;
+                self.combination_view = true;
+            }
+            9 => {
+                self.preview_modes.filter = self
+                    .preview_modes
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .plates
+                    .iter()
+                    .position(|plate| plate.printer == crate::print_plate::Printer::A1Mini);
+            }
             _ => {
                 let _ = std::fs::write(
                     folder.join("result.txt"),
                     format!(
-                        "PASS: overall, exploded, vertical layers, all print plates and both bed surfaces, filtered top plate, label editor, single-member layers and filtered oblique plate. GPU: {}",
+                        "PASS: overall, exploded, layers, print plates and both bed surfaces, labels, top and oblique views, mixed printers and filtered A1 mini plate. GPU: {}",
                         self.renderer.state.adapter.get_info().name
                     ),
                 );

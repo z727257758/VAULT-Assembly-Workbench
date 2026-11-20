@@ -143,6 +143,7 @@ impl Scene {
 }
 
 pub struct Plate {
+    pub printer: crate::print_plate::Printer,
     pub textured: bool,
     pub number: usize,
     pub origin: [f32; 2],
@@ -193,6 +194,7 @@ impl PrintLayout {
             slots.sort_unstable();
             slots.dedup();
             self.plates.push(Plate {
+                printer: config.printer,
                 textured: config.textured,
                 number,
                 origin: [0.; 2],
@@ -251,8 +253,16 @@ impl PrintLayout {
     }
     pub fn finish(&mut self) -> Result<(), String> {
         let count = self.plates.len();
+        // Use a common cell pitch for mixed projects. For a single printer this
+        // yields exactly the same origins as its exported 3MF project.
+        let largest = self
+            .plates
+            .iter()
+            .map(|plate| plate.printer)
+            .max_by(|a, b| a.bed_size()[0].total_cmp(&b.bed_size()[0]))
+            .unwrap_or_default();
         for (i, plate) in self.plates.iter_mut().enumerate() {
-            plate.origin = crate::print_plate::plate_origin(i, count);
+            plate.origin = largest.plate_origin(i, count);
         }
         for (part, info) in self.scene.parts.iter_mut().zip(&self.parts) {
             let plate = &self.plates[info.as_ref().unwrap().plate];
@@ -260,7 +270,7 @@ impl PrintLayout {
             part.pose.position[2] -= plate.origin[1];
         }
         for (i, plate) in self.plates.iter().enumerate() {
-            let bed = super::print_bed::mesh(plate.textured);
+            let bed = super::print_bed::mesh(plate.printer, plate.textured);
             self.scene.parts.push(Part {
                 mesh: bed.clone(),
                 pose: Pose {
@@ -283,13 +293,16 @@ impl PrintLayout {
         self.scene.title = "打印板平铺 / Print plates".into();
         Ok(())
     }
+    pub fn bed(&self, index: usize) -> &Part {
+        &self.scene.parts[self.parts.len() - self.plates.len() + index]
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     fn part(path: &str, instance: u32, y: f32) -> Part {
-        let mesh = crate::scene::print_bed::mesh(true);
+        let mesh = crate::scene::print_bed::mesh(Default::default(), true);
         Part {
             mesh: mesh.clone(),
             pose: Pose {

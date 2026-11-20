@@ -1,4 +1,17 @@
-# P1S 0.4 mm reference profile
+# Bambu Lab 0.4 mm printer profiles
+
+VAULT embeds four machine profiles. Each 3MF carries the selected machine's start, end and filament-change commands, standard process settings and material parameters. Older configurations select P1S by default.
+
+| Machine | Printable X × Y × Z (mm) | Nozzle XY offset (mm) | Front-left exclusion (mm) | Standard process |
+| --- | --- | --- | --- | --- |
+| P1S | 256 × 256 × 250 | 0, 2 | 18 × 28 | 0.20mm Standard @BBL X1C |
+| X1 Carbon | 256 × 256 × 250 | 0, 2 | 18 × 28 | 0.20mm Standard @BBL X1C |
+| A1 | 256 × 256 × 256 | 0, 0 | — | 0.20mm Standard @BBL A1 |
+| A1 mini | 180 × 180 × 180 | 0, 0 | — | 0.20mm Standard @BBL A1M |
+
+The A1, A1 mini and X1 Carbon templates come from Bambu Studio 02.05.00.66. For each machine, the factory machine, standard process and filament JSON presets were resolved through their `inherits` and `include` chains and loaded with Studio's `--load-settings` and `--load-filaments`. Studio's `--export-settings` produced each independent project template. The base uses six PETG Basic slots. Each matching `*-filaments.json` records Studio's per-slot differences for PLA Basic, PLA Matte and PETG HF on that machine. The standard-flow nozzle selects the Direct Drive Standard column. Slot mappings and flush volumes are expanded to the actual number of configured filaments. [Bambu Studio factory profiles](https://github.com/bambulab/BambuStudio/tree/v02.05.00.66/resources/profiles/BBL)
+
+## P1S reference project
 
 The machine and process settings come from `Metadata/project_settings.config` in the user-provided `M4 Module 1F.3mf`, saved by Bambu Studio 02.05.00.66. The embedded project settings include editable machine and filament start/end G-code. Each filament slot has a material preset and an independent RGB color.
 

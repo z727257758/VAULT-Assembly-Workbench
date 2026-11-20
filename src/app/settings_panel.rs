@@ -1,5 +1,5 @@
 use super::*;
-use crate::print_plate::{FilamentMaterial, MaterialLibrary};
+use crate::print_plate::{FilamentMaterial, MaterialLibrary, Printer};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -46,7 +46,12 @@ impl MaterialEditor {
     }
 }
 
-fn material_settings_ui(ui: &mut egui::Ui, library: &mut MaterialLibrary, zh: bool) {
+fn material_settings_ui(
+    ui: &mut egui::Ui,
+    library: &mut MaterialLibrary,
+    printer: Printer,
+    zh: bool,
+) {
     let id = ui.id().with("material-editor");
     let mut editor = ui
         .data_mut(|data| data.get_temp::<MaterialEditor>(id))
@@ -70,7 +75,7 @@ fn material_settings_ui(ui: &mut egui::Ui, library: &mut MaterialLibrary, zh: bo
     ui.small(format!(
         "{} · {}",
         t(zh, "3MF 耗材预设", "3MF filament profile"),
-        material.profile_name()
+        material.profile_name(printer)
     ));
     if material == FilamentMaterial::PetgMatte {
         ui.small(t(
@@ -177,6 +182,7 @@ impl App {
         let previous_materials = self.material_library.clone();
         let mut done = false;
         let mut library = false;
+        let mut apply_project_printer = false;
         let size = ctx.content_rect().size();
         let width = (size.x - 48.).clamp(680., 820.);
         let height = (size.y - 180.).clamp(300., 480.);
@@ -268,16 +274,15 @@ impl App {
                                         library = ui.add_enabled(!self.busy, egui::Button::new(t(zh, "选择模型库…", "Choose model library…"))).clicked();
                                     }
                                     Page::Printer => {
-                                        ui.strong("Bambu Lab P1S · 0.4 mm");
-                                        ui.label(t(zh, "平台 256 × 256 mm · 参考配置限高 250 mm", "256 × 256 mm bed · 250 mm profile height limit"));
-                                        for material in crate::print_plate::FilamentMaterial::ALL {
-                                            if (1..=self.export_options.plate.slot_count()).any(|slot| self.export_options.plate.appearance(slot).material == material) {
-                                                ui.label(material.name()).on_hover_text(material.profile_name());
-                                            }
-                                        }
+                                        apply_project_printer = ui.add_enabled_ui(
+                                            self.export_rx.is_none(), |ui| self.printer_settings_ui(ui)
+                                        ).inner;
                                     }
-                                    Page::Materials => material_settings_ui(ui, &mut self.material_library, zh),
+                                    Page::Materials => material_settings_ui(ui, &mut self.material_library, self.export_options.plate.printer, zh),
                                     Page::Print => {
+                                        if ui.link(format!("{} · {}", t(zh, "打印机", "Printer"), self.export_options.plate.printer.name())).clicked() {
+                                            page = Page::Printer;
+                                        }
                                         ui.small(t(zh, "参数应用于当前成员的 3MF 和打印板预览。", "Parameters apply to the current member’s 3MF and plate preview."));
                                         ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
                                             print_parameters_ui(ui, &mut self.export_options.plate, zh);
@@ -287,7 +292,7 @@ impl App {
                                         ui.strong(t(zh, "文件格式", "File format"));
                                         ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
                                             for (format, label) in [
-                                                (crate::export::Format::ThreeMf, t(zh, "3MF 工程（P1S 自动摆盘）", "3MF project (P1S plate layout)")),
+                                                (crate::export::Format::ThreeMf, t(zh, "3MF 工程（按机型自动摆盘）", "3MF project (printer-specific layout)")),
                                                 (crate::export::Format::Stl, t(zh, "STL 文件夹（每份单独文件）", "STL folder (one file per copy)")),
                                             ] {
                                                 ui.radio_value(&mut self.export_options.format, format, label);
@@ -315,6 +320,7 @@ impl App {
         let theme_changed = self.appearance != previous_theme;
         let language_changed = self.zh != zh;
         if plate_changed
+            || apply_project_printer
             || font_changed
             || theme_changed
             || language_changed
@@ -337,8 +343,26 @@ impl App {
                         crate::app_name(self.zh).into(),
                     ));
                 }
-                if plate_changed {
+                let printer = self.export_options.plate.printer;
+                let printer_changed = previous_export.plate.printer != printer;
+                if (apply_project_printer || printer_changed) && !self.members.is_empty() {
+                    // Capture any pending member edits with the old printer for undo.
+                    self.export_options.plate.printer = previous_export.plate.printer;
+                    self.record_workflow();
+                    self.export_options.plate.printer = printer;
+                }
+                if plate_changed || apply_project_printer {
                     self.commit_member();
+                }
+                if apply_project_printer {
+                    for member in &mut self.members {
+                        member.preset.set_printer(printer);
+                    }
+                } else if printer_changed
+                    && self.active_drawer.is_none()
+                    && let Some(member) = self.members.get_mut(self.active_member)
+                {
+                    member.preset.set_printer(printer);
                 }
                 if font_changed && self.tab == 0 && !self.catalog.root.as_os_str().is_empty() {
                     if self.scene.assembly || self.combination_view {
@@ -354,6 +378,67 @@ impl App {
         if library {
             self.choose_library(ctx);
         }
+    }
+
+    fn printer_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let zh = self.zh;
+        if let Some(member) = self.members.get(self.active_member) {
+            let target = match self.active_drawer {
+                Some(index) => format!("{} {}", t(zh, "抽屉", "Drawer"), index + 1),
+                None if !member.preset.drawers.is_empty() => {
+                    t(zh, "模块及其抽屉", "Module and its drawers").to_owned()
+                }
+                None => t(zh, "当前模块", "Current module").to_owned(),
+            };
+            ui.label(format!("{} · {target}", member.name));
+        }
+        let printer = &mut self.export_options.plate.printer;
+        egui::ComboBox::from_id_salt("printer-model")
+            .selected_text(printer.name())
+            .width(220.)
+            .show_ui(ui, |ui| {
+                for model in Printer::ALL {
+                    ui.selectable_value(printer, model, model.name());
+                }
+            });
+        ui.add_space(8.);
+        let [width, depth] = printer.bed_size();
+        egui::Grid::new("printer-specs")
+            .spacing([20., 6.])
+            .show(ui, |ui| {
+                for (label, value) in [
+                    (
+                        t(zh, "打印平台", "Print bed"),
+                        format!("{width} × {depth} mm"),
+                    ),
+                    (
+                        t(zh, "配置限高", "Profile height limit"),
+                        format!("{} mm", printer.height()),
+                    ),
+                    (t(zh, "喷嘴直径", "Nozzle diameter"), "0.4 mm".to_owned()),
+                ] {
+                    ui.weak(label);
+                    ui.label(value);
+                    ui.end_row();
+                }
+            });
+        if self.members.is_empty() {
+            return false;
+        }
+        ui.add_space(10.);
+        let differs = self
+            .members
+            .iter()
+            .any(|m| !m.preset.uses_printer(*printer));
+        ui.add_enabled(
+            differs,
+            egui::Button::new(t(
+                zh,
+                "整个项目使用此机型",
+                "Apply printer to entire project",
+            )),
+        )
+        .clicked()
     }
 
     fn label_font_ui(&mut self, ui: &mut egui::Ui) {
@@ -400,10 +485,10 @@ impl App {
         let Some(screenshot) = screenshot else {
             return;
         };
-        let (page, filename) = if self.smoke_stage == 1 {
-            (Page::Appearance, "appearance-light.png")
-        } else {
-            (Page::Print, "print-dark-compact.png")
+        let (page, filename) = match self.smoke_stage {
+            1 => (Page::Appearance, "appearance-light.png"),
+            2 => (Page::Print, "print-dark-compact.png"),
+            _ => (Page::Printer, "printer-a1-mini.png"),
         };
         assert!(self.settings_page == Some(page));
         let folder = self.home.join("output/settings-ui");
@@ -427,6 +512,11 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1050., 700.)));
             self.settings_page = Some(Page::Print);
             self.smoke_stage = 2;
+            self.smoke_frame = 0;
+        } else if self.smoke_stage == 2 {
+            self.export_options.plate.printer = Printer::A1Mini;
+            self.settings_page = Some(Page::Printer);
+            self.smoke_stage = 3;
             self.smoke_frame = 0;
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

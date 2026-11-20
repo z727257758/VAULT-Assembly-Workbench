@@ -81,7 +81,7 @@ impl Camera {
 struct ObjectUniform {
     model: [[f32; 4]; 4],
     color: [f32; 4],
-    text_color: [f32; 4],
+    ink: [f32; 4],
     bed: [f32; 4],
 }
 struct GpuMesh {
@@ -100,22 +100,23 @@ struct Target {
     id: egui::TextureId,
 }
 #[derive(Default)]
-pub struct ViewOptions {
+pub struct ViewOptions<'a> {
     pub explosion: f32,
     pub selected: Option<usize>,
     pub ghost: bool,
     pub interior_only: bool,
     pub colliding: Vec<usize>,
     pub member_offsets: Vec<Vec3>,
-    pub print_beds: Option<PrintBedView>,
+    pub print_beds: Option<PrintBedView<'a>>,
 }
 
-pub struct PrintBedView {
+pub struct PrintBedView<'a> {
     pub active: usize,
     pub dark: bool,
+    pub plates: &'a [crate::scene::layouts::Plate],
 }
 
-impl PrintBedView {
+impl PrintBedView<'_> {
     fn colors(&self, index: usize) -> ([f32; 4], f32) {
         if self.active == index {
             ([0.267, 0.278, 0.278, 1.], 0.55)
@@ -387,7 +388,7 @@ impl Renderer {
         size: [u32; 2],
         scene: &Scene,
         camera: &Camera,
-        options: ViewOptions,
+        options: ViewOptions<'_>,
     ) -> egui::TextureId {
         self.render_with_materials(index, size, scene, camera, options, &[])
     }
@@ -399,7 +400,7 @@ impl Renderer {
         size: [u32; 2],
         scene: &Scene,
         camera: &Camera,
-        options: ViewOptions,
+        options: ViewOptions<'_>,
         materials: &[MaterialOverride],
     ) -> egui::TextureId {
         let ViewOptions {
@@ -463,13 +464,22 @@ impl Renderer {
                 color[3] = opacity.clamp(0., 1.);
             }
             let mut bed = [0.; 4];
+            let mut ink = print_colors.map_or([0.; 4], |c| {
+                let mut v = c.slot_color(c.text_slot(&p.pose.path));
+                v[3] = color[3];
+                v
+            });
             if let Some(view) = &print_beds
                 && p.pose.path == crate::scene::print_bed::PATH
             {
-                let (base, grid) = view.colors(p.pose.instance as usize);
+                let index = p.pose.instance as usize;
+                let printer = view.plates[index].printer;
+                let (base, grid) = view.colors(index);
                 color = base;
-                let [width, depth] = crate::print_plate::EXCLUDED_CORNER_MM;
-                bed = [crate::print_plate::BED_SIZE_MM, width, depth, grid];
+                ink = [grid, grid, grid, 1.];
+                let [w, d] = printer.bed_size();
+                let [ex, ey] = printer.excluded_corner();
+                bed = [w, d, ex, ey];
             }
             self.part_opacities.push(color[3]);
             let mut model = p.pose.matrix(explosion);
@@ -482,11 +492,7 @@ impl Renderer {
                 bed,
                 model: model.to_cols_array_2d(),
                 color,
-                text_color: print_colors.map_or([0.; 4], |c| {
-                    let mut v = c.slot_color(c.text_slot(&p.pose.path));
-                    v[3] = color[3];
-                    v
-                }),
+                ink,
             };
             self.state
                 .queue
