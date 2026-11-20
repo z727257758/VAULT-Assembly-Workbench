@@ -11,6 +11,7 @@ mod layer_reorder;
 mod motion;
 mod orientation;
 mod preview_modes;
+mod print_list;
 mod recipes;
 mod settings_panel;
 pub(crate) use recipes::audit as audit_presets;
@@ -38,6 +39,19 @@ fn t(zh: bool, cn: &'static str, en: &'static str) -> &'static str {
     if zh { cn } else { en }
 }
 impl AssemblyKind {
+    fn configured_bom(
+        self,
+        catalog: &Catalog,
+        selection: &Selection,
+        options: SustainerOptions,
+        previous: &[Bom],
+    ) -> Result<Vec<Bom>, String> {
+        match self {
+            Self::Drawer => Ok(catalog.reconfigure(selection, previous)),
+            Self::Sustainer => catalog.reconfigure_sustainer(selection, options, previous),
+        }
+    }
+
     fn label_path(self) -> &'static str {
         match self {
             Self::Drawer => crate::label::PATH,
@@ -1108,6 +1122,11 @@ impl App {
                             self.camera.pitch = 1.25;
                         }
                     }
+                    // Keep the assembly snapshot only while inspecting a single part.
+                    // The accepted assembly supplies the state for the next refresh.
+                    if s.assembly {
+                        self.assembly_view = None;
+                    }
                     if self.scene_key == "combination"
                         && !preserve
                         && let Some((camera, explosion, dimensions, ghost)) =
@@ -1593,32 +1612,34 @@ impl App {
         self.assembly(ctx);
     }
     fn configured_bom(&self, old: &[Bom]) -> Result<Vec<Bom>, String> {
-        if self.assembly_kind == AssemblyKind::Drawer {
-            return Ok(self.catalog.reconfigure(&self.selection, old));
-        }
-        self.catalog
-            .reconfigure_sustainer(&self.selection, self.sustainer_options, old)
+        self.assembly_kind.configured_bom(
+            &self.catalog,
+            &self.selection,
+            self.sustainer_options,
+            old,
+        )
     }
-    fn select_accessory(&mut self, path: String, enabled: bool, qty: u32) {
-        if self.assembly_kind == AssemblyKind::Sustainer {
-            Catalog::set_accessory(&mut self.bom, path, enabled, qty);
-            return;
+    fn select_accessory(&mut self, path: String, enabled: bool, qty: u32) -> bool {
+        let drawer = self.assembly_kind == AssemblyKind::Drawer;
+        let change_plate = drawer && enabled && path.contains("/Gridfinity Baseplate/");
+        if let Err(error) = print_list::set_accessory(
+            &self.selection,
+            &mut self.bom,
+            drawer.then_some((&mut self.divider_layout, &mut self.gridfinity)),
+            path,
+            enabled,
+            qty,
+        ) {
+            self.status = error;
+            return false;
         }
-        if enabled && path.contains("/Gridfinity Baseplate/") {
-            let mut next = self.gridfinity.clone();
-            next.baseplate = path.clone();
-            if let Err(e) = next.validate(&self.selection) {
-                self.status = format!("{e}；请先调整盒子再切换底板");
-                return;
-            }
-            self.gridfinity = next;
+        if change_plate {
             self.divider_editor.open = false;
             self.layout_cache
                 .remove(&crate::dividers::spec(&self.selection));
             self.divider_editor.reset();
         }
-        self.divider_layout
-            .select_accessory(&mut self.bom, &self.selection, path, enabled, qty);
+        true
     }
     fn add_to_bom(&mut self, path: String, ctx: &egui::Context) {
         if self.divider_layout.enabled && path.contains("/Grid Dividers/") {
@@ -1657,7 +1678,9 @@ impl App {
             .iter()
             .find(|b| b.path == path)
             .map_or(1, |b| b.qty);
-        self.select_accessory(path, true, qty);
+        if !self.select_accessory(path, true, qty) {
+            return;
+        }
         self.assembly(ctx);
         self.status = t(
             self.zh,
@@ -1682,87 +1705,23 @@ impl App {
             ui.small(t(z, "这里只列当前子抽屉；共用外壳在整体打印清单中核对。", "This list covers the current drawer; check the shared housing in the project print list."));
         }
         ui.add_space(8.);
-        let mut preview = None;
-        let mut changed = false;
-        let mut enabled_variant = None;
-        for item in &mut self.bom {
-            if self.active_drawer.is_some() && crate::catalog::tower::housing(&item.path) {
-                continue;
-            }
-            ui.push_id(item.path.clone(), |ui| {
-                let auto_caps = item.path.ends_with("/Facade Cap.stl");
-                if auto_caps {
-                    item.qty = crate::catalog::facade_cap_count(&self.selection);
-                }
-                let required = item.path.contains("/Geared Rails/");
-                let locked = required
-                    || item.group == crate::dividers::GROUP
-                    || item.group == crate::sustainer_dividers::GROUP
-                    || item.group == crate::gridfinity::GROUP;
-                if required {
-                    item.enabled = true;
-                    item.qty = 1;
-                }
-                let metadata = crate::accessories::info(&item.path, z);
-                let label = metadata
-                    .as_ref()
-                    .map_or_else(|| item.name().to_string(), |m| m.name.clone());
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!locked, egui::Checkbox::new(&mut item.enabled, ""))
-                        .on_hover_text(if required {
-                            t(
-                                z,
-                                "必备：一份包含上下两根齿条",
-                                "Required: one file contains both racks",
-                            )
-                        } else {
-                            ""
-                        })
-                        .changed()
-                    {
-                        changed = true;
-                        if item.enabled {
-                            enabled_variant = Some((item.path.clone(), item.qty));
-                        }
-                    }
-                    ui.add(egui::Label::new(label).wrap())
-                        .on_hover_text(&item.path);
-                });
-                ui.horizontal(|ui| {
-                    ui.small(group_label(z, &item.group));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(t(z, "预览", "Preview")).clicked() {
-                            preview = Some(item.path.clone());
-                        }
-                        changed |= ui
-                            .add_enabled(
-                                !locked && !auto_caps,
-                                egui::DragValue::new(&mut item.qty).range(1..=100),
-                            )
-                            .on_hover_text(t(z, "源 STL 文件份数", "Source STL copies"))
-                            .changed();
-                        ui.small(t(z, "份数", "Copies"));
-                    });
-                });
-                if self.catalog.resolve(&item.path).is_none()
-                    && !item.path.starts_with(crate::gridfinity::PREFIX)
-                {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        t(z, "源文件缺失", "Source file missing"),
-                    );
-                }
-                ui.separator();
-            });
-        }
-        if let Some((path, qty)) = enabled_variant {
-            self.select_accessory(path, true, qty);
-        }
-        if changed {
+        let child = self.active_drawer.is_some();
+        let edits = print_list::rows(
+            ui,
+            self.bom
+                .iter_mut()
+                .filter(|b| !child || !crate::catalog::tower::housing(&b.path)),
+            &self.selection,
+            z,
+            Some(&self.catalog),
+        );
+        let toggled = edits
+            .toggle
+            .is_some_and(|(path, enabled, qty)| self.select_accessory(path, enabled, qty));
+        if edits.changed || toggled {
             self.assembly(ctx);
         }
-        if let Some(path) = preview {
+        if let Some(path) = edits.preview {
             self.single(path, ctx);
         }
         ui.small(t(z, "份数按源 STL 统计；单份可能含多个实体。打印勾选与装配显隐分别控制。", "Copies count source STL files, which can contain several bodies. Print selection and preview visibility are independent."));
@@ -2543,16 +2502,8 @@ impl App {
     }
     fn save_preset(&mut self) {
         self.commit_member();
-        if let Err(e) = (CombinationPreset {
-            project_name: self.tower.name.clone(),
-            colors: self.global_colors.clone(),
-            preset: self.member_snapshot(),
-            members: self.members.clone(),
-            active_member: self.active_member,
-            combination_gap: self.combination_gap,
-        })
-        .validate(&self.catalog)
-        {
+        let saved = self.project_snapshot(self.member_snapshot());
+        if let Err(e) = saved.validate(&self.catalog) {
             self.status = e;
             return;
         }
@@ -2570,17 +2521,7 @@ impl App {
         {
             let result = self
                 .check_destination(&path)
-                .and_then(|_| {
-                    toml::to_string_pretty(&CombinationPreset {
-                        project_name: self.tower.name.clone(),
-                        colors: self.global_colors.clone(),
-                        preset: self.member_snapshot(),
-                        members: self.members.clone(),
-                        active_member: self.active_member,
-                        combination_gap: self.combination_gap,
-                    })
-                    .map_err(|e| e.to_string())
-                })
+                .and_then(|_| toml::to_string_pretty(&saved).map_err(|e| e.to_string()))
                 .and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()));
             self.status = match result {
                 Ok(_) => t(self.zh, "方案已保存", "Preset saved").into(),
@@ -2619,170 +2560,39 @@ impl App {
         result: Result<CombinationPreset, String>,
         ctx: &egui::Context,
     ) {
+        let result = result.and_then(|mut saved| {
+            saved.prepare_restore(&self.catalog, &self.export_options.plate)?;
+            let active = saved
+                .members
+                .get_mut(saved.active_member)
+                .map(|m| &mut m.preset)
+                .unwrap_or(&mut saved.preset);
+            active.sustainer_options = active.sustainer_options.normalized(&active.selection);
+            active.sustainer_dividers.specification =
+                crate::sustainer_dividers::spec(&active.selection, active.sustainer_options);
+            active.divider_layout.specification = crate::dividers::spec(&active.selection);
+            let bom = active.configured_bom(&self.catalog)?;
+            let excluded = active
+                .bom
+                .iter()
+                .filter(|b| b.enabled && !bom.iter().any(|item| item.path == b.path))
+                .count();
+            active.bom = bom;
+            Ok((saved, excluded))
+        });
         match result {
-            Ok(saved) => {
-                if let Err(e) = saved.validate(&self.catalog) {
-                    self.status = e;
-                    return;
-                }
-                let CombinationPreset {
-                    project_name,
-                    preset,
-                    members,
-                    active_member,
-                    combination_gap,
-                    colors,
-                } = saved;
-
-                let p = members
-                    .get(active_member)
-                    .map(|m| m.preset.clone())
-                    .unwrap_or(preset);
-                if crate::constraints::AssemblyRules::validate_lid_angle(p.sustainer_angle).is_err()
-                    || p.assembly_kind == AssemblyKind::Sustainer
-                        && (!p.gridfinity.bins.is_empty()
-                            || p.divider_layout.enabled
-                            || !p.divider_layout.items.is_empty())
-                {
-                    self.status = t(
+            Ok((saved, excluded)) => {
+                self.tower_imported_project(saved.project_name.clone());
+                self.restore_project(saved);
+                self.assembly(ctx);
+                self.status = format!(
+                    "{} {excluded}",
+                    t(
                         self.zh,
-                        "箱子方案含无效开盖角度或不兼容的抽屉内部配置。",
-                        "Invalid lid angle or incompatible drawer inserts in box preset.",
+                        "方案已载入；已移除不匹配的文件：",
+                        "Preset loaded. Incompatible files removed:"
                     )
-                    .into();
-                    return;
-                }
-                if p.assembly_kind == AssemblyKind::Drawer && !p.sustainer_dividers.items.is_empty()
-                {
-                    self.status = "抽屉方案不能包含箱子隔板".into();
-                    return;
-                }
-                if let Err(e) =
-                    p.sustainer_dividers
-                        .validate(&self.catalog, &p.selection, p.sustainer_options)
-                {
-                    self.status = e;
-                    return;
-                }
-                if let Some(config) = &p.print_config
-                    && let Err(e) = config.validate()
-                {
-                    self.status = e;
-                    return;
-                }
-                if let Err(e) = p.gridfinity.validate(&p.selection) {
-                    self.status = e;
-                    return;
-                }
-                if let Err(e) = p.label.validate() {
-                    self.status = e;
-                    return;
-                }
-                if let Err(e) = p.divider_layout.validate(&self.catalog, &p.selection) {
-                    self.status = format!("布局无效：{e}");
-                    return;
-                }
-                if !["S", "M", "L", "XL"].contains(&p.selection.width.as_str())
-                    || !(3..=7).contains(&p.selection.depth)
-                    || !["1F", "2F", "4F"].contains(&p.selection.height.as_str())
-                    || p.selection.width == "XL" && p.selection.height != "1F"
-                    || p.bom.iter().any(|b| {
-                        (!b.path.starts_with(crate::gridfinity::PREFIX)
-                            && self.catalog.resolve(&b.path).is_none())
-                            || b.qty == 0
-                            || b.qty > 100
-                    })
-                {
-                    self.status = t(
-                        self.zh,
-                        "方案包含当前模型库中不存在或无效的组件",
-                        "Preset has invalid or unavailable components",
-                    )
-                    .into();
-                } else {
-                    let next = match if p.assembly_kind == AssemblyKind::Sustainer {
-                        self.catalog.reconfigure_sustainer(
-                            &p.selection,
-                            p.sustainer_options,
-                            &p.bom,
-                        )
-                    } else {
-                        Ok(self.catalog.reconfigure(&p.selection, &p.bom))
-                    } {
-                        Ok(bom) => bom,
-                        Err(e) => {
-                            self.status = e;
-                            return;
-                        }
-                    };
-                    self.close_member_editors();
-                    self.active_drawer = None;
-                    if let Some(config) = p.print_config {
-                        self.export_options.plate = config;
-                    } else {
-                        self.export_options.plate.part_filaments.clear();
-                        self.export_options.plate.text_filaments.clear();
-                        self.export_options.plate.role_filaments.clear();
-                        self.export_options.plate.component_filaments.clear();
-                        self.export_options.plate.component_text_filaments.clear();
-                        self.export_options.plate.follow_global_colors = false;
-                    }
-                    self.selection = p.selection;
-                    if self.assembly_kind != p.assembly_kind {
-                        std::mem::swap(&mut self.label, &mut self.other_label);
-                    }
-                    self.assembly_kind = p.assembly_kind;
-                    self.sustainer_options = p.sustainer_options.normalized(&self.selection);
-                    self.sustainer_angle = p.sustainer_angle;
-                    self.drawer_extension = p.drawer_extension;
-                    self.label = p.label;
-                    self.gridfinity = p.gridfinity;
-                    self.sustainer_dividers = p.sustainer_dividers;
-                    self.sustainer_dividers.specification =
-                        crate::sustainer_dividers::spec(&self.selection, self.sustainer_options);
-                    self.sustainer_layout_cache
-                        .remove(&self.sustainer_dividers.specification);
-                    self.sustainer_divider_editor = Default::default();
-                    self.divider_editor.open = false;
-                    self.divider_layout = p.divider_layout;
-                    self.divider_layout.specification = crate::dividers::spec(&self.selection);
-                    self.layout_cache.remove(&self.divider_layout.specification);
-                    self.divider_editor.reset();
-                    let excluded = p
-                        .bom
-                        .iter()
-                        .filter(|b| b.enabled && !next.iter().any(|n| n.path == b.path))
-                        .count();
-                    self.bom = next;
-                    self.global_colors = colors;
-                    self.tower_imported_project(project_name);
-                    self.members = members;
-                    self.combination_move_source = None;
-                    self.workflow_history.clear();
-                    self.member_edit_baseline = None;
-                    self.member_selection.clear();
-                    self.combination_view_state = None;
-                    self.active_member = active_member;
-                    self.combination_gap = combination_gap;
-                    self.ensure_members();
-                    self.sync_global_colors();
-                    self.combination_view = true;
-                    self.scene_key.clear();
-                    self.assembly_view = None;
-                    self.drawer_state = None;
-                    self.box_state = None;
-                    self.layout_cache.clear();
-                    self.sustainer_layout_cache.clear();
-                    self.assembly(ctx);
-                    self.status = format!(
-                        "{} {excluded}",
-                        t(
-                            self.zh,
-                            "方案已载入；已移除不匹配的文件：",
-                            "Preset loaded. Incompatible files removed:"
-                        )
-                    );
-                }
+                );
             }
             Err(e) => self.status = e,
         }
@@ -3027,7 +2837,7 @@ impl App {
     fn start_export(&mut self, ctx: &egui::Context) {
         if !self.members.is_empty()
             && (self.export_scope != workflow::ExportScope::Current
-                || self.combination_view
+                || self.active_drawer.is_none()
                     && !self.members[self.active_member].preset.drawers.is_empty())
         {
             self.export_combination(ctx);
@@ -3077,28 +2887,17 @@ impl App {
             self.status = e;
             return;
         }
-        let mut items = if self.active_drawer.is_some() {
-            crate::catalog::tower::drawer_items(&self.bom)
-        } else {
-            self.bom.clone()
-        };
-        if let Some(m) = self
-            .members
-            .get(self.active_member)
-            .filter(|_| self.active_drawer.is_none())
-        {
-            match self.catalog.exterior_components(
-                &self.selection,
-                &m.exterior,
-                self.assembly_kind == AssemblyKind::Sustainer,
-            ) {
-                Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
-                Err(e) => {
-                    self.status = e;
-                    return;
-                }
+        let member = self.current_print_member();
+        let items = match print_list::checked_jobs([(self.active_member, &member)], &self.catalog) {
+            Ok(jobs) => jobs
+                .into_iter()
+                .flat_map(|(_, job)| job.items)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                self.status = error;
+                return;
             }
-        }
+        };
         let root = self.catalog.root.clone();
         let options = self.export_options.clone();
         let label = self.label.with_font(self.label_font);
@@ -3146,6 +2945,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.preview_modes.release_inactive_plates();
         self.poll(ctx);
         self.tower_tick(ctx);
         self.animation_tick(ctx);

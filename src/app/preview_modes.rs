@@ -26,6 +26,8 @@ pub(super) struct State {
     queue: crate::preview::Queue<PrintRequest>,
     rx: Option<Receiver<(u64, Result<PrintLayout, String>)>>,
     key: Vec<u8>,
+    suspended: bool,
+    last_plate_camera: Option<Camera>,
     pub layout: Option<PrintLayout>,
     renderer: Option<Renderer>,
     pub(super) error: Option<String>,
@@ -38,72 +40,82 @@ impl State {
     pub fn special(&self) -> bool {
         matches!(self.mode, Mode::Layers | Mode::Plates)
     }
+
+    pub(super) fn release_inactive_plates(&mut self) {
+        if self.mode == Mode::Plates {
+            return;
+        }
+        if self.layout.take().is_some() || self.queue.has_pending() || self.rx.is_some() {
+            self.renderer = None;
+            self.queue.cancel();
+            self.suspended = true;
+        }
+        // Drain late results and keep one worker at a time across view switches.
+        let _ = self.take_worker_result();
+    }
+
+    fn take_worker_result(&mut self) -> Option<Result<PrintLayout, String>> {
+        let result = match self.rx.as_ref()?.try_recv() {
+            Ok((revision, result)) => self.queue.is_current(revision).then_some(result),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => (!self.queue.has_pending())
+                .then(|| Err("打印板任务意外结束 / Print layout worker stopped".into())),
+        };
+        self.rx = None;
+        result
+    }
+}
+impl Drop for State {
+    fn drop(&mut self) {
+        self.queue.cancel();
+    }
 }
 fn build(request: PrintRequest, cancel: &crate::preview::Cancel) -> Result<PrintLayout, String> {
     let mut layout = PrintLayout::default();
     let mut geometry = crate::scene::MeshPool::default();
     let catalog = Catalog::scan(request.root.clone())?;
-    let mut copies = 0u64;
-    for (index, member) in &request.members {
+    let members = request.members.iter().map(|(i, member)| (*i, member));
+    for (index, job) in print_list::checked_jobs(members, &catalog)? {
         crate::preview::check(Some(cancel))?;
-        let p = &member.preset;
-        let mut items = p.bom.clone();
-        items.extend(
-            catalog
-                .exterior_components(
-                    &p.selection,
-                    &member.exterior,
-                    p.assembly_kind == AssemblyKind::Sustainer,
-                )?
-                .into_iter()
-                .map(|c| c.bom),
-        );
-        if !items.iter().any(|b| b.enabled) {
-            continue;
+        let config = job.preset.print_config.clone().unwrap_or_default();
+        let (inputs, plan) = crate::export::prepare_preview(
+            &request.root,
+            &job.items,
+            &job.preset.label,
+            &config,
+            Some((&request.home, &job.preset.gridfinity, &job.preset.selection)),
+        )
+        .map_err(|e| format!("{}: {e}", job.name))?;
+        crate::preview::check(Some(cancel))?;
+        let start = layout.parts.len();
+        layout.append(index, &job.name, &inputs, plan, &config);
+        for part in layout.parts[start..].iter_mut().flatten() {
+            part.drawer = job.drawer;
         }
-        copies += p
-            .printing_bom()
-            .iter()
-            .chain(items.iter().skip(p.bom.len()))
-            .filter(|b| b.enabled)
-            .map(|b| u64::from(b.qty))
-            .sum::<u64>();
-        if copies > 1000 {
-            return Err("平铺最多 1000 份 / Plate view supports up to 1000 copies".into());
-        }
-        for (job_index, job) in p.print_jobs(&member.name).into_iter().enumerate() {
-            let mut job_items = job.items;
-            if job_index == 0 {
-                job_items.extend(items.iter().skip(p.bom.len()).cloned());
-            }
-            if !job_items.iter().any(|b| b.enabled) {
-                continue;
-            }
-            let config = job.preset.print_config.clone().unwrap_or_default();
-            let (inputs, plan) = crate::export::prepare_preview(
-                &request.root,
-                &job_items,
-                &job.preset.label,
-                &config,
-                Some((&request.home, &job.preset.gridfinity, &job.preset.selection)),
-            )
-            .map_err(|e| format!("{}: {e}", job.name))?;
-            crate::preview::check(Some(cancel))?;
-            let start = layout.parts.len();
-            layout.append(*index, &job.name, &inputs, plan, &config);
-            for part in layout.parts[start..].iter_mut().flatten() {
-                part.drawer = job.drawer;
-            }
-            geometry.share(&mut layout.scene)?;
-        }
-    }
-    if layout.plates.is_empty() {
-        return Err("打印清单没有勾选零件 / No checked parts in the print list".into());
+        geometry.share(&mut layout.scene)?;
     }
     layout.finish()?;
     Ok(layout)
 }
 impl App {
+    pub(super) fn current_print_member(&self) -> Member {
+        let mut preset = self.member_snapshot();
+        let owner = self.members.get(self.active_member);
+        if self.active_drawer.is_some() {
+            preset.bom = crate::catalog::tower::drawer_items(&preset.bom);
+        }
+        Member {
+            name: owner
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| self.scene.title.clone()),
+            preset,
+            placement: Default::default(),
+            exterior: owner
+                .filter(|_| self.active_drawer.is_none())
+                .map(|m| m.exterior.clone())
+                .unwrap_or_default(),
+        }
+    }
     fn print_request(&mut self) -> PrintRequest {
         self.commit_member();
         let mut members = if self.combination_view {
@@ -118,30 +130,7 @@ impl App {
                 .map(|(i, m)| (i, m.clone()))
                 .collect()
         } else {
-            vec![(
-                self.active_member,
-                Member {
-                    name: self
-                        .members
-                        .get(self.active_member)
-                        .map(|m| m.name.clone())
-                        .unwrap_or_else(|| self.scene.title.clone()),
-                    preset: {
-                        let mut p = self.member_snapshot();
-                        if self.active_drawer.is_some() {
-                            p.bom = crate::catalog::tower::drawer_items(&p.bom);
-                        }
-                        p
-                    },
-                    placement: Default::default(),
-                    exterior: self
-                        .members
-                        .get(self.active_member)
-                        .filter(|_| self.active_drawer.is_none())
-                        .map(|m| m.exterior.clone())
-                        .unwrap_or_default(),
-                },
-            )]
+            vec![(self.active_member, self.current_print_member())]
         };
         for (_, member) in &mut members {
             member.preset.apply_label_font(self.label_font);
@@ -152,38 +141,53 @@ impl App {
             members,
         }
     }
-    fn pump_print_layout(&mut self, ctx: &egui::Context) {
+    fn pump_print_layout(&mut self, ctx: &egui::Context) -> bool {
         let request = self.print_request();
         let key = serde_json::to_vec(&request).unwrap_or_default();
         let state = &mut self.preview_modes;
-        if key != state.key {
+        let changed = key != state.key;
+        if changed || state.suspended {
             state.key = key;
+            state.suspended = false;
             state
                 .queue
                 .schedule(request, Instant::now(), Duration::from_millis(300));
             state.layout = None;
             state.renderer = None;
             state.error = None;
-            state.selected = None;
-            state.filter = None;
-            state.active_plate = 0;
+            if changed {
+                state.last_plate_camera = None;
+                state.selected = None;
+                state.filter = None;
+                state.active_plate = 0;
+            }
         }
-        if let Some((revision, result)) = state.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            state.rx = None;
-            if state.queue.is_current(revision) {
-                match result {
-                    Ok(layout) => {
+        let mut restored_camera = false;
+        if let Some(result) = state.take_worker_result() {
+            match result {
+                Ok(layout) => {
+                    if let Some(camera) = &state.last_plate_camera {
+                        state.camera = camera.clone();
+                        restored_camera = true;
+                        state.filter = state.filter.filter(|&i| i < layout.plates.len());
+                        state.active_plate = state
+                            .active_plate
+                            .min(layout.plates.len().saturating_sub(1));
+                        state.selected = state
+                            .selected
+                            .filter(|&i| layout.parts.get(i).is_some_and(Option::is_some));
+                    } else {
                         state.camera = Camera::default();
                         state.camera.yaw = 0.;
                         state.camera.pitch = DEFAULT_PLATE_PITCH;
                         state.camera.fit(&layout.scene, 0.);
-                        let mut renderer = Renderer::new(self.renderer.state.clone());
-                        renderer.upload(&layout.scene);
-                        state.renderer = Some(renderer);
-                        state.layout = Some(layout);
                     }
-                    Err(e) => state.error = Some(e),
+                    let mut renderer = Renderer::new(self.renderer.state.clone());
+                    renderer.upload(&layout.scene);
+                    state.renderer = Some(renderer);
+                    state.layout = Some(layout);
                 }
+                Err(e) => state.error = Some(e),
             }
         }
         if state.rx.is_none()
@@ -201,6 +205,7 @@ impl App {
         if state.rx.is_some() || state.queue.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        restored_camera
     }
     pub(super) fn preview_mode_fit(&mut self) {
         match self.preview_modes.mode {
@@ -567,7 +572,7 @@ impl App {
     }
     fn plates_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
-        self.pump_print_layout(ctx);
+        let restored_camera = self.pump_print_layout(ctx);
         if let Some(error) = &self.preview_modes.error {
             ui.centered_and_justified(|ui| {
                 appearance::floating_frame(ui).show(ui, |ui| {
@@ -609,7 +614,7 @@ impl App {
             visibility_changed |= visible != part.visible;
             part.visible = visible;
         }
-        if visibility_changed {
+        if visibility_changed && !restored_camera {
             self.preview_modes.camera.fit(&layout.scene, 0.);
         }
         let size = ui.available_size().max(egui::vec2(10., 10.));
@@ -666,6 +671,7 @@ impl App {
             outline(ui, rect, &self.preview_modes.camera, part);
         }
         hint(ui, rect, z);
+        self.preview_modes.last_plate_camera = Some(self.preview_modes.camera.clone());
         self.preview_modes.layout = Some(layout);
     }
 }
@@ -1193,5 +1199,49 @@ impl App {
             }
         }
         self.smoke_stage += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaving_print_plates_releases_geometry_and_discards_late_results() {
+        let mut state = State::default();
+        let now = Instant::now();
+        state.queue.schedule(
+            PrintRequest {
+                root: PathBuf::new(),
+                home: PathBuf::new(),
+                members: vec![],
+            },
+            now,
+            Duration::ZERO,
+        );
+        let (revision, _) = state.queue.take_ready(now).unwrap();
+        let cancel = state.queue.cancellation();
+        let (tx, rx) = mpsc::channel();
+        state.mode = Mode::Plates;
+        state.rx = Some(rx);
+        state.layout = Some(PrintLayout::default());
+        state.filter = Some(2);
+        state.release_inactive_plates();
+        assert!(state.layout.is_some());
+
+        state.mode = Mode::Assembly;
+        state.release_inactive_plates();
+        assert!(state.layout.is_none() && state.suspended && state.rx.is_some());
+        assert_eq!(state.filter, Some(2));
+        assert!(crate::preview::check(Some(&cancel)).is_err());
+        assert!(tx.send((revision, Ok(PrintLayout::default()))).is_ok());
+        assert!(state.take_worker_result().is_none());
+        assert!(state.rx.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        state.rx = Some(rx);
+        drop(tx);
+        assert!(state.take_worker_result().unwrap().is_err());
+        assert!(state.rx.is_none());
     }
 }

@@ -322,7 +322,7 @@ impl App {
                 }
                 9 => {
                     self.commit_member();
-                    let saved = self.tower_snapshot_for_motion();
+                    let saved = self.project_snapshot(self.member_snapshot());
                     let text = toml::to_string_pretty(&saved).map_err(|e| e.to_string())?;
                     let restored: CombinationPreset =
                         toml::from_str(&text).map_err(|e| e.to_string())?;
@@ -344,15 +344,5 @@ impl App {
         self.smoke_stage += 1;
         self.smoke_frame = 0;
         self.screenshot_requested = false;
-    }
-    fn tower_snapshot_for_motion(&self) -> CombinationPreset {
-        CombinationPreset {
-            project_name: self.tower.name.clone(),
-            colors: self.global_colors.clone(),
-            preset: self.member_snapshot(),
-            members: self.members.clone(),
-            active_member: self.active_member,
-            combination_gap: self.combination_gap,
-        }
     }
 }

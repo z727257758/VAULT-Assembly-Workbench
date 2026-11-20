@@ -53,26 +53,27 @@ fn build_orientation(rotated: bool, face_down: bool) -> &'static str {
         (true, true) => "0 1 0 1 0 0 0 0 -1",
     }
 }
-fn sources(root: &Path, items: &[Bom], destination: &Path) -> Result<Vec<(Bom, PathBuf)>, String> {
-    let root = root.canonicalize().map_err(err)?;
+fn export_parent(root: &Path, destination: &Path) -> Result<PathBuf, String> {
     let parent = destination
         .parent()
         .ok_or("Invalid export destination")?
         .canonicalize()
         .map_err(err)?;
-    if parent.starts_with(&root)
+    if parent.starts_with(root)
         || destination
             .canonicalize()
-            .is_ok_and(|p| p.starts_with(&root))
+            .is_ok_and(|p| p.starts_with(root))
     {
         return Err("不能导出到原始模型库目录".into());
     }
-    source_files(&root, items)
+    Ok(parent)
 }
-fn source_files(root: &Path, items: &[Bom]) -> Result<Vec<(Bom, PathBuf)>, String> {
-    let root = root.canonicalize().map_err(err)?;
+fn original_sources(root: &Path, items: &[Bom]) -> Result<Vec<(Bom, PathBuf)>, String> {
     let mut result = Vec::new();
-    for b in items.iter().filter(|b| b.enabled) {
+    for b in items
+        .iter()
+        .filter(|b| b.enabled && !b.path.starts_with(crate::gridfinity::PREFIX))
+    {
         if b.qty == 0 || b.qty > 100 {
             return Err(format!("无效份数：{}", b.name()));
         }
@@ -80,7 +81,7 @@ fn source_files(root: &Path, items: &[Bom]) -> Result<Vec<(Bom, PathBuf)>, Strin
             .join(&b.path)
             .canonicalize()
             .map_err(|e| format!("{}: {e}", b.name()))?;
-        if !source.starts_with(&root)
+        if !source.starts_with(root)
             || !source.is_file()
             || !b.path.to_lowercase().ends_with(".stl")
         {
@@ -151,22 +152,17 @@ pub fn run_configured(
         options.plate.validate()?;
     }
     // Validate the destination before any generated geometry is prepared.
-    let originals: Vec<_> = items
-        .iter()
-        .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
-        .cloned()
-        .collect();
-    sources(root, &originals, destination)?;
-    let (inputs, generated) = prepare_inputs(root, items, label, gridfinity)?;
+    let root = root.canonicalize().map_err(err)?;
+    let parent = export_parent(&root, destination)?;
+    let (inputs, generated) = prepare_inputs(&root, items, label, gridfinity)?;
 
-    let parent = destination.parent().ok_or("Invalid export destination")?;
     if format == Format::Stl {
         if destination.exists() {
             return Err("目标文件夹已存在，请选择新名称".into());
         }
         let staging = tempfile::Builder::new()
             .prefix(".vault-export-")
-            .tempdir_in(parent)
+            .tempdir_in(&parent)
             .map_err(err)?;
         for (i, (item, source)) in inputs.iter().enumerate() {
             let generated = if let Some(mesh) = generated.get(&item.path) {
@@ -217,12 +213,7 @@ fn prepare_inputs(
     )>,
 ) -> Result<Inputs, String> {
     label.validate()?;
-    let originals: Vec<_> = items
-        .iter()
-        .filter(|b| !b.path.starts_with(crate::gridfinity::PREFIX))
-        .cloned()
-        .collect();
-    let mut inputs = source_files(root, &originals)?;
+    let mut inputs = original_sources(root, items)?;
     let mut generated = HashMap::new();
     if let Some((home, layout, selection)) = gridfinity {
         layout.validate(selection)?;
@@ -319,9 +310,7 @@ fn prepare_print(
                 if bin.detachable() {
                     Some((bin.label.clone(), [0., 0.], 1.2))
                 } else {
-                    let top =
-                        mesh.min.y + crate::gridfinity::units(bin, selection)? as f32 * 7. - 1.2;
-                    let tab_y = -(bin.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.;
+                    let (tab_y, top) = crate::gridfinity::label_seat(bin, selection, mesh.min.y)?;
                     Some((bin.label.clone(), [0., tab_y as f64], top as f64))
                 }
             } else {
@@ -442,7 +431,8 @@ pub(crate) fn prepare_preview(
     )>,
 ) -> Result<(Vec<Bom>, PreparedPrint), String> {
     plate.validate()?;
-    let (inputs, generated) = prepare_inputs(root, items, label, gridfinity)?;
+    let root = root.canonicalize().map_err(err)?;
+    let (inputs, generated) = prepare_inputs(&root, items, label, gridfinity)?;
     let plan = prepare_print(
         &inputs,
         label,

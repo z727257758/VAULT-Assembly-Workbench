@@ -1,10 +1,6 @@
 //! Native solids based on Cullenect's published dimensional interface (no SCAD dependency).
 //! Coordinates in solid operations are print X/Y/Z; Mesh uses X/Z/-Y.
-use crate::{
-    label::Config,
-    mesh::{Mesh, Vertex},
-};
-use glam::Vec3;
+use crate::{label::Config, mesh::Mesh};
 use manifold_rust::{
     linalg::{Vec2 as D2, Vec3 as D3},
     manifold::Manifold,
@@ -31,42 +27,7 @@ fn mesh(solid: &Manifold) -> Result<Arc<Mesh>, String> {
     if solid.status() != Error::NoError || solid.volume() <= 0. {
         return Err(format!("Cullenect solid failed: {:?}", solid.status()));
     }
-    let raw = solid.get_mesh_gl64(0);
-    let mut vertices = Vec::new();
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for t in raw.tri_verts.chunks_exact(3) {
-        let points: Vec<_> = t
-            .iter()
-            .map(|i| {
-                let i = *i as usize * raw.num_prop as usize;
-                Vec3::new(
-                    raw.vert_properties[i] as f32,
-                    raw.vert_properties[i + 2] as f32,
-                    -raw.vert_properties[i + 1] as f32,
-                )
-            })
-            .collect();
-        let normal = (points[1] - points[0])
-            .cross(points[2] - points[0])
-            .normalize_or_zero();
-        for p in points {
-            min = min.min(p);
-            max = max.max(p);
-            vertices.push(Vertex {
-                position: p.to_array(),
-                normal: normal.to_array(),
-                shade: 1.,
-            });
-        }
-    }
-    let e = max - min;
-    Ok(Arc::new(Mesh {
-        vertices,
-        min,
-        max,
-        size: Vec3::new(e.x, e.z, e.y),
-    }))
+    Ok(Mesh::from_manifold(solid, |_, _, _| 1.))
 }
 fn blank() -> Manifold {
     // Perimeter latch: 0.2 mm inset between Z=0.2 and 0.8 mm.
@@ -106,6 +67,7 @@ pub fn socket(body: &Arc<Mesh>, offset: f32, top: f32) -> Result<Arc<Mesh>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
     #[test]
     fn compact_two_line_labels_keep_matching_material_regions() {
         for style in [

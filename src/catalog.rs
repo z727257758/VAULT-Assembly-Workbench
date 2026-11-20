@@ -148,10 +148,45 @@ pub struct Bom {
     pub group: String,
     pub enabled: bool,
 }
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum PrintRule {
+    RequiredRails,
+    FacadeCaps,
+    LayoutManaged,
+    Manual,
+}
 impl Bom {
     pub fn name(&self) -> &str {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
+    pub fn print_rule(&self) -> PrintRule {
+        if required_rails(&self.path) {
+            PrintRule::RequiredRails
+        } else if self.path.ends_with("/Facade Cap.stl") {
+            PrintRule::FacadeCaps
+        } else if matches!(
+            self.group.as_str(),
+            crate::dividers::GROUP | crate::sustainer_dividers::GROUP | crate::gridfinity::GROUP
+        ) || self.path.starts_with(crate::gridfinity::PREFIX)
+        {
+            PrintRule::LayoutManaged
+        } else {
+            PrintRule::Manual
+        }
+    }
+    pub fn normalize_print(&mut self, selection: &Selection) {
+        match self.print_rule() {
+            PrintRule::RequiredRails => {
+                self.enabled = true;
+                self.qty = 1;
+            }
+            PrintRule::FacadeCaps => self.qty = facade_cap_count(selection),
+            _ => {}
+        }
+    }
+}
+fn required_rails(path: &str) -> bool {
+    path.contains("/Geared Rails/")
 }
 /// Standard unsplit drawer modules have two lower clip seats, or four on L.
 pub fn module_clip_count(path: &str) -> Option<usize> {
@@ -546,15 +581,11 @@ impl Catalog {
         let mut result = self.bom(s);
         for item in &mut result {
             if let Some(saved) = old.iter().find(|b| b.path == item.path) {
-                if item.group != "Geared rails"
-                    && !item.path.ends_with("/Facade Cap.stl")
-                    && !item.path.contains("/Runners/")
-                {
+                if !item.path.contains("/Runners/") {
                     item.qty = saved.qty;
                 }
-                if item.group != "Geared rails" {
-                    item.enabled = saved.enabled;
-                }
+                item.enabled = saved.enabled;
+                item.normalize_print(s);
             }
         }
         let extras = self.accessories(s);
@@ -568,7 +599,7 @@ impl Catalog {
         result
     }
     pub fn set_accessory(bom: &mut Vec<Bom>, path: String, enabled: bool, qty: u32) {
-        let required = path.contains("/Geared Rails/");
+        let required = required_rails(&path);
         let enabled = enabled || required;
         let qty = if required { 1 } else { qty };
         if enabled {

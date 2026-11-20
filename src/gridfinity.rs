@@ -639,8 +639,8 @@ fn proxy(b: &Bin, s: &Selection) -> Result<Arc<Mesh>, String> {
     block(min, Vec3::new(max.x, max.y, min.z + 1.2));
     block(Vec3::new(min.x, min.y, max.z - 1.2), max);
     if b.tab {
-        let tab_center = z / 2. - 1.25 - 15.85 / 2.;
-        let top = min.y + units(b, s)? as f32 * 7. - 1.2;
+        let (tab_y, top) = label_seat(b, s, min.y)?;
+        let tab_center = -tab_y;
         block(
             Vec3::new(-19., top - 1.2, tab_center - 15.85 / 2.),
             Vec3::new(19., top, tab_center + 15.85 / 2.),
@@ -736,7 +736,7 @@ fn generate_cancel(
             return Ok(mesh);
         }
         let body = generate_body_cancel(home, b, s, cancel)?;
-        let (offset, top) = label_seat(b, s, &body)?;
+        let (offset, top) = label_seat(b, s, body.min.y)?;
         let mesh = crate::cullenect::socket(&body, offset, top)?;
         remember(&path, mesh.clone());
         return Ok(mesh);
@@ -767,8 +767,7 @@ fn generate_cancel(
     }
     let body = generate_body_cancel(home, b, s, cancel)?;
     crate::preview::check(cancel)?;
-    let top = body.min.y + units(b, s)? as f32 * 7. - 1.2;
-    let tab_y = -(b.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.;
+    let (tab_y, top) = label_seat(b, s, body.min.y)?;
     let result = if path.is_file() {
         Mesh::load(&path)?
     } else {
@@ -824,10 +823,11 @@ fn generate_cancel(
     remember(&path, mesh.clone());
     Ok(mesh)
 }
-pub(crate) fn label_seat(b: &Bin, s: &Selection, mesh: &Mesh) -> Result<(f32, f32), String> {
+/// The tab center in print Y and its top in print Z, in the bin mesh's local frame.
+pub(crate) fn label_seat(b: &Bin, s: &Selection, bottom: f32) -> Result<(f32, f32), String> {
     Ok((
         -(b.span[1] as f32 * 42. - 0.5) / 2. + 1.25 + 15.85 / 2.,
-        mesh.min.y + units(b, s)? as f32 * 7. - 1.2,
+        bottom + units(b, s)? as f32 * 7. - 1.2,
     ))
 }
 pub fn generate_many(
@@ -1030,7 +1030,7 @@ pub fn apply_preview(
         }
         let parent = scene.parts.iter().position(|p| p.pose.path == b.path());
         let (offset, top) = if let Some(parent) = parent {
-            label_seat(b, s, &scene.parts[parent].mesh)?
+            label_seat(b, s, scene.parts[parent].mesh.min.y)?
         } else {
             (0., 1.2)
         };
@@ -1347,7 +1347,7 @@ depth=0.2
         let original = generate_body(home, &bin, &selection).unwrap();
         assert!((body.min - original.min).abs().max_element() < 0.001);
         assert!((body.max - original.max).abs().max_element() < 0.001);
-        let (offset, top) = label_seat(&bin, &selection, &body).unwrap();
+        let (offset, top) = label_seat(&bin, &selection, body.min.y).unwrap();
         let label = crate::cullenect::label(&bin.label).unwrap();
         let installed =
             crate::label::solid(&label)
@@ -1772,7 +1772,7 @@ depth=0.2
         let shell = proxy(&bin, &selection).unwrap();
         bin.tab = true;
         let rear = proxy(&bin, &selection).unwrap();
-        let (offset, top) = label_seat(&bin, &selection, &rear).unwrap();
+        let (offset, top) = label_seat(&bin, &selection, rear.min.y).unwrap();
         let shelf = &rear.vertices[shell.vertices.len()..];
         assert!(shelf.iter().all(|v| v.position[2] > 0.));
         let shelf_top = shelf

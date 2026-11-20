@@ -116,7 +116,7 @@ impl App {
                         && self.active_drawer.is_some()
                         && self.export_scope == ExportScope::Current;
                     let mut items = if leaf {
-                        crate::catalog::tower::drawer_items(&self.bom)
+                        self.current_print_member().preset.printing_bom()
                     } else if i == self.active_member && self.active_drawer.is_none() {
                         self.member_snapshot().printing_bom()
                     } else {

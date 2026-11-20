@@ -77,7 +77,7 @@ impl Camera {
     }
 }
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct ObjectUniform {
     model: [[f32; 4]; 4],
     color: [f32; 4],
@@ -92,12 +92,21 @@ struct GpuPart {
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
 }
+#[derive(PartialEq)]
+struct DrawPart {
+    mesh: usize,
+    visible: bool,
+    uniform: ObjectUniform,
+}
 struct Target {
     size: [u32; 2],
     view: wgpu::TextureView,
     msaa: wgpu::TextureView,
     depth: wgpu::TextureView,
     id: egui::TextureId,
+    last_camera: Option<Mat4>,
+    exterior_depth: bool,
+    drawn: Vec<DrawPart>,
 }
 #[derive(Default)]
 pub struct ViewOptions<'a> {
@@ -148,7 +157,16 @@ pub struct Renderer {
     object_layout: wgpu::BindGroupLayout,
     meshes: HashMap<usize, GpuMesh>,
     parts: Vec<GpuPart>,
+    draw_list: Vec<DrawPart>,
     targets: Vec<Option<Target>>,
+}
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        let mut renderer = self.state.renderer.write();
+        for target in self.targets.iter().flatten() {
+            renderer.free_texture(&target.id);
+        }
+    }
 }
 impl Renderer {
     pub fn part_opacities(&self) -> &[f32] {
@@ -270,10 +288,14 @@ impl Renderer {
             object_layout,
             meshes: HashMap::new(),
             parts: Vec::new(),
+            draw_list: Vec::new(),
             targets: (0..4).map(|_| None).collect(),
         }
     }
     pub fn upload(&mut self, scene: &Scene) {
+        for target in self.targets.iter_mut().flatten() {
+            target.last_camera = None;
+        }
         self.meshes.retain(|key, old| {
             scene.parts.iter().any(|p| {
                 &p.mesh_key() == key
@@ -380,6 +402,9 @@ impl Renderer {
             msaa,
             depth,
             id,
+            last_camera: None,
+            exterior_depth: false,
+            drawn: Vec::new(),
         });
     }
     pub fn render(
@@ -413,16 +438,12 @@ impl Renderer {
             print_beds,
         } = options;
         self.target(index, [size[0].clamp(1, 4096), size[1].clamp(1, 4096)]);
-        let target = self.targets[index].as_ref().unwrap();
-        self.state.queue.write_buffer(
-            &self.camera,
-            0,
-            bytemuck::cast_slice(
-                &camera
-                    .matrix(target.size[0] as f32 / target.size[1] as f32)
-                    .to_cols_array(),
-            ),
-        );
+        let target = self.targets[index].as_mut().unwrap();
+        let projection = camera.matrix(target.size[0] as f32 / target.size[1] as f32);
+        let exterior_depth = materials
+            .iter()
+            .any(|m| matches!(m, MaterialOverride::Opacity(_)));
+        self.draw_list.clear();
         self.part_opacities.clear();
         for (i, p) in scene.parts.iter().enumerate() {
             let material = materials.get(i);
@@ -494,9 +515,36 @@ impl Renderer {
                 color,
                 ink,
             };
+            let visible = if interior_only {
+                crate::dividers::interior_part(&p.pose.path)
+            } else {
+                p.visible
+            };
+            self.draw_list.push(DrawPart {
+                mesh: p.mesh_key(),
+                visible,
+                uniform,
+            });
+        }
+        // egui can repaint the window while this viewport's resolved image is still current.
+        if target.last_camera == Some(projection)
+            && target.exterior_depth == exterior_depth
+            && target.drawn == self.draw_list
+        {
+            return target.id;
+        }
+        target.last_camera = Some(projection);
+        target.exterior_depth = exterior_depth;
+        std::mem::swap(&mut target.drawn, &mut self.draw_list);
+        self.state.queue.write_buffer(
+            &self.camera,
+            0,
+            bytemuck::cast_slice(&projection.to_cols_array()),
+        );
+        for (part, draw) in self.parts.iter().zip(&target.drawn) {
             self.state
                 .queue
-                .write_buffer(&self.parts[i].uniform, 0, bytemuck::bytes_of(&uniform));
+                .write_buffer(&part.uniform, 0, bytemuck::bytes_of(&draw.uniform));
         }
         let mut encoder = self
             .state
@@ -530,9 +578,6 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bind, &[]);
             // Blend only the nearest exterior surface over the solid bins. The back
             // walls and hardware behind it would otherwise accumulate opacity.
-            let exterior_depth = materials
-                .iter()
-                .any(|m| matches!(m, MaterialOverride::Opacity(_)));
             let has_transparency = self.part_opacities.iter().any(|&a| a < 1.);
             for (pipeline, transparent, enabled) in [
                 (&self.pipeline, false, true),
@@ -547,18 +592,13 @@ impl Renderer {
                     continue;
                 }
                 pass.set_pipeline(pipeline);
-                for (i, p) in scene.parts.iter().enumerate() {
-                    let visible = if interior_only {
-                        crate::dividers::interior_part(&p.pose.path)
-                    } else {
-                        p.visible
-                    };
-                    let opacity = self.part_opacities[i];
-                    if !visible || opacity <= 0. || (opacity < 1.) != transparent {
+                for (part, draw) in self.parts.iter().zip(&target.drawn) {
+                    let opacity = draw.uniform.color[3];
+                    if !draw.visible || opacity <= 0. || (opacity < 1.) != transparent {
                         continue;
                     }
-                    let mesh = &self.meshes[&p.mesh_key()];
-                    pass.set_bind_group(1, &self.parts[i].bind, &[]);
+                    let mesh = &self.meshes[&draw.mesh];
+                    pass.set_bind_group(1, &part.bind, &[]);
                     for (buffer, count) in &mesh.chunks {
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..*count, 0..1);

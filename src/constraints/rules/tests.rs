@@ -104,14 +104,14 @@ fn snapshot(scene: &Scene) -> String {
     toml::to_string(&scene.definition()).unwrap()
 }
 
-fn hinged_box() -> Scene {
+fn hinged_box(facade_path: &str) -> Scene {
     let mut scene = drawer();
     scene.relations.clear();
     for (part, path) in
         scene
             .parts
             .iter_mut()
-            .zip(["Modules/Box Module.stl", "Roofs/Box Roof.stl", "Facade.stl"])
+            .zip(["Modules/Box Module.stl", "Roofs/Box Roof.stl", facade_path])
     {
         part.pose.path = format!("02. SUSTAINERS/{path}");
     }
@@ -173,7 +173,7 @@ fn shared_shell_retains_independent_slider_axes_and_descendant_motion() {
 
 #[test]
 fn lid_path_releases_before_lifting_and_closes_before_latching_even_after_reversal() {
-    let mut scene = hinged_box();
+    let mut scene = hinged_box("Facade.stl");
     let lid = PartId::of(&scene.parts[1]);
     let root = scene.parts[0].pose.matrix(0.);
     let open = AssemblyRules::plan_motion(&scene, &lid, 90.).unwrap();
@@ -226,7 +226,7 @@ fn lid_path_releases_before_lifting_and_closes_before_latching_even_after_revers
 
 #[test]
 fn animation_rechecks_support_travel_and_missing_lock_constraints_before_committing() {
-    let mut scene = hinged_box();
+    let mut scene = hinged_box("Facade.stl");
     let lid = PartId::of(&scene.parts[1]);
     let plan = AssemblyRules::plan_motion(&scene, &lid, 65.).unwrap();
     scene.member_supports = vec![vec![], vec![0]];
@@ -240,7 +240,10 @@ fn animation_rechecks_support_travel_and_missing_lock_constraints_before_committ
     scene
         .relations
         .retain(|r| r.label != crate::sustainer::LOCK_OUTER);
+    let before = snapshot(&scene);
     assert!(AssemblyRules::plan_motion(&scene, &lid, 65.).is_err());
+    assert!(AssemblyRules::set_joint_value(&mut scene, &lid, 65.).is_err());
+    assert_eq!(snapshot(&scene), before);
     let mut scene = drawer();
     let child = PartId::of(&scene.parts[1]);
     let before = snapshot(&scene);
@@ -311,15 +314,8 @@ fn mechanical_motion_follows_parent_axis_and_keeps_other_member_and_explosion_se
 
 #[test]
 fn failure_after_lid_solving_rolls_back_poses_joints_and_display_offsets() {
-    let mut scene = drawer();
-    scene.parts[0].pose.path = "02. SUSTAINERS/S3/Modules/S3 Module.stl".into();
-    scene.parts[1].pose.path = "02. SUSTAINERS/S3/Roofs/S3 Roof.stl".into();
-    scene.parts[2].pose.path = "unmounted.stl".into();
-    scene.relations.clear();
-    let mut hinge = Relation::hinge(&scene, 0, 1, Vec3::ZERO, Vec3::X).unwrap();
-    hinge.label = crate::sustainer::LID.into();
-    let child = hinge.child.clone();
-    add(&mut scene, hinge).unwrap();
+    let mut scene = hinged_box("unmounted.stl");
+    let child = PartId::of(&scene.parts[1]);
     scene.member_supports = vec![vec![], vec![0]];
     let before = snapshot(&scene);
     assert!(

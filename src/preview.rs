@@ -51,6 +51,12 @@ impl<T> Queue<T> {
     pub fn cancellation(&self) -> Cancel {
         self.cancel.clone()
     }
+    pub fn cancel(&mut self) {
+        self.pending = None;
+        if !self.cancel.swap(true, Ordering::Relaxed) {
+            self.revision += 1;
+        }
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

@@ -1,8 +1,5 @@
 //! Parametric lettering on original drawer and Sustainer labels, preserving mounting poses.
-use crate::{
-    mesh::{Mesh, Vertex},
-    scene::Scene,
-};
+use crate::{mesh::Mesh, scene::Scene};
 use glam::Vec3;
 use manifold_rust::{
     cross_section::CrossSection,
@@ -536,56 +533,25 @@ pub(crate) fn apply_text(
     {
         return Err("文字没有与标签正面正确相交".into());
     }
-    let output = result.get_mesh_gl64(0);
-    let mut vertices = Vec::with_capacity(output.tri_verts.len());
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for t in output.tri_verts.chunks_exact(3) {
-        let points: Vec<Vec3> = t
-            .iter()
-            .map(|i| {
-                let i = *i as usize * output.num_prop as usize;
-                Vec3::new(
-                    output.vert_properties[i] as f32,
-                    output.vert_properties[i + 2] as f32,
-                    -output.vert_properties[i + 1] as f32,
-                )
-            })
-            .collect();
-        let normal = (points[1] - points[0])
-            .cross(points[2] - points[0])
-            .normalize_or_zero();
-        let center = (points[0] + points[1] + points[2]) / 3.;
-        let lettering = (center.x - offset[0] as f32).abs() <= 19.01
-            && (center.z + offset[1] as f32).abs() <= 6.01
-            && match config.style {
-                Style::Raised => {
-                    center.y > top as f32 + 0.001 && center.y <= top as f32 + config.depth + 0.001
-                }
-                Style::Engraved => {
-                    (center.y - (top as f32 - config.depth)).abs() < 0.001 && normal.y > 0.9
-                }
-                Style::Flat => t.iter().all(|i| {
-                    output.vert_properties[*i as usize * output.num_prop as usize + 3] < 0.9
-                }),
-            };
-        for p in points {
-            min = min.min(p);
-            max = max.max(p);
-            vertices.push(Vertex {
-                position: p.to_array(),
-                normal: normal.to_array(),
-                shade: if lettering { 0.45 } else { 1. },
-            });
-        }
-    }
-    let extent = max - min;
-    Ok(Arc::new(Mesh {
-        vertices,
-        min,
-        max,
-        size: Vec3::new(extent.x, extent.z, extent.y),
-    }))
+    Ok(Mesh::from_manifold(
+        &result,
+        |points, normal, properties| {
+            let center = (points[0] + points[1] + points[2]) / 3.;
+            let lettering = (center.x - offset[0] as f32).abs() <= 19.01
+                && (center.z + offset[1] as f32).abs() <= 6.01
+                && match config.style {
+                    Style::Raised => {
+                        center.y > top as f32 + 0.001
+                            && center.y <= top as f32 + config.depth + 0.001
+                    }
+                    Style::Engraved => {
+                        (center.y - (top as f32 - config.depth)).abs() < 0.001 && normal.y > 0.9
+                    }
+                    Style::Flat => properties.iter().all(|p| p[0] < 0.9),
+                };
+            if lettering { 0.45 } else { 1. }
+        },
+    ))
 }
 /// Even-odd fill, including counters in glyphs such as A, B, 8 and Chinese text.
 /// Used when an STL cache reload has discarded the preview color property.
@@ -648,48 +614,10 @@ fn color_regions_with_polygons(
     {
         return Err("文字分色改变了模型体积".into());
     }
-    [body, lettering]
+    Ok([body, lettering]
         .iter()
-        .map(|solid| {
-            let data = solid.get_mesh_gl64(0);
-            let mut vertices = Vec::new();
-            let mut min = Vec3::splat(f32::INFINITY);
-            let mut max = Vec3::splat(f32::NEG_INFINITY);
-            for tri in data.tri_verts.chunks_exact(3) {
-                let pts: Vec<_> = tri
-                    .iter()
-                    .map(|i| {
-                        let k = *i as usize * data.num_prop as usize;
-                        Vec3::new(
-                            data.vert_properties[k] as f32,
-                            data.vert_properties[k + 2] as f32,
-                            -data.vert_properties[k + 1] as f32,
-                        )
-                    })
-                    .collect();
-                let normal = (pts[1] - pts[0])
-                    .cross(pts[2] - pts[0])
-                    .normalize_or_zero()
-                    .to_array();
-                for v in pts {
-                    min = min.min(v);
-                    max = max.max(v);
-                    vertices.push(Vertex {
-                        position: v.to_array(),
-                        normal,
-                        shade: 1.,
-                    });
-                }
-            }
-            let d = max - min;
-            Ok(Arc::new(Mesh {
-                vertices,
-                min,
-                max,
-                size: Vec3::new(d.x, d.z, d.y),
-            }))
-        })
-        .collect()
+        .map(|solid| Mesh::from_manifold(solid, |_, _, _| 1.))
+        .collect())
 }
 pub fn apply(scene: &mut Scene, config: &Config) -> Result<(), String> {
     if !config.active() {

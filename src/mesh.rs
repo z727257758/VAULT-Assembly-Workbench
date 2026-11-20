@@ -25,6 +25,46 @@ pub struct Mesh {
     pub max: Vec3,
 }
 impl Mesh {
+    /// Expand a print-space solid into display-space triangles without recentering it.
+    /// The shading callback receives the display vertices, face normal and extra vertex properties.
+    pub(crate) fn from_manifold(
+        solid: &manifold_rust::manifold::Manifold,
+        face_shade: impl Fn([Vec3; 3], Vec3, [&[f64]; 3]) -> f32,
+    ) -> Arc<Self> {
+        let raw = solid.get_mesh_gl64(0);
+        let stride = raw.num_prop as usize;
+        let mut vertices = Vec::with_capacity(raw.tri_verts.len());
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for triangle in raw.tri_verts.chunks_exact(3) {
+            let properties: [_; 3] = std::array::from_fn(|i| {
+                let start = triangle[i] as usize * stride;
+                &raw.vert_properties[start..start + stride]
+            });
+            let points = properties.map(|v| Vec3::new(v[0] as f32, v[2] as f32, -v[1] as f32));
+            let normal = (points[1] - points[0])
+                .cross(points[2] - points[0])
+                .normalize_or_zero();
+            let shade = face_shade(points, normal, properties.map(|v| &v[3..]));
+            for point in points {
+                min = min.min(point);
+                max = max.max(point);
+                vertices.push(Vertex {
+                    position: point.to_array(),
+                    normal: normal.to_array(),
+                    shade,
+                });
+            }
+        }
+        let extent = max - min;
+        Arc::new(Self {
+            vertices,
+            min,
+            max,
+            size: Vec3::new(extent.x, extent.z, extent.y),
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Arc<Self>, String> {
         Self::load_with_budget(path, MAX_TRIANGLES)
     }

@@ -318,31 +318,37 @@ pub(super) struct PrintJob {
 }
 impl Preset {
     pub(super) fn print_jobs(&self, name: &str) -> Vec<PrintJob> {
+        let job = |name, preset: Preset, mut items: Vec<Bom>, drawer| {
+            for b in &mut items {
+                b.normalize_print(&preset.selection);
+            }
+            PrintJob {
+                name,
+                preset,
+                items,
+                drawer,
+            }
+        };
         if self.drawers.is_empty() {
-            return vec![PrintJob {
-                name: name.into(),
-                preset: self.clone(),
-                items: self.bom.clone(),
-                drawer: None,
-            }];
+            return vec![job(name.into(), self.clone(), self.bom.clone(), None)];
         }
         let mut shell = self.clone();
         shell.drawers.clear();
         shell.gridfinity = Default::default();
         shell.label.enabled = false;
-        let mut jobs = vec![PrintJob {
-            name: format!("{name} · 模块"),
-            items: crate::catalog::tower::housing_items(&self.bom),
-            preset: shell,
-            drawer: None,
-        }];
+        let mut jobs = vec![job(
+            format!("{name} · 模块"),
+            shell,
+            crate::catalog::tower::housing_items(&self.bom),
+            None,
+        )];
         for (i, drawer) in self.drawers.iter().enumerate() {
-            jobs.push(PrintJob {
-                name: format!("{name} · 抽屉 {}", i + 1),
-                preset: drawer.clone(),
-                items: crate::catalog::tower::drawer_items(&drawer.bom),
-                drawer: Some(i),
-            });
+            jobs.push(job(
+                format!("{name} · 抽屉 {}", i + 1),
+                drawer.clone(),
+                crate::catalog::tower::drawer_items(&drawer.bom),
+                Some(i),
+            ));
         }
         jobs
     }
@@ -378,11 +384,7 @@ pub(super) fn configure(p: &mut Preset, catalog: &Catalog, reset: bool) -> Resul
         p.drawer_extension = 0.;
     }
     p.sustainer_options = p.sustainer_options.normalized(&p.selection);
-    p.bom = if p.assembly_kind == AssemblyKind::Drawer {
-        catalog.reconfigure(&p.selection, &p.bom)
-    } else {
-        catalog.reconfigure_sustainer(&p.selection, p.sustainer_options, &p.bom)?
-    };
+    p.bom = p.configured_bom(catalog)?;
     for child in &mut p.drawers {
         child.selection.width = p.selection.width.clone();
         child.selection.depth = p.selection.depth;
@@ -540,18 +542,12 @@ impl App {
     }
     fn tower_snapshot(&mut self) -> CombinationPreset {
         self.commit_member();
-        CombinationPreset {
-            project_name: self.tower.name.clone(),
-            colors: self.global_colors.clone(),
-            preset: self
-                .members
-                .get(self.active_member)
-                .map(|m| m.preset.clone())
-                .unwrap_or_else(|| self.member_snapshot()),
-            members: self.members.clone(),
-            active_member: self.active_member,
-            combination_gap: self.combination_gap,
-        }
+        let preset = self
+            .members
+            .get(self.active_member)
+            .map(|m| m.preset.clone())
+            .unwrap_or_else(|| self.member_snapshot());
+        self.project_snapshot(preset)
     }
     fn tower_apply(
         &mut self,
@@ -592,32 +588,21 @@ impl App {
         self.assembly(ctx);
         Ok(())
     }
-    fn tower_apply_project(&mut self, project: Project, ctx: &egui::Context) -> Result<(), String> {
-        project.saved.validate(&self.catalog)?;
+    fn tower_apply_project(
+        &mut self,
+        mut project: Project,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        project
+            .saved
+            .prepare_restore(&self.catalog, &self.export_options.plate)?;
         self.tower.clear_reorder();
-        let saved = project.saved;
         self.tower.name = project.name;
         self.tower.rename_draft = None;
         self.tower.color_edit = None;
         self.tower.open_color = None;
         self.tower.reveal_colors = false;
-        self.members = saved.members;
-        self.active_member = saved.active_member;
-        self.global_colors = saved.colors;
-        self.combination_gap = saved.combination_gap;
-        if self.members.is_empty() {
-            self.restore_editor(saved.preset);
-            self.active_drawer = None;
-            self.ensure_members();
-        }
-        self.restore_member(self.active_member.min(self.members.len() - 1));
-        self.sync_global_colors();
-        self.combination_view = true;
-        self.workflow_history.clear();
-        self.member_edit_baseline = None;
-        self.combination_view_state = None;
-        self.member_selection.clear();
-        self.scene_key.clear();
+        self.restore_project(project.saved);
         self.tower.open_layer = Some(self.members[self.active_member].placement.level);
         self.tower.print_list = false;
         self.tab = 0;
@@ -1901,8 +1886,35 @@ impl App {
             "Entire project · top to bottom. Copies count source STL files; labels keep their own text.",
         ));
         let mut next = self.members.clone();
-        let mut changed = false;
+        let mut changes = Vec::new();
+        let mut edit_error = None;
         let mut accessories = None;
+        let mut show_rows = |ui: &mut egui::Ui,
+                             p: &mut Preset,
+                             housing: Option<bool>,
+                             target: crate::scene::Target| {
+            let items = p
+                .bom
+                .iter_mut()
+                .filter(|b| housing.is_none_or(|h| crate::catalog::tower::housing(&b.path) == h));
+            let edits = print_list::rows(ui, items, &p.selection, z, None);
+            if let Some((path, enabled, qty)) = edits.toggle {
+                let inserts = (p.assembly_kind == AssemblyKind::Drawer)
+                    .then_some((&mut p.divider_layout, &mut p.gridfinity));
+                if let Err(e) =
+                    print_list::set_accessory(&p.selection, &mut p.bom, inserts, path, enabled, qty)
+                {
+                    edit_error = Some(e);
+                    return;
+                }
+            } else if !edits.changed {
+                return;
+            }
+            match p.validate_member(&self.catalog) {
+                Ok(()) => changes.push((target, p.clone())),
+                Err(e) => edit_error = Some(e),
+            }
+        };
         let mut order: Vec<_> = (0..next.len()).collect();
         order.sort_by_key(|&i| {
             (
@@ -1917,41 +1929,28 @@ impl App {
                     .default_open(index == self.active_member)
                     .show(ui, |ui| {
                         let stack = !member.preset.drawers.is_empty();
-                        for b in &mut member.preset.bom {
-                            if stack && !crate::catalog::tower::housing(&b.path) {
-                                continue;
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                let name = crate::accessories::info(&b.path, z)
-                                    .map_or_else(|| b.name().to_owned(), |m| m.name);
-                                changed |= ui.checkbox(&mut b.enabled, name).changed();
-                                changed |= ui
-                                    .add(egui::DragValue::new(&mut b.qty).range(1..=100))
-                                    .changed();
-                            });
-                        }
+                        show_rows(
+                            ui,
+                            &mut member.preset,
+                            stack.then_some(true),
+                            crate::scene::Target {
+                                member: index,
+                                drawer: None,
+                            },
+                        );
                         for (i, p) in member.preset.drawers.iter_mut().enumerate() {
                             ui.collapsing(
                                 format!("{} {} · {}", t(z, "抽屉", "Drawer"), i + 1, p.label.text),
                                 |ui| {
-                                    for b in &mut p.bom {
-                                        if crate::catalog::tower::housing(&b.path) {
-                                            continue;
-                                        }
-                                        ui.horizontal_wrapped(|ui| {
-                                            let name = crate::accessories::info(&b.path, z)
-                                                .map_or_else(|| b.name().to_owned(), |m| m.name);
-                                            changed |= ui.checkbox(&mut b.enabled, name).changed();
-                                            if !b.path.starts_with(crate::gridfinity::PREFIX) {
-                                                changed |= ui
-                                                    .add(
-                                                        egui::DragValue::new(&mut b.qty)
-                                                            .range(1..=100),
-                                                    )
-                                                    .changed();
-                                            }
-                                        });
-                                    }
+                                    show_rows(
+                                        ui,
+                                        p,
+                                        Some(false),
+                                        crate::scene::Target {
+                                            member: index,
+                                            drawer: Some(i),
+                                        },
+                                    )
                                 },
                             );
                         }
@@ -1983,10 +1982,24 @@ impl App {
                     });
             });
         }
-        if changed
-            && let Err(e) =
-                self.tower_apply(next, self.members[self.active_member].placement.level, ctx)
-        {
+        if !changes.is_empty() {
+            self.record_workflow();
+            for (target, edited) in changes {
+                print_list::apply_project_edit(&mut self.members, target, edited);
+            }
+            let active = crate::scene::Target {
+                member: self.active_member,
+                drawer: self.active_drawer,
+            };
+            if let Some(p) = inline_edit::target_preset(&self.members, active) {
+                self.bom.clone_from(&p.bom);
+                self.gridfinity.clone_from(&p.gridfinity);
+                self.divider_layout.clone_from(&p.divider_layout);
+            }
+            self.tower.error.clear();
+            self.assembly(ctx);
+        }
+        if let Some(e) = edit_error {
             self.tower.error = e;
         }
         if let Some(index) = accessories
@@ -2796,6 +2809,84 @@ mod tests {
         assert!(legacy.roof_width.is_none());
     }
     #[test]
+    fn checked_jobs_keep_drawer_only_requests_and_attach_exterior_to_the_shell() {
+        let c = catalog();
+        let mut m = member(&c, "M", "2F", 0, 0);
+        let mut child = preset(&c, "M", "1F");
+        child.bom.retain(|item| crate::label::is_label(&item.path));
+        assert_eq!(child.bom.len(), 1);
+        child.bom[0].qty = 2;
+        m.preset.drawers = vec![child.clone(), child];
+        m.preset.drawers[0].bom[0].enabled = false;
+        for item in &mut m.preset.bom {
+            item.enabled = false;
+        }
+        let jobs = print_list::checked_jobs([(7, &m)], &c).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].0, jobs[0].1.drawer), (7, Some(1)));
+        assert_eq!(jobs[0].1.items[0].qty, 2);
+
+        m.exterior.roof = crate::catalog::exterior::Roof::Table;
+        let jobs = print_list::checked_jobs([(7, &m)], &c).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].1.drawer, None);
+        assert!(jobs[0].1.items.iter().any(|b| b.path.contains("/Roofs/")));
+        assert_eq!(jobs[1].1.items.len(), 1);
+    }
+    #[test]
+    fn print_jobs_enforce_rails_and_cap_quantity_preserving_other_choices() {
+        let c = catalog();
+        let mut m = member(&c, "M", "2F", 0, 0);
+        for item in &mut m.preset.bom {
+            item.enabled = false;
+            item.qty = 12;
+        }
+        let items = m.preset.printing_bom();
+        let rail = items
+            .iter()
+            .find(|b| b.path.contains("/Geared Rails/"))
+            .unwrap();
+        assert_eq!((rail.enabled, rail.qty), (true, 1));
+        let cap = items
+            .iter()
+            .find(|b| b.path.ends_with("/Facade Cap.stl"))
+            .unwrap();
+        assert_eq!((cap.enabled, cap.qty), (false, 5));
+        let optional = items
+            .iter()
+            .find(|b| crate::label::is_label(&b.path))
+            .unwrap();
+        assert_eq!((optional.enabled, optional.qty), (false, 12));
+        let jobs = print_list::checked_jobs([(0, &m)], &c).unwrap();
+        assert_eq!(jobs[0].1.items.len(), 1);
+        assert_eq!(jobs[0].1.items[0].path, rail.path);
+    }
+    #[test]
+    fn printing_edits_change_only_the_target_drawers_print_fields() {
+        let c = catalog();
+        let mut m = member(&c, "M", "2F", 3, 1);
+        m.name = "Custom name".into();
+        m.placement.offset = [1., 2., 3.];
+        m.preset.drawers = vec![preset(&c, "M", "1F"), preset(&c, "M", "1F")];
+        let mut edit = m.preset.drawers[1].clone();
+        edit.bom[0].qty = 7;
+        edit.label.text = "unrelated edit".into();
+        let mut expected = m.clone();
+        expected.preset.drawers[1].bom[0].qty = 7;
+        print_list::apply_project_edit(
+            std::slice::from_mut(&mut m),
+            crate::scene::Target {
+                member: 0,
+                drawer: Some(1),
+            },
+            edit,
+        );
+        assert_eq!(
+            serde_json::to_value(m).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    #[test]
     fn multiple_drawers_print_one_shared_shell_and_keep_leaf_settings() {
         let c = catalog();
         let p = preset(&c, "M", "2F");
@@ -2832,6 +2923,25 @@ mod tests {
         assert_eq!(restored.drawers[0].label.text, "TOP");
         assert_eq!(restored.drawers[1].label.text, "BOTTOM");
     }
+    #[test]
+    fn reconfiguring_a_member_updates_each_child_footprint_and_preserves_drawer_details() {
+        let catalog = catalog();
+        let mut stacked =
+            drawer_pattern(&preset(&catalog, "M", "2F"), &catalog, &["1F", "1F"], false).unwrap();
+        stacked.drawers[0].label.text = "TOP".into();
+        stacked.drawers[1].label.text = "BOTTOM".into();
+        stacked.selection.width = "S".into();
+        stacked.selection.depth = 5;
+        configure(&mut stacked, &catalog, false).unwrap();
+        for (child, text) in stacked.drawers.iter().zip(["TOP", "BOTTOM"]) {
+            assert_eq!(child.label.text, text);
+            assert_eq!(child.selection.width, "S");
+            assert_eq!(child.selection.depth, 5);
+            assert_eq!(child.selection.height, "1F");
+            assert!(child.bom.iter().any(|b| b.path.ends_with("/S5 Box 1F.stl")));
+        }
+    }
+
     #[test]
     fn rejected_resize_is_atomic_and_nested_drawer_stacks_are_invalid() {
         let c = catalog();

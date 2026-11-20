@@ -184,14 +184,19 @@ impl AssemblyRules {
         }
     }
 
-    pub fn plan_motion(scene: &Scene, child: &PartId, goal: f32) -> Result<MotionPlan, String> {
-        let m = Self::mechanism_for_joint(scene, child)?;
-        if !goal.is_finite() || !(m.min..=m.max).contains(&goal) {
+    fn validate_motion_value(m: &Mechanism, value: f32) -> Result<(), String> {
+        if !value.is_finite() || !(m.min..=m.max).contains(&value) {
             return Err("Motion target exceeds its joint travel".into());
         }
-        if m.kind == MotionKind::Lid && m.supports_upper && goal > 0.001 {
+        if m.kind == MotionKind::Lid && m.supports_upper && value > 0. {
             return Err("支承上层的箱盖必须保持闭合 / Supporting lid must remain closed".into());
         }
+        Ok(())
+    }
+
+    pub fn plan_motion(scene: &Scene, child: &PartId, goal: f32) -> Result<MotionPlan, String> {
+        let m = Self::mechanism_for_joint(scene, child)?;
+        Self::validate_motion_value(&m, goal)?;
         let release_time = if m.kind == MotionKind::Lid && goal > m.min + 0.001 {
             (1. - m.latch) * Self::LATCH_SECONDS
         } else {
@@ -216,8 +221,11 @@ impl AssemblyRules {
             move_time,
             lock_time,
         };
-        let mut candidate = scene.clone();
-        Self::apply_motion_sample(&mut candidate, child, plan.sample(plan.duration))?;
+        Self::solve_sample(
+            &mut scene.clone(),
+            &plan.mechanism,
+            plan.sample(plan.duration),
+        )?;
         Ok(plan)
     }
 
@@ -228,45 +236,41 @@ impl AssemblyRules {
         sample: MotionSample,
     ) -> Result<(), String> {
         let m = Self::mechanism_for_joint(scene, child)?;
-        if !sample.value.is_finite()
-            || !(m.min..=m.max).contains(&sample.value)
-            || !sample.latch.is_finite()
-            || !(0. ..=1.).contains(&sample.latch)
-        {
+        Self::transaction(scene, |candidate| Self::solve_sample(candidate, &m, sample))
+    }
+
+    fn solve_sample(scene: &mut Scene, m: &Mechanism, sample: MotionSample) -> Result<(), String> {
+        Self::validate_motion_value(m, sample.value)?;
+        if !sample.latch.is_finite() || !(0. ..=1.).contains(&sample.latch) {
             return Err("Invalid motion sample".into());
         }
-        if m.kind == MotionKind::Lid
-            && sample.value > 0.001
-            && (sample.latch < 0.999 || m.supports_upper)
-        {
-            return Err("Lid lift requires released locks and an unsupported top".into());
+        if m.kind == MotionKind::Lid && sample.value > 0.001 && sample.latch < 0.999 {
+            return Err("Lid lift requires released locks".into());
         }
-        let member = child.instance / crate::scene::MEMBER_STRIDE;
-        let travel = Self::lock_travel(scene, member);
-        Self::transaction(scene, |candidate| {
-            for r in &mut candidate.relations {
-                if &r.child == child {
-                    match &mut r.joint {
-                        Joint::Slider { offset, .. } => *offset = sample.value,
-                        Joint::Hinge { angle, .. } => *angle = sample.value,
-                        _ => return Err("Motion joint changed".into()),
-                    }
-                } else if m.kind == MotionKind::Lid
-                    && r.child.instance / crate::scene::MEMBER_STRIDE == member
-                {
-                    let delta = match Self::label(&r.label) {
-                        crate::sustainer::LOCK_INNER => travel.0,
-                        crate::sustainer::LOCK_OUTER => travel.1,
-                        _ => continue,
-                    };
-                    let Joint::Hinge { angle, .. } = &mut r.joint else {
-                        return Err("Lock joint changed".into());
-                    };
-                    *angle = delta * sample.latch;
+        let member = m.child.instance / crate::scene::MEMBER_STRIDE;
+        let travel = (m.kind == MotionKind::Lid).then(|| Self::lock_travel(scene, member));
+        for r in &mut scene.relations {
+            if r.child == m.child {
+                match &mut r.joint {
+                    Joint::Slider { offset, .. } => *offset = sample.value,
+                    Joint::Hinge { angle, .. } => *angle = sample.value,
+                    _ => return Err("Motion joint changed".into()),
                 }
+            } else if let Some((inner, outer)) = travel
+                && r.child.instance / crate::scene::MEMBER_STRIDE == member
+            {
+                let delta = match Self::label(&r.label) {
+                    crate::sustainer::LOCK_INNER => inner,
+                    crate::sustainer::LOCK_OUTER => outer,
+                    _ => continue,
+                };
+                let Joint::Hinge { angle, .. } = &mut r.joint else {
+                    return Err("Lock joint changed".into());
+                };
+                *angle = delta * sample.latch;
             }
-            solve(candidate)
-        })
+        }
+        solve(scene)
     }
 
     pub fn close_drawers(scene: &mut Scene) -> Result<(), String> {
@@ -636,82 +640,58 @@ impl AssemblyRules {
 
     /// Change one lid, releasing only that member's inner/outer locks before lifting.
     pub fn set_lid_angle_for(scene: &mut Scene, child: &PartId, value: f32) -> Result<(), String> {
-        Self::validate_lid_angle(value)?;
-        let index = scene
-            .relations
-            .iter()
-            .position(|r| {
-                &r.child == child
-                    && Self::label(&r.label) == crate::sustainer::LID
-                    && matches!(r.joint, Joint::Hinge { .. })
-            })
-            .ok_or("Sustainer lid is unavailable")?;
-        let member = child.instance / crate::scene::MEMBER_STRIDE;
-        if value > 0.
-            && scene
-                .member_supports
-                .iter()
-                .any(|below| below.contains(&(member as usize)))
-        {
-            return Err("支承上层的箱盖必须保持闭合 / Supporting lid must remain closed".into());
-        }
-        let (inner_travel, outer_travel) = Self::lock_travel(scene, member);
-        Self::transaction(scene, |candidate| {
-            for (i, relation) in candidate.relations.iter_mut().enumerate() {
-                if relation.child.instance / crate::scene::MEMBER_STRIDE != member {
-                    continue;
-                }
-                if let Joint::Hinge { angle, .. } = &mut relation.joint {
-                    if i == index {
-                        *angle = value;
-                    } else if Self::label(&relation.label) == crate::sustainer::LOCK_INNER {
-                        *angle = if value > 0. { inner_travel } else { 0. };
-                    } else if Self::label(&relation.label) == crate::sustainer::LOCK_OUTER {
-                        *angle = if value > 0. { outer_travel } else { 0. };
-                    }
-                }
-            }
-            solve(candidate)?;
-            Self::reset_explosion(candidate)
-        })
+        Self::set_motion_endpoint(scene, child, MotionKind::Lid, value).map(|_| ())
     }
 
     /// Mechanical drawer movement uses the graph's local slider axis and limits.
     /// It never uses the presentation-only `Pose::travel` displacement.
     pub fn set_slider(scene: &mut Scene, child: &PartId, value: f32) -> Result<(), String> {
-        let mechanism = Self::mechanism_for_joint(scene, child)?;
-        if mechanism.kind != MotionKind::Drawer
-            || !value.is_finite()
-            || !(mechanism.min..=mechanism.max).contains(&value)
-        {
-            return Err("Drawer travel exceeds its constrained range".into());
+        Self::set_motion_endpoint(scene, child, MotionKind::Drawer, value).map(|_| ())
+    }
+
+    fn set_motion_endpoint(
+        scene: &mut Scene,
+        child: &PartId,
+        kind: MotionKind,
+        value: f32,
+    ) -> Result<Mechanism, String> {
+        let mut mechanism = Self::mechanism_for_joint(scene, child)?;
+        if mechanism.kind != kind {
+            return Err("Selected joint does not support the requested motion".into());
         }
-        let index = scene
-            .relations
-            .iter()
-            .position(|r| &r.child == child && Self::label(&r.label) == Self::DRAWER_SLIDE)
-            .ok_or("Drawer slider is unavailable")?;
+        let latch = if kind == MotionKind::Lid && value > 0. {
+            1.
+        } else {
+            0.
+        };
         Self::transaction(scene, |candidate| {
-            let Joint::Slider { offset, .. } = &mut candidate.relations[index].joint else {
-                return Err("Drawer relation is not a slider".into());
-            };
-            *offset = value;
-            solve(candidate)
-        })
+            Self::solve_sample(candidate, &mechanism, MotionSample { value, latch })?;
+            if kind == MotionKind::Lid {
+                Self::reset_explosion(candidate)?;
+            }
+            Ok(())
+        })?;
+        mechanism.value = value;
+        mechanism.latch = latch;
+        Ok(mechanism)
     }
 
     /// One motion entry point for both normal controls and the relation inspector.
-    pub fn set_joint_value(scene: &mut Scene, child: &PartId, value: f32) -> Result<(), String> {
+    pub fn set_joint_value(
+        scene: &mut Scene,
+        child: &PartId,
+        value: f32,
+    ) -> Result<Option<Mechanism>, String> {
         let relation = scene
             .relations
             .iter()
             .find(|r| &r.child == child)
             .ok_or("Joint is unavailable")?;
         if Self::label(&relation.label) == crate::sustainer::LID {
-            return Self::set_lid_angle_for(scene, child, value);
+            return Self::set_motion_endpoint(scene, child, MotionKind::Lid, value).map(Some);
         }
         if Self::label(&relation.label) == Self::DRAWER_SLIDE {
-            return Self::set_slider(scene, child, value);
+            return Self::set_motion_endpoint(scene, child, MotionKind::Drawer, value).map(Some);
         }
         Self::transaction(scene, |candidate| {
             let relation = candidate
@@ -726,6 +706,7 @@ impl AssemblyRules {
             }
             solve(candidate)
         })
+        .map(|()| None)
     }
 
     /// Restore extraction axes per assembly, then separate combination members for display.

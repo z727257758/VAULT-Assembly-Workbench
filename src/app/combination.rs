@@ -68,6 +68,38 @@ pub(super) fn validated_layout(
     )
 }
 impl Preset {
+    fn legacy_print_config(current: &crate::print_plate::Config) -> crate::print_plate::Config {
+        let mut config = current.clone();
+        config.part_filaments.clear();
+        config.text_filaments.clear();
+        config.role_filaments.clear();
+        config.component_filaments.clear();
+        config.component_text_filaments.clear();
+        config.follow_global_colors = false;
+        config
+    }
+
+    fn migrate_print_settings(&mut self, fallback: &crate::print_plate::Config) {
+        for item in &mut self.bom {
+            item.normalize_print(&self.selection);
+        }
+        let config = self
+            .print_config
+            .get_or_insert_with(|| Self::legacy_print_config(fallback));
+        for drawer in &mut self.drawers {
+            drawer.migrate_print_settings(config);
+        }
+    }
+
+    pub(super) fn configured_bom(&self, catalog: &Catalog) -> Result<Vec<Bom>, String> {
+        self.assembly_kind.configured_bom(
+            catalog,
+            &self.selection,
+            self.sustainer_options,
+            &self.bom,
+        )
+    }
+
     pub(super) fn printer(&self) -> crate::print_plate::Printer {
         self.print_config
             .as_ref()
@@ -168,6 +200,18 @@ impl Preset {
     }
 }
 impl CombinationPreset {
+    pub(super) fn prepare_restore(
+        &mut self,
+        catalog: &Catalog,
+        fallback: &crate::print_plate::Config,
+    ) -> Result<(), String> {
+        self.preset.migrate_print_settings(fallback);
+        for member in &mut self.members {
+            member.preset.migrate_print_settings(fallback);
+        }
+        self.validate(catalog)
+    }
+
     pub fn validate(&self, catalog: &Catalog) -> Result<(), String> {
         self.colors.validate()?;
         if self.members.len() > 64
@@ -205,6 +249,43 @@ impl CombinationPreset {
 }
 
 impl App {
+    pub(super) fn project_snapshot(&self, preset: Preset) -> CombinationPreset {
+        CombinationPreset {
+            project_name: self.tower.name.clone(),
+            colors: self.global_colors.clone(),
+            preset,
+            members: self.members.clone(),
+            active_member: self.active_member,
+            combination_gap: self.combination_gap,
+        }
+    }
+
+    pub(super) fn restore_project(&mut self, saved: CombinationPreset) {
+        self.members = saved.members;
+        self.active_member = if self.members.is_empty() {
+            self.members.push(Member {
+                name: format!("{} 1", saved.preset.assembly_kind.label(self.zh)),
+                placement: Default::default(),
+                exterior: Default::default(),
+                preset: saved.preset,
+            });
+            0
+        } else {
+            saved.active_member
+        };
+        self.global_colors = saved.colors;
+        self.combination_gap = saved.combination_gap;
+        self.restore_member(self.active_member);
+        self.sync_global_colors();
+        self.combination_view = true;
+        self.workflow_history.clear();
+        self.member_edit_baseline = None;
+        self.combination_view_state = None;
+        self.combination_move_source = None;
+        self.combination_spec = None;
+        self.member_selection.clear();
+    }
+
     pub(super) fn member_snapshot(&self) -> Preset {
         Preset {
             drawers: if self.active_drawer.is_some() {
@@ -286,7 +367,9 @@ impl App {
         self.label = p.label;
         self.divider_layout = p.divider_layout;
         self.sustainer_dividers = p.sustainer_dividers;
-        self.export_options.plate = p.print_config.unwrap_or_default();
+        self.export_options.plate = p
+            .print_config
+            .unwrap_or_else(|| Preset::legacy_print_config(&self.export_options.plate));
         self.drawer_state = None;
         self.box_state = None;
         self.other_label = Default::default();
@@ -316,15 +399,9 @@ impl App {
         self.tab = 0;
         self.commit_member();
         self.ensure_members();
-        if let Err(e) = (CombinationPreset {
-            project_name: self.tower.name.clone(),
-            colors: self.global_colors.clone(),
-            preset: self.member_snapshot(),
-            members: self.members.clone(),
-            active_member: self.active_member,
-            combination_gap: self.combination_gap,
-        })
-        .validate(&self.catalog)
+        if let Err(e) = self
+            .project_snapshot(self.member_snapshot())
+            .validate(&self.catalog)
         {
             self.status = e;
             return;
@@ -500,31 +577,10 @@ impl App {
     fn apply_member_spec(&mut self, draft: &SpecEdit, ctx: &egui::Context) -> Result<(), String> {
         self.commit_member();
         let mut next = self.members.clone();
-        let _anchor = next
-            .get(draft.anchor)
-            .ok_or("成员已变更，请重新打开规格窗口 / Member changed")?
-            .clone();
+        next.get(draft.anchor)
+            .ok_or("成员已变更，请重新打开规格窗口 / Member changed")?;
         let mut p = draft.preset.clone();
-        if draft.clear_inserts {
-            p.gridfinity = Default::default();
-            p.divider_layout = Default::default();
-            p.sustainer_dividers = Default::default();
-            p.bom.clear();
-        }
-        let configure = |p: &mut Preset| -> Result<(), String> {
-            p.sustainer_options = p.sustainer_options.normalized(&p.selection);
-            p.bom = if p.assembly_kind == AssemblyKind::Sustainer {
-                self.catalog
-                    .reconfigure_sustainer(&p.selection, p.sustainer_options, &p.bom)?
-            } else {
-                self.catalog.reconfigure(&p.selection, &p.bom)
-            };
-            p.validate_member(&self.catalog).map_err(|e| {
-                format!(
-                    "{e}；可取消修改，或勾选重置内部配置 / Cancel or reset incompatible inserts"
-                )
-            })
-        };
+        let configure = |p: &mut Preset| tower::configure(p, &self.catalog, draft.clear_inserts);
         let active;
         if let Some(index) = draft.target {
             configure(&mut p)?;
@@ -1169,14 +1225,7 @@ pub(super) fn load(
 impl App {
     pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
         self.commit_member();
-        let mut saved = CombinationPreset {
-            project_name: self.tower.name.clone(),
-            colors: self.global_colors.clone(),
-            preset: self.member_snapshot(),
-            members: self.members.clone(),
-            active_member: self.active_member,
-            combination_gap: self.combination_gap,
-        };
+        let mut saved = self.project_snapshot(self.member_snapshot());
         saved.preset.apply_label_font(self.label_font);
         for member in &mut saved.members {
             member.preset.apply_label_font(self.label_font);
@@ -1248,86 +1297,50 @@ fn export_members(
         return Err("目标已存在或位于模型库内 / Existing destination or model library".into());
     }
     let catalog = Catalog::scan(root.to_path_buf())?;
-    let extras: Vec<_> = saved
-        .members
-        .iter()
-        .map(|m| {
-            catalog.exterior_components(
-                &m.preset.selection,
-                &m.exterior,
-                m.preset.assembly_kind == AssemblyKind::Sustainer,
-            )
-        })
-        .collect::<Result<_, _>>()?;
-    let total: u32 = saved
+    let members = saved
         .members
         .iter()
         .enumerate()
-        .filter(|(i, _)| included(*i))
-        .map(|(i, m)| {
-            extras[i].iter().map(|c| c.bom.qty).sum::<u32>()
-                + m.preset
-                    .printing_bom()
-                    .iter()
-                    .filter(|b| b.enabled)
-                    .map(|b| b.qty)
-                    .sum::<u32>()
-        })
-        .sum();
-    if total == 0 || total > 1000 {
-        return Err("组合单次导出需为 1–1000 份 / Export requires 1–1000 copies".into());
-    }
+        .filter(|(i, _)| included(*i));
+    let jobs = print_list::checked_jobs(members, &catalog)?;
     let staging = tempfile::Builder::new()
         .prefix(".vault-combination-")
         .tempdir_in(parent)
         .map_err(|e| e.to_string())?;
-    for (index, member) in saved.members.iter().enumerate() {
-        if !included(index) {
-            continue;
-        }
-        let jobs = member.preset.print_jobs(&member.name);
-        let multi = jobs.len() > 1;
-        for (job_index, job) in jobs.into_iter().enumerate() {
-            let mut items = job.items;
-            if job_index == 0 {
-                items.extend(extras[index].iter().map(|c| c.bom.clone()));
-            }
-            if !items.iter().any(|b| b.enabled) {
-                continue;
-            }
-            let p = &job.preset;
-            let base = format!(
-                "{:02}-{}{}-{}",
-                index + 1,
-                p.selection.width,
-                p.selection.depth,
-                p.selection.height
-            );
-            let name = if multi {
-                format!("{base}-{:02}", job_index + 1)
+    for (index, job) in jobs {
+        let p = &job.preset;
+        let base = format!(
+            "{:02}-{}{}-{}",
+            index + 1,
+            p.selection.width,
+            p.selection.depth,
+            p.selection.height
+        );
+        let name = if saved.members[index].preset.drawers.is_empty() {
+            base
+        } else {
+            let number = job.drawer.map_or(1, |i| i + 2);
+            format!("{base}-{number:02}")
+        };
+        let destination = staging
+            .path()
+            .join(if format == crate::export::Format::ThreeMf {
+                format!("{name}.3mf")
             } else {
-                base
-            };
-            let destination = staging
-                .path()
-                .join(if format == crate::export::Format::ThreeMf {
-                    format!("{name}.3mf")
-                } else {
-                    name
-                });
-            crate::export::run_configured(
-                root,
-                &items,
-                &destination,
-                &crate::export::Options {
-                    format,
-                    plate: p.print_config.clone().unwrap_or_default(),
-                },
-                &p.label,
-                Some((home, &p.gridfinity, &p.selection)),
-            )
-            .map_err(|e| format!("{}: {e}", job.name))?;
-        }
+                name
+            });
+        crate::export::run_configured(
+            root,
+            &job.items,
+            &destination,
+            &crate::export::Options {
+                format,
+                plate: p.print_config.clone().unwrap_or_default(),
+            },
+            &p.label,
+            Some((home, &p.gridfinity, &p.selection)),
+        )
+        .map_err(|e| format!("{}: {e}", job.name))?;
     }
     let manifest: Vec<_> = saved.members.iter().enumerate().filter(|(i,_)|included(*i)).map(|(i,m)|
         serde_json::json!({"member_index":i+1,"name":m.name,"specification":format!("{}{}-{}",m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height)})
@@ -1925,6 +1938,66 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn legacy_print_settings_are_resolved_for_all_drawers_before_switching_or_exporting() {
+        use crate::print_plate::{Config, Printer};
+
+        let mut members = members();
+        for member in &mut members {
+            member.placement.offset = [0.; 3];
+            member.preset.selection.height = "2F".into();
+            member.preset.print_config = None;
+            let mut child = preset();
+            child.selection.height = "1F".into();
+            child.print_config = None;
+            member.preset.drawers = vec![child.clone(), child];
+        }
+        let configured = Config {
+            printer: Printer::A1,
+            gap: 8.,
+            ..Default::default()
+        };
+        members[1].preset.print_config = Some(configured.clone());
+        let mut imported = CombinationPreset {
+            project_name: "Legacy".into(),
+            colors: Default::default(),
+            preset: members[0].preset.clone(),
+            members,
+            active_member: 0,
+            combination_gap: 0.,
+        };
+        let mut workspace = Config {
+            printer: Printer::A1Mini,
+            gap: 11.,
+            follow_global_colors: true,
+            ..Default::default()
+        };
+        workspace.set_part_slot(crate::label::PATH, 2);
+        imported
+            .prepare_restore(&Catalog::default(), &workspace)
+            .unwrap();
+        assert!(imported.preset.uses_printer(Printer::A1Mini));
+        let first = &imported.members[0].preset;
+        assert!(first.uses_printer(Printer::A1Mini));
+        for job in first.print_jobs("first") {
+            let config = job.preset.print_config.unwrap();
+            assert_eq!(config.gap, 11.);
+            assert!(!config.follow_global_colors);
+            assert!(config.part_filaments.is_empty() && config.role_filaments.is_empty());
+        }
+        let second = &imported.members[1].preset;
+        assert!(second.uses_printer(Printer::A1));
+        assert_eq!(second.print_config.as_ref(), Some(&configured));
+        assert_eq!(second.drawers[0].print_config.as_ref().unwrap().gap, 8.);
+
+        let saved = toml::to_string(&imported).unwrap();
+        let mut reopened: CombinationPreset = toml::from_str(&saved).unwrap();
+        reopened
+            .prepare_restore(&Catalog::default(), &Config::default())
+            .unwrap();
+        assert_eq!(toml::to_string(&reopened).unwrap(), saved);
     }
 
     #[test]

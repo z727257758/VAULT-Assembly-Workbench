@@ -38,26 +38,15 @@ impl App {
         ctx: &egui::Context,
     ) -> Result<(), String> {
         let mut candidate = self.scene.clone();
-        AssemblyRules::set_joint_value(&mut candidate, child, value)?;
-        let lid_angle = AssemblyRules::lid_angle_for(&candidate, child);
-        let mechanism = AssemblyRules::mechanism_for_joint(&candidate, child).ok();
+        let mechanism = AssemblyRules::set_joint_value(&mut candidate, child, value)?;
         if let Some(m) = &mechanism {
             self.commit_motion_goal(m, value)?;
-        } else if let Some(angle) = lid_angle {
-            let owner = if self.scene_key == "combination" {
-                (child.instance / crate::scene::MEMBER_STRIDE) as usize
-            } else {
-                self.active_member
-            };
-            // The project is authoritative. Failed validation leaves the live scene intact.
-            self.commit_lid_preference(owner, angle)?;
         }
         self.scene = candidate;
         self.scene.calibrated = false;
         self.collision_report = None;
         self.cancel_joint_animation(child);
-        if (lid_angle.is_some() || mechanism.is_some()) && (self.busy || self.preview.has_pending())
-        {
+        if mechanism.is_some() && (self.busy || self.preview.has_pending()) {
             // Replace any in-flight request captured before the preference changed.
             self.assembly(ctx);
         }

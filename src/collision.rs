@@ -1,7 +1,10 @@
 //! Triangle-surface crossing diagnostic, accelerated by median-split BVHs.
 //! Coplanar contact and complete containment are intentionally not classified as
 //! penetration. A clean report is NOT a manufacturing clearance certificate.
-use crate::{constraints::PartId, scene::Scene};
+use crate::{
+    constraints::PartId,
+    scene::{Part, Scene},
+};
 use glam::{DVec3, Vec3};
 #[derive(Clone, Copy)]
 struct Bounds {
@@ -41,7 +44,25 @@ struct Tree {
     nodes: Vec<Node>,
 }
 impl Tree {
-    fn new(triangles: Vec<Triangle>) -> Self {
+    fn from_part(part: &Part, explosion: f32) -> Self {
+        let transform = part.pose.matrix(explosion);
+        let triangles: Vec<_> = part
+            .mesh
+            .vertices
+            .chunks_exact(3)
+            .map(|tri| {
+                let p = std::array::from_fn(|i| transform.transform_point3(tri[i].position.into()));
+                let mut bounds = Bounds::empty();
+                for point in p {
+                    bounds.add(point);
+                }
+                Triangle {
+                    p,
+                    bounds,
+                    center: (p[0] + p[1] + p[2]) / 3.,
+                }
+            })
+            .collect();
         let mut tree = Self {
             order: (0..triangles.len()).collect(),
             triangles,
@@ -213,25 +234,7 @@ pub fn check(scene: &Scene, tolerance: f32) -> Result<Report, String> {
         if total > 10_000_000 {
             return Err("Collision check limited to 10 million displayed triangles".into());
         }
-        let matrix = part.pose.matrix(0.);
-        let mut triangles = Vec::with_capacity(part.mesh.vertices.len() / 3);
-        for tri in part.mesh.vertices.chunks_exact(3) {
-            let p = [
-                matrix.transform_point3(tri[0].position.into()),
-                matrix.transform_point3(tri[1].position.into()),
-                matrix.transform_point3(tri[2].position.into()),
-            ];
-            let mut bounds = Bounds::empty();
-            for v in p {
-                bounds.add(v);
-            }
-            triangles.push(Triangle {
-                p,
-                bounds,
-                center: (p[0] + p[1] + p[2]) / 3.,
-            });
-        }
-        trees.push(Tree::new(triangles));
+        trees.push(Tree::from_part(part, 0.));
     }
     let mut pairs = Vec::new();
     for a in 0..trees.len() {
@@ -329,29 +332,7 @@ fn check_between_members_with_budget(
                 }
                 let part = &scene.parts[index];
                 total += part.mesh.vertices.len() / 3;
-                let matrix = part.pose.matrix(explosion);
-                trees[index] = Some(Tree::new(
-                    part.mesh
-                        .vertices
-                        .chunks_exact(3)
-                        .map(|tri| {
-                            let p = [
-                                matrix.transform_point3(tri[0].position.into()),
-                                matrix.transform_point3(tri[1].position.into()),
-                                matrix.transform_point3(tri[2].position.into()),
-                            ];
-                            let mut bounds = Bounds::empty();
-                            for point in p {
-                                bounds.add(point);
-                            }
-                            Triangle {
-                                p,
-                                bounds,
-                                center: (p[0] + p[1] + p[2]) / 3.,
-                            }
-                        })
-                        .collect(),
-                ));
+                trees[index] = Some(Tree::from_part(part, explosion));
             }
             if let Some(point) = trees[a]
                 .as_ref()
@@ -367,33 +348,9 @@ fn check_between_members_with_budget(
 
 #[cfg(test)]
 pub fn audit_pair(scene: &Scene, a: usize, b: usize) -> Vec<Vec3> {
-    let build = |index: usize| {
-        let part = &scene.parts[index];
-        let m = part.pose.matrix(0.);
-        Tree::new(
-            part.mesh
-                .vertices
-                .chunks_exact(3)
-                .map(|tri| {
-                    let p = [
-                        m.transform_point3(tri[0].position.into()),
-                        m.transform_point3(tri[1].position.into()),
-                        m.transform_point3(tri[2].position.into()),
-                    ];
-                    let mut bounds = Bounds::empty();
-                    for v in p {
-                        bounds.add(v);
-                    }
-                    Triangle {
-                        p,
-                        bounds,
-                        center: (p[0] + p[1] + p[2]) / 3.,
-                    }
-                })
-                .collect(),
-        )
-    };
-    build(a).crossings(&build(b), 0.01, 100_000)
+    let first = Tree::from_part(&scene.parts[a], 0.);
+    let second = Tree::from_part(&scene.parts[b], 0.);
+    first.crossings(&second, 0.01, 100_000)
 }
 
 #[cfg(test)]
