@@ -129,7 +129,11 @@ impl App {
                                     Page::Printer => {
                                         ui.strong("Bambu Lab P1S · 0.4 mm");
                                         ui.label(t(zh, "平台 256 × 256 mm · 参考配置限高 250 mm", "256 × 256 mm bed · 250 mm profile height limit"));
-                                        ui.label("Bambu PETG Basic");
+                                        for material in crate::print_plate::FilamentMaterial::ALL {
+                                            if self.export_options.plate.materials.contains(&material) {
+                                                ui.label(format!("Bambu {}", material.name()));
+                                            }
+                                        }
                                     }
                                     Page::Print => {
                                         ui.small(t(zh, "参数应用于当前成员的 3MF 和打印板预览。", "Parameters apply to the current member’s 3MF and plate preview."));

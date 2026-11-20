@@ -1,80 +1,61 @@
 use super::*;
 use crate::catalog::colors as catalog_colors;
-use crate::print_plate::{ColorGroup, ColorTheme, Config};
+use crate::print_plate::{ColorGroup, ColorTheme};
 use std::collections::BTreeSet;
 
-const GROUP_LABELS: [(&str, &str); 5] = [
-    ("主体", "Body"),
-    ("功能件", "Functional parts"),
-    ("配件", "Accessories"),
-    ("分隔板", "Dividers"),
-    ("Gridfinity 盒子", "Gridfinity bins"),
-];
-const MATERIAL: &str = "PETG Basic";
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Group {
-    Bucket,
+    Role(&'static str),
     Custom(usize),
-    New,
 }
 
 pub(super) struct Edit {
-    group: Group,
+    group: Option<Group>,
     name: String,
     keys: BTreeSet<String>,
-    slot: Option<u32>,
+    slot: u32,
 }
 
 impl Edit {
     fn apply_to(&self, theme: &mut ColorTheme) {
-        if let Some(slot) = self.slot {
-            theme
-                .components
-                .extend(self.keys.iter().cloned().map(|key| (key, slot)));
-        }
-        if matches!(self.group, Group::Bucket) {
+        if let Some(Group::Role(role)) = self.group {
+            theme.roles.insert(role.to_owned(), self.slot);
             return;
         }
         for group in &mut theme.groups {
             group.components.retain(|key| !self.keys.contains(key));
         }
         let updated = ColorGroup {
-            name: self.name.trim().into(),
+            name: self.name.trim().to_owned(),
             components: self.keys.clone(),
+            slot: self.slot,
         };
-        if let Group::Custom(index) = self.group {
+        if let Some(Group::Custom(index)) = self.group {
             theme.groups[index] = updated;
         } else {
             theme.groups.push(updated);
         }
         theme.groups.retain(|group| !group.components.is_empty());
     }
+
+    fn name_available(&self, theme: &ColorTheme) -> bool {
+        if matches!(self.group, Some(Group::Role(_))) {
+            return true;
+        }
+        let name = self.name.trim().to_lowercase();
+        !name.is_empty()
+            && !catalog_colors::ROLES
+                .iter()
+                .any(|(_, cn, en)| name == cn.to_lowercase() || name == en.to_lowercase())
+            && !theme.groups.iter().enumerate().any(|(index, group)| {
+                Some(Group::Custom(index)) != self.group && group.name.trim().to_lowercase() == name
+            })
+    }
 }
 
 struct Item {
     path: String,
     count: u32,
-}
-
-fn builtin(path: &str) -> usize {
-    let file = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    if crate::print_plate::color_key(path) == crate::print_plate::BIN_COLOR_KEY {
-        4
-    } else if file.contains("divider") || path.contains("/Grid Dividers/") {
-        3
-    } else if matches!(catalog_colors::role(path), "shell" | "insert" | "facade") {
-        0
-    } else if [
-        "runner", "rail", "hinge", "spring", "latch", "stopper", "lock", "key", "gear",
-    ]
-    .iter()
-    .any(|name| file.contains(name))
-    {
-        1
-    } else {
-        2
-    }
 }
 
 fn items(app: &App) -> BTreeMap<String, Item> {
@@ -91,26 +72,77 @@ fn items(app: &App) -> BTreeMap<String, Item> {
     result
 }
 
-#[derive(Default)]
-struct Bucket {
-    keys: BTreeSet<String>,
+struct Row {
+    group: Group,
+    name: String,
+    slot: u32,
     count: u32,
 }
 
-fn color_buckets(
-    keys: &BTreeSet<String>,
-    items: &BTreeMap<String, Item>,
-    config: &Config,
-) -> BTreeMap<u32, Bucket> {
-    let mut buckets = BTreeMap::<_, Bucket>::new();
-    for key in keys {
-        if let Some(item) = items.get(key) {
-            let bucket = buckets.entry(config.slot(&item.path)).or_default();
-            bucket.keys.insert(key.clone());
-            bucket.count += item.count;
+fn groups(theme: &ColorTheme, z: bool) -> Vec<Row> {
+    catalog_colors::ROLES
+        .iter()
+        .map(|&(role, cn, en)| Row {
+            group: Group::Role(role),
+            name: t(z, cn, en).into(),
+            slot: theme.role_slot(role),
+            count: 0,
+        })
+        .chain(theme.groups.iter().enumerate().map(|(index, group)| Row {
+            group: Group::Custom(index),
+            name: group.name.clone(),
+            slot: group.slot,
+            count: 0,
+        }))
+        .collect()
+}
+
+fn component_group(theme: &ColorTheme, key: &str, path: &str) -> Group {
+    if let Some(index) = theme
+        .groups
+        .iter()
+        .position(|group| group.components.contains(key))
+    {
+        return Group::Custom(index);
+    }
+    let role = theme.role_for(path);
+    let key = catalog_colors::ROLES
+        .iter()
+        .find(|(key, _, _)| *key == role)
+        .map_or_else(|| catalog_colors::role(path), |&(key, _, _)| key);
+    Group::Role(key)
+}
+
+fn group_rows(theme: &ColorTheme, items: &BTreeMap<String, Item>, z: bool) -> Vec<Row> {
+    let mut rows = groups(theme, z);
+    for (key, item) in items {
+        let group = component_group(theme, key, &item.path);
+        if let Some(row) = rows.iter_mut().find(|row| row.group == group) {
+            row.count += item.count;
         }
     }
-    buckets
+    rows
+}
+
+fn assign_component(theme: &mut ColorTheme, path: &str, target: Option<Group>) {
+    let key = catalog_colors::component(path);
+    for (index, group) in theme.groups.iter_mut().enumerate() {
+        if target == Some(Group::Custom(index)) {
+            group.components.insert(key.clone());
+        } else {
+            group.components.remove(&key);
+        }
+    }
+    theme.groups.retain(|group| !group.components.is_empty());
+    match target {
+        Some(Group::Role(role)) if role != catalog_colors::role(path) => {
+            theme.role_overrides.insert(key, role.into());
+        }
+        Some(Group::Role(_)) | None => {
+            theme.role_overrides.remove(&key);
+        }
+        Some(Group::Custom(_)) => {}
+    }
 }
 
 fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
@@ -120,13 +152,23 @@ fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
         return match max {
             0..=34 => t(z, "黑色", "Black"),
             35..=105 => t(z, "深灰", "Dark gray"),
-            106..=172 => t(z, "灰色", "Gray"),
-            173..=230 => t(z, "浅灰", "Light gray"),
+            106..=159 => t(z, "灰色", "Gray"),
+            160..=190 => t(z, "银色", "Silver"),
+            191..=230 => t(z, "浅灰", "Light gray"),
             _ => t(z, "白色", "White"),
         };
     }
-    let f = egui::ecolor::Hsva::from(Color32::from_rgb(r, g, b));
-    match (f.h * 360.) as u16 {
+    // Name the displayed sRGB color, before the renderer converts it to linear light.
+    let delta = f32::from(max - min);
+    let (r, g, b) = (f32::from(r), f32::from(g), f32::from(b));
+    let sector = if r == f32::from(max) {
+        (g - b) / delta
+    } else if g == f32::from(max) {
+        (b - r) / delta + 2.
+    } else {
+        (r - g) / delta + 4.
+    };
+    match (sector * 60.).rem_euclid(360.) as u16 {
         0..=14 | 345..=360 => t(z, "红色", "Red"),
         15..=44 => t(z, "橙色", "Orange"),
         45..=68 => t(z, "黄色", "Yellow"),
@@ -138,158 +180,124 @@ fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
     }
 }
 
+fn group_button(ui: &mut egui::Ui, row: &Row, theme: &ColorTheme, z: bool) -> egui::Response {
+    let slot_index = (row.slot - 1) as usize;
+    let rgb = theme.palette[slot_index];
+    let material = theme.materials[slot_index].name();
+    let weak = ui.visuals().weak_text_color();
+    let ink = ui.visuals().text_color();
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let painter = ui.painter();
+    let count = painter.layout_no_wrap(
+        format!("{} {}", row.count, t(z, "件", "pcs")),
+        small.clone(),
+        weak,
+    );
+    let color = painter.layout_no_wrap(color_label(rgb, z).into(), body.clone(), weak);
+    let filament = painter.layout_no_wrap(material.into(), small, weak);
+    let width = ui.available_width();
+    let left_pad = 38.;
+    let right_pad = 12.;
+    let meta_width = color.size().x + 8. + filament.size().x;
+    let label_width = width - left_pad - right_pad - count.size().x - meta_width - 20.;
+    let compact = label_width < if z { 59. } else { 84. };
+    let height = if compact { 48. } else { 42. };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let visuals = ui.visuals();
+    let painter = ui.painter_at(rect);
+    painter.rect(
+        rect,
+        10.,
+        if response.hovered() {
+            visuals.faint_bg_color
+        } else {
+            visuals.panel_fill
+        },
+        visuals.widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.circle(
+        egui::pos2(rect.left() + 19., rect.center().y),
+        9.5,
+        Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+        visuals.widgets.noninteractive.bg_stroke,
+    );
+    let left = rect.left() + left_pad;
+    let right = rect.right() - right_pad;
+    let (label_width, label_y, meta_y) = if compact {
+        (
+            right - left - count.size().x - 7.,
+            rect.center().y - 8.,
+            rect.center().y + 10.,
+        )
+    } else {
+        (label_width, rect.center().y, rect.center().y)
+    };
+    let mut label = egui::text::LayoutJob::simple(row.name.clone(), body, ink, label_width.max(1.));
+    label.wrap.max_rows = 1;
+    label.wrap.break_anywhere = true;
+    let label = painter.layout_job(label);
+    let count_x = left + label.size().x + 7.;
+    painter.galley(egui::pos2(left, label_y - label.size().y * 0.5), label, ink);
+    painter.galley(
+        egui::pos2(count_x, label_y - count.size().y * 0.5),
+        count,
+        weak,
+    );
+    let color_x = if compact { left } else { right - meta_width };
+    let material_x = color_x + color.size().x + 8.;
+    painter.galley(
+        egui::pos2(color_x, meta_y - color.size().y * 0.5),
+        color,
+        weak,
+    );
+    painter.galley(
+        egui::pos2(material_x, meta_y - filament.size().y * 0.5),
+        filament,
+        weak,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &row.name));
+    response
+}
+
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     let z = app.zh;
-    let mut config = Config::default();
-    app.global_colors.apply(&mut config);
-    let items = items(app);
-    let custom = &app.global_colors.groups;
-    let mut builtin_keys: [BTreeSet<String>; GROUP_LABELS.len()] = Default::default();
-    let assigned: BTreeSet<_> = custom.iter().flat_map(|group| &group.components).collect();
-    for (key, item) in &items {
-        if !assigned.contains(key) {
-            builtin_keys[builtin(&item.path)].insert(key.clone());
-        }
-    }
-    let groups = builtin_keys
-        .into_iter()
-        .zip(GROUP_LABELS)
-        .map(|(keys, (cn, en))| (Group::Bucket, t(z, cn, en).to_owned(), keys))
-        .chain(custom.iter().enumerate().map(|(i, group)| {
-            (
-                Group::Custom(i),
-                group.name.clone(),
-                group.components.clone(),
-            )
-        }));
-    let mut rows = Vec::new();
+    let rows = group_rows(&app.global_colors, &items(app), z);
     let mut palette = Vec::new();
-    for (index, (group, title, keys)) in groups.enumerate() {
-        let buckets = color_buckets(&keys, &items, &config);
-        let split = buckets.len() > 1;
-        for (slot, bucket) in buckets {
-            let rgb = config.palette[(slot - 1) as usize];
-            if !palette.contains(&rgb) {
-                palette.push(rgb);
-            }
-            let (edit_group, edit_keys) = if split || matches!(group, Group::Bucket) {
-                (Group::Bucket, bucket.keys)
-            } else {
-                (group, keys.clone())
-            };
-            rows.push((
-                (index, slot),
-                edit_group,
-                title.clone(),
-                edit_keys,
-                bucket.count,
-                rgb,
-            ));
+    for row in rows.iter().filter(|row| row.count > 0) {
+        let rgb = app.global_colors.palette[(row.slot - 1) as usize];
+        if !palette.contains(&rgb) {
+            palette.push(rgb);
         }
     }
     if !layers::group(ui, "colors", t(z, "颜色", "Colors"), false, |ui| {
-        layers::palette(ui, &palette, palette.len().min(4));
+        layers::palette(ui, &palette, palette.len().min(5));
     }) {
         return;
     }
-    for (id, group, title, keys, count, rgb) in rows {
-        let slot = id.1;
-        let response = ui
-            .push_id(id, |ui| {
-                let width = ui.available_width();
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(width, 44.), egui::Sense::click());
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                let visuals = ui.visuals();
-                let painter = ui.painter_at(rect);
-                painter.rect(
-                    rect,
-                    12.,
-                    if response.hovered() {
-                        visuals.faint_bg_color
-                    } else {
-                        visuals.panel_fill
-                    },
-                    visuals.widgets.noninteractive.bg_stroke,
-                    egui::StrokeKind::Inside,
-                );
-                let center = rect.center();
-                let dot = egui::pos2(rect.left() + 22., center.y);
-                let radius = 9.5;
-                let stroke = visuals.widgets.noninteractive.bg_stroke;
-                painter.circle(
-                    dot,
-                    radius,
-                    Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
-                    stroke,
-                );
-                let body = egui::TextStyle::Body.resolve(ui.style());
-                let weak = visuals.weak_text_color();
-                let material = painter.layout_no_wrap(
-                    MATERIAL.into(),
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    weak,
-                );
-                let mut right = rect.right() - 12.;
-                painter.galley(
-                    egui::pos2(
-                        right - material.size().x,
-                        center.y - material.size().y * 0.5,
-                    ),
-                    material.clone(),
-                    weak,
-                );
-                right -= material.size().x + 8.;
-                let color_name = color_label(rgb, z);
-                let name = painter.layout_no_wrap(color_name.into(), body.clone(), weak);
-                painter.galley(
-                    egui::pos2(right - name.size().x, center.y - name.size().y * 0.5),
-                    name.clone(),
-                    weak,
-                );
-                right -= name.size().x + 12.;
-                let count = painter.layout_no_wrap(
-                    format!("{count} {}", t(z, "件", "pcs")),
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    weak,
-                );
-                let left = rect.left() + 41.;
-                let mut label = egui::text::LayoutJob::simple(
-                    title.clone(),
-                    body,
-                    visuals.text_color(),
-                    (right - left - count.size().x - 7.).max(12.),
-                );
-                label.wrap.max_rows = 1;
-                label.wrap.break_anywhere = true;
-                let label = painter.layout_job(label);
-                painter.galley(
-                    egui::pos2(left, center.y - label.size().y * 0.5),
-                    label.clone(),
-                    visuals.text_color(),
-                );
-                painter.galley(
-                    egui::pos2(left + label.size().x + 7., center.y - count.size().y * 0.5),
-                    count,
-                    weak,
-                );
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title)
-                });
-                response
+    let can_create = app.global_colors.groups.len() < 64 && rows.iter().any(|row| row.count > 0);
+    for row in rows {
+        if ui
+            .push_id(row.group, |ui| {
+                group_button(ui, &row, &app.global_colors, z)
             })
-            .inner;
-        if response.clicked() {
+            .inner
+            .clicked()
+        {
             app.tower.color_edit = Some(Edit {
-                group,
-                name: title,
-                keys,
-                slot: Some(slot),
+                group: Some(row.group),
+                name: row.name,
+                keys: match row.group {
+                    Group::Role(_) => BTreeSet::new(),
+                    Group::Custom(index) => app.global_colors.groups[index].components.clone(),
+                },
+                slot: row.slot,
             });
         }
         ui.add_space(4.);
     }
-    let can_create = custom.len() < 64 && !items.is_empty();
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
@@ -299,10 +307,10 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             .clicked()
         {
             app.tower.color_edit = Some(Edit {
-                group: Group::New,
+                group: None,
                 name: String::new(),
                 keys: BTreeSet::new(),
-                slot: Some(config.filament),
+                slot: app.global_colors.filament,
             });
         }
         if ui.button(t(z, "整体配色…", "Overall colors…")).clicked() {
@@ -312,17 +320,72 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.);
 }
 
-// Assign a catalog component as a whole, matching the existing project color scope.
-fn assign_component(theme: &mut ColorTheme, key: &str, target: Option<usize>, slot: u32) {
-    for (index, group) in theme.groups.iter_mut().enumerate() {
-        if Some(index) == target {
-            group.components.insert(key.to_owned());
-        } else {
-            group.components.remove(key);
+fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool) -> bool {
+    let key = catalog_colors::component(path);
+    let current = component_group(theme, &key, path);
+    for row in groups(theme, z) {
+        let index = (row.slot - 1) as usize;
+        let rgb = theme.palette[index];
+        let clicked = ui
+            .horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(12.), egui::Sense::hover());
+                ui.painter().circle(
+                    dot.center(),
+                    5.,
+                    Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                ui.selectable_label(row.group == current, &row.name)
+                    .on_hover_text(format!(
+                        "{} · {}",
+                        color_label(rgb, z),
+                        theme.materials[index].name()
+                    ))
+                    .clicked()
+            })
+            .inner;
+        if clicked {
+            let changed = row.group != current;
+            if changed {
+                assign_component(theme, path, Some(row.group));
+            }
+            ui.close();
+            return changed;
         }
     }
-    theme.groups.retain(|group| !group.components.is_empty());
-    theme.components.insert(key.to_owned(), slot);
+    ui.separator();
+    let manual = matches!(current, Group::Custom(_)) || theme.role_overrides.contains_key(&key);
+    if ui
+        .add_enabled(
+            manual,
+            egui::Button::new(t(z, "恢复自动归类", "Restore automatic group")),
+        )
+        .clicked()
+    {
+        assign_component(theme, path, None);
+        ui.close();
+        return true;
+    }
+    false
+}
+
+pub(in crate::app) fn component_group_picker(
+    ui: &mut egui::Ui,
+    theme: &mut ColorTheme,
+    path: &str,
+    z: bool,
+) {
+    let current = component_group(theme, &catalog_colors::component(path), path);
+    let name = groups(theme, z)
+        .into_iter()
+        .find(|row| row.group == current)
+        .map(|row| row.name)
+        .unwrap_or_default();
+    egui::ComboBox::from_label(t(z, "颜色分组", "Color group"))
+        .selected_text(name)
+        .show_ui(ui, |ui| {
+            group_choices(ui, theme, path, z);
+        });
 }
 
 pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
@@ -330,7 +393,7 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
     let part = app.selected.and_then(|index| app.scene.parts.get(index));
     let ready =
         part.is_some() && !app.busy && !app.preview.has_pending() && app.export_rx.is_none();
-    let mut assign = None;
+    let mut changed_theme = None;
     let mut new = None;
     let mut follow = false;
     ui.add_enabled_ui(ready, |ui| {
@@ -341,54 +404,11 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
             let path = &part.pose.path;
             let key = catalog_colors::component(path);
             let theme = &app.global_colors;
-            let mut config = Config::default();
-            theme.apply(&mut config);
-            let active = config.slot(path);
-            let current = theme
-                .groups
-                .iter()
-                .position(|group| group.components.contains(&key));
-            let (cn, en) = GROUP_LABELS[builtin(path)];
-            let default = t(z, cn, en);
             ui.strong(workflow::color_component_name(path, z));
-            let choice = |ui: &mut egui::Ui, title: &str, slot: u32, selected: bool| {
-                let rgb = config.palette[(slot - 1) as usize];
-                let [r, g, b] = rgb;
-                let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(12.), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(dot.center(), 5., Color32::from_rgb(r, g, b));
-                ui.selectable_label(selected, format!("{title} · {}", color_label(rgb, z)))
-                    .on_hover_text(config.color_hex(slot))
-                    .clicked()
-            };
-            ui.menu_button(t(z, "按用途分组", "Group by role"), |ui| {
-                for slot in 1..=6 {
-                    ui.horizontal(|ui| {
-                        if choice(ui, default, slot, current.is_none() && active == slot) {
-                            assign = Some((key.clone(), None, slot));
-                            ui.close();
-                        }
-                    });
-                }
-            });
-            let project_items = items(app);
-            for (index, group) in theme.groups.iter().enumerate() {
-                let buckets = color_buckets(&group.components, &project_items, &config);
-                for &slot in buckets.keys() {
-                    ui.horizontal(|ui| {
-                        if choice(
-                            ui,
-                            &group.name,
-                            slot,
-                            current == Some(index) && active == slot,
-                        ) {
-                            assign = Some((key.clone(), Some(index), slot));
-                            ui.close();
-                        }
-                    });
-                }
+            let mut draft = theme.clone();
+            if group_choices(ui, &mut draft, path, z) {
+                changed_theme = Some(draft);
             }
-            ui.separator();
             if ui
                 .add_enabled(
                     theme.groups.len() < 64,
@@ -397,10 +417,10 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
             {
                 new = Some(Edit {
-                    group: Group::New,
+                    group: None,
                     name: String::new(),
                     keys: [key].into(),
-                    slot: Some(active),
+                    slot: theme.group_slot(path),
                 });
                 ui.close();
             }
@@ -437,9 +457,7 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
         app.commit_member();
         ui.ctx().request_repaint();
     }
-    if let Some((key, group, slot)) = assign {
-        let mut theme = app.global_colors.clone();
-        assign_component(&mut theme, &key, group, slot);
+    if let Some(theme) = changed_theme {
         if let Err(error) = app.apply_global_theme(theme) {
             app.tower.error = error;
         }
@@ -456,15 +474,15 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let z = app.zh;
-    let mut theme = app.global_colors.clone();
-    let modifying_membership = !matches!(edit.group, Group::Bucket);
+    let theme = &app.global_colors;
+    let modifying_membership = !matches!(edit.group, Some(Group::Role(_)));
     let items = modifying_membership.then(|| items(app));
     let mut apply = false;
     let mut cancel = false;
     let mut remove = false;
     let modal = egui::Modal::new(egui::Id::new("tower-color-group")).show(ctx, |ui| {
-        ui.set_width(380.);
-        ui.heading(if matches!(edit.group, Group::New) {
+        ui.set_width((ctx.content_rect().width() - 48.).clamp(150., 380.));
+        ui.heading(if edit.group.is_none() {
             t(z, "新建分组", "New color group")
         } else {
             &edit.name
@@ -476,79 +494,98 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
                     .char_limit(48)
                     .desired_width(f32::INFINITY),
             );
+            if !edit.name.trim().is_empty() && !edit.name_available(theme) {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    t(z, "已有同名分组", "This group name is already in use"),
+                );
+            }
         }
-        ui.horizontal(|ui| {
+        let index = (edit.slot - 1) as usize;
+        ui.horizontal_wrapped(|ui| {
             ui.strong(t(z, "耗材槽", "Filament slot"));
-            ui.label(RichText::new(MATERIAL).weak());
+            ui.label(format!(
+                "{} · {}",
+                color_label(theme.palette[index], z),
+                theme.materials[index].name()
+            ));
         });
         ui.horizontal_wrapped(|ui| {
-            for (index, &rgb) in theme.palette.iter().enumerate() {
+            for (index, &[r, g, b]) in theme.palette.iter().enumerate() {
                 let slot = (index + 1) as u32;
-                let rgb = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                let ink =
-                    if rgb.r() as f32 * 0.2126 + rgb.g() as f32 * 0.7152 + rgb.b() as f32 * 0.0722
-                        > 130.
-                    {
-                        Color32::BLACK
-                    } else {
-                        Color32::WHITE
-                    };
+                let rgb = Color32::from_rgb(r, g, b);
+                let linear = egui::Rgba::from(rgb);
+                let luminance = 0.2126 * linear.r() + 0.7152 * linear.g() + 0.0722 * linear.b();
+                let ink = if luminance > 0.179 {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                };
+                let selected = edit.slot == slot;
                 let response = ui.add(
                     egui::Button::new(RichText::new(slot.to_string()).color(ink))
                         .min_size(egui::vec2(36., 30.))
-                        .selected(edit.slot == Some(slot))
+                        .selected(selected)
                         .fill(rgb)
-                        .stroke(if edit.slot == Some(slot) {
-                            ui.visuals().widgets.active.fg_stroke
+                        .stroke(if selected {
+                            egui::Stroke::new(2., ui.visuals().selection.stroke.color)
                         } else {
                             ui.visuals().widgets.noninteractive.bg_stroke
                         }),
                 );
                 if response
                     .on_hover_text(format!(
-                        "{} · #{:02X}{:02X}{:02X}",
-                        color_label([rgb.r(), rgb.g(), rgb.b()], z),
-                        rgb.r(),
-                        rgb.g(),
-                        rgb.b()
+                        "{} · {} · #{r:02X}{g:02X}{b:02X}",
+                        color_label([r, g, b], z),
+                        theme.materials[index].name()
                     ))
                     .clicked()
                 {
-                    edit.slot = Some(slot);
+                    edit.slot = slot;
                 }
             }
         });
         if let Some(items) = &items {
             ui.separator();
             ui.strong(t(z, "零件", "Parts"));
+            ui.small(t(
+                z,
+                "勾选移入本组，取消勾选后回到用途分组。",
+                "Check parts to move them here. Unchecked parts return to their role groups.",
+            ));
             egui::ScrollArea::vertical()
                 .max_height((ctx.content_rect().height() * 0.38).min(280.))
                 .show(ui, |ui| {
                     for (key, item) in items {
                         let mut selected = edit.keys.contains(key);
-                        if ui
-                            .checkbox(&mut selected, workflow::color_component_name(&item.path, z))
-                            .on_hover_text(&item.path)
-                            .changed()
-                        {
-                            if selected {
-                                edit.keys.insert(key.clone());
-                            } else {
-                                edit.keys.remove(key);
+                        ui.horizontal(|ui| {
+                            let caption = workflow::color_component_name(&item.path, z);
+                            if ui
+                                .checkbox(&mut selected, caption)
+                                .on_hover_text(&item.path)
+                                .changed()
+                            {
+                                if selected {
+                                    edit.keys.insert(key.clone());
+                                } else {
+                                    edit.keys.remove(key);
+                                }
                             }
-                        }
+                            ui.weak(format!("×{}", item.count));
+                        });
                     }
                 });
         }
         ui.separator();
-        ui.horizontal(|ui| {
-            let valid =
-                !edit.keys.is_empty() && !edit.name.trim().is_empty() && app.export_rx.is_none();
+        ui.horizontal_wrapped(|ui| {
+            let valid = (edit.group.is_some() || !edit.keys.is_empty())
+                && edit.name_available(theme)
+                && app.export_rx.is_none();
             apply = ui
                 .add_enabled(valid, egui::Button::new(t(z, "应用", "Apply")))
                 .clicked();
             cancel = ui.button(t(z, "取消", "Cancel")).clicked();
-            if matches!(edit.group, Group::Custom(_)) {
+            if matches!(edit.group, Some(Group::Custom(_))) {
                 remove = ui
                     .add_enabled(
                         app.export_rx.is_none(),
@@ -561,12 +598,12 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
     if cancel || modal.should_close() {
         return;
     }
-    if apply {
-        edit.apply_to(&mut theme);
-    } else if remove && let Group::Custom(i) = edit.group {
-        theme.groups.remove(i);
-    }
     if apply || remove {
+        let mut theme = theme.clone();
+        if remove {
+            edit.keys.clear();
+        }
+        edit.apply_to(&mut theme);
         match app.apply_global_theme(theme) {
             Ok(()) => return,
             Err(error) => app.tower.error = error,
@@ -578,80 +615,148 @@ pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::print_plate::Config;
 
-    #[test]
-    fn color_rows_partition_quantities_and_preview_assignment_keeps_other_colors() {
-        let mut theme = ColorTheme::default();
-        let path_a = "Catalog/Runners/Runner Guide.stl";
-        let path_b = "Catalog/Runners/Runner Slide.stl";
-        let a = catalog_colors::component(path_a);
-        let b = catalog_colors::component(path_b);
-        let keys: BTreeSet<_> = [a.clone(), b.clone()].into();
-        let items = [
-            (
-                a.clone(),
-                Item {
-                    path: path_a.into(),
-                    count: 2,
-                },
-            ),
-            (
-                b.clone(),
-                Item {
-                    path: path_b.into(),
-                    count: 4,
-                },
-            ),
-        ]
-        .into();
-        theme.groups.push(ColorGroup {
-            name: "Hardware".into(),
-            components: keys.clone(),
-        });
-        theme.components.extend([(a.clone(), 1), (b.clone(), 2)]);
-        let mut config = Config::default();
-        theme.apply(&mut config);
-        let before = color_buckets(&keys, &items, &config);
-        assert_eq!(before[&1].count, 2);
-        assert_eq!(before[&2].count, 4);
+    const GUIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Guide.stl";
+    const SLIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Slide.stl";
+    const BIN: &str = "generated/gridfinity/Gridfinity-12.stl";
 
-        assign_component(&mut theme, &a, None, 3);
-        theme.apply(&mut config);
-        assert_eq!(theme.groups[0].components, [b.clone()].into());
-        assert_eq!(config.slot(path_a), 3);
-        assert_eq!(config.slot(path_b), 2);
-        assign_component(&mut theme, &a, Some(0), 2);
-        theme.apply(&mut config);
-        let after = color_buckets(&keys, &items, &config);
-        assert_eq!(after.len(), 1);
-        assert_eq!(after[&2].count, 6);
-        assert_eq!(theme.groups[0].components, keys);
+    fn fixture() -> BTreeMap<String, Item> {
+        [(GUIDE, 2), (SLIDE, 4), (BIN, 3)]
+            .into_iter()
+            .map(|(path, count)| {
+                (
+                    catalog_colors::component(path),
+                    Item {
+                        path: path.into(),
+                        count,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn row<'a>(rows: &'a [Row], name: &str) -> &'a Row {
+        rows.iter().find(|row| row.name == name).unwrap()
+    }
+
+    fn new_custom(theme: &mut ColorTheme, name: &str, paths: &[&str], slot: u32) {
+        Edit {
+            group: None,
+            name: name.into(),
+            keys: paths
+                .iter()
+                .map(|path| catalog_colors::component(path))
+                .collect(),
+            slot,
+        }
+        .apply_to(theme);
     }
 
     #[test]
-    fn regrouping_moves_components_and_preserves_color_assignment_in_saved_projects() {
-        let path = "generated/gridfinity/Gridfinity-12.stl";
-        let key = catalog_colors::component(path);
-        let mut theme: ColorTheme = toml::from_str("filament = 1").unwrap();
-        assert!(theme.groups.is_empty());
-        for (name, slot) in [("Small bins", 2), ("Travel bins", 3)] {
-            Edit {
-                group: Group::New,
-                name: name.into(),
-                keys: [key.clone()].into(),
-                slot: Some(slot),
-            }
-            .apply_to(&mut theme);
+    fn default_swatches_display_the_five_reference_color_names() {
+        let theme = ColorTheme::default();
+        let labels = groups(&theme, true)
+            .into_iter()
+            .map(|group| {
+                let rgb = theme.palette[(group.slot - 1) as usize];
+                (color_label(rgb, true), color_label(rgb, false))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                ("银色", "Silver"),
+                ("橙色", "Orange"),
+                ("深灰", "Dark gray"),
+                ("黑色", "Black"),
+                ("灰色", "Gray")
+            ]
+        );
+    }
+
+    #[test]
+    fn five_role_rows_count_copies_once_including_empty_roles() {
+        let mut theme = ColorTheme::default();
+        let items = fixture();
+        let rows = group_rows(&theme, &items, true);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(row(&rows, "功能件").count, 6);
+        assert_eq!(row(&rows, "分隔板").count, 0);
+        assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
+        let role = Group::Role("functional");
+        Edit {
+            group: Some(role),
+            name: "功能件".into(),
+            keys: BTreeSet::new(),
+            slot: 4,
         }
-        let saved: ColorTheme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
-        assert_eq!(saved.groups.len(), 1);
-        assert_eq!(saved.groups[0].name, "Travel bins");
-        saved.validate().unwrap();
+        .apply_to(&mut theme);
+
+        new_custom(&mut theme, "活动件", &[SLIDE], 5);
+        let rows = group_rows(&theme, &items, true);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(row(&rows, "功能件").count, 2);
+        assert_eq!(row(&rows, "功能件").slot, 4);
+        assert_eq!(row(&rows, "活动件").count, 4);
+        assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
         let mut config = Config::default();
-        saved.apply(&mut config);
-        assert_eq!(config.slot("generated/gridfinity/Gridfinity-24.stl"), 3);
-        assert_eq!(builtin(path), 4);
-        assert_eq!(builtin("Catalog/Grid Dividers/A.stl"), 3);
-        assert_eq!(builtin("Catalog/Runners/Runner Slide.stl"), 1);
+        theme.apply(&mut config);
+        assert_eq!(config.slot(GUIDE), 4);
+        assert_eq!(
+            config.slot("01. DRAWERS/07. Universal/Runners/x7 Runner Slide.stl"),
+            5
+        );
+    }
+
+    #[test]
+    fn preview_reassignment_custom_release_and_automatic_reset_survive_roundtrip() {
+        let mut theme = ColorTheme::default();
+        assign_component(&mut theme, GUIDE, Some(Group::Role("accessory")));
+        new_custom(&mut theme, "备用", &[GUIDE, SLIDE], 5);
+        new_custom(&mut theme, "抽屉侧件", &[SLIDE, BIN], 2);
+        let items = fixture();
+        let rows = group_rows(&theme, &items, true);
+        assert_eq!(row(&rows, "备用").count, 2);
+        assert_eq!(row(&rows, "抽屉侧件").count, 7);
+        assert_eq!(row(&rows, "配件").count, 0);
+
+        // Releasing a component restores the manual role it had before the custom group.
+        let edit = Edit {
+            group: Some(Group::Custom(0)),
+            name: "备用".into(),
+            keys: BTreeSet::new(),
+            slot: 3,
+        };
+        edit.apply_to(&mut theme);
+        assert_eq!(theme.groups.len(), 1);
+        assert_eq!(row(&group_rows(&theme, &items, true), "配件").count, 2);
+        assign_component(&mut theme, BIN, Some(Group::Role("divider")));
+        let mut saved: ColorTheme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
+        saved.validate().unwrap();
+        let rows = group_rows(&saved, &items, true);
+        assert_eq!(row(&rows, "分隔板").count, 3);
+        assert_eq!(row(&rows, "抽屉侧件").count, 4);
+        assign_component(&mut saved, GUIDE, None);
+        assign_component(&mut saved, SLIDE, None);
+        assert!(saved.groups.is_empty());
+        assert_eq!(row(&group_rows(&saved, &items, true), "功能件").count, 6);
+    }
+
+    #[test]
+    fn custom_names_cannot_duplicate_roles_or_other_groups() {
+        let mut theme = ColorTheme::default();
+        new_custom(&mut theme, "备用", &[GUIDE], 2);
+        let mut edit = Edit {
+            group: None,
+            name: " 功能件 ".into(),
+            keys: BTreeSet::new(),
+            slot: 3,
+        };
+        assert!(!edit.name_available(&theme));
+        edit.name = "备用".into();
+        assert!(!edit.name_available(&theme));
+        edit.group = Some(Group::Custom(0));
+        assert!(edit.name_available(&theme));
     }
 }

@@ -1292,6 +1292,7 @@ endsolid t";
     }
     #[test]
     fn three_mf_keeps_color_ids_and_separate_plate_memberships() {
+        use crate::print_plate::FilamentMaterial::{PetgBasic, PetgHf, PlaBasic};
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("models");
         std::fs::create_dir(&root).unwrap();
@@ -1309,52 +1310,76 @@ endsolid t";
         }
         options.plate.palette[0] = [240, 20, 30];
         options.plate.palette[1] = [10, 100, 220];
-        let target = temp.path().join("colors.3mf");
-        run_configured(&root, &bom, &target, &options, &Default::default(), None).unwrap();
-        let mut zip = zip::ZipArchive::new(File::open(target).unwrap()).unwrap();
-        let mut config = String::new();
-        zip.by_name("Metadata/model_settings.config")
-            .unwrap()
-            .read_to_string(&mut config)
-            .unwrap();
-        assert_eq!(config.matches("<plate>").count(), 2);
-        assert_eq!(config.matches("<model_instance>").count(), 4);
-        assert_eq!(config.matches("key=\"extruder\" value=\"1\"").count(), 4);
-        assert_eq!(config.matches("key=\"extruder\" value=\"2\"").count(), 4);
-        assert!(config.contains("#F0141E"));
-        assert!(config.contains("#0A64DC"));
-        let json: serde_json::Value =
-            serde_json::from_reader(zip.by_name("Metadata/project_settings.config").unwrap())
-                .unwrap();
-        assert_eq!(json["filament_colour"][0], "#F0141E");
-        assert_eq!(json["filament_colour"][1], "#0A64DC");
-        // Validate the actual packaged settings, including all six material slots.
-        for (key, value) in [
-            ("filament_type", "PETG"),
-            ("filament_vendor", "Bambu Lab"),
-            ("filament_ids", "GFG00"),
-            ("filament_settings_id", "Bambu PETG Basic @BBL X1C"),
-            ("nozzle_temperature_initial_layer", "245"),
-            ("nozzle_temperature", "255"),
-            ("textured_plate_temp", "70"),
-            ("textured_plate_temp_initial_layer", "70"),
-            ("filament_flow_ratio", "0.95"),
-            ("filament_density", "1.25"),
-            ("filament_max_volumetric_speed", "15"),
+        let default_materials = [PlaBasic, PetgHf, PlaBasic, PlaBasic, PlaBasic, PlaBasic];
+        assert_eq!(options.plate.materials, default_materials);
+        for (name, materials) in [
+            ("default", default_materials),
+            ("all-basic", [PetgBasic; 6]),
+            (
+                "custom",
+                [PetgHf, PlaBasic, PetgBasic, PlaBasic, PetgHf, PetgBasic],
+            ),
         ] {
-            let slots = json[key].as_array().unwrap();
-            assert_eq!(slots.len(), 6, "{key}");
-            assert!(
-                slots.iter().all(|slot| slot == value),
-                "{key} must use PETG Basic in every slot"
+            options.plate.materials = materials;
+            let target = temp.path().join(format!("{name}.3mf"));
+            run_configured(&root, &bom, &target, &options, &Default::default(), None).unwrap();
+            let mut zip = zip::ZipArchive::new(File::open(target).unwrap()).unwrap();
+            let mut config = String::new();
+            zip.by_name("Metadata/model_settings.config")
+                .unwrap()
+                .read_to_string(&mut config)
+                .unwrap();
+            assert_eq!(config.matches("<plate>").count(), 2);
+            assert_eq!(config.matches("<model_instance>").count(), 4);
+            assert_eq!(config.matches("key=\"extruder\" value=\"1\"").count(), 4);
+            assert_eq!(config.matches("key=\"extruder\" value=\"2\"").count(), 4);
+            assert!(config.contains("#F0141E"));
+            assert!(config.contains("#0A64DC"));
+            let json: serde_json::Value =
+                serde_json::from_reader(zip.by_name("Metadata/project_settings.config").unwrap())
+                    .unwrap();
+            assert_eq!(json["filament_colour"][0], "#F0141E");
+            assert_eq!(json["filament_colour"][1], "#0A64DC");
+            let expected_colors = options
+                .plate
+                .palette
+                .map(|[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}"));
+            assert_eq!(json["filament_colour"], serde_json::json!(expected_colors));
+            assert_eq!(json["filament_multi_colour"], json["filament_colour"]);
+            for (key, pla, hf, petg) in [
+                ("filament_type", "PLA", "PETG", "PETG"),
+                ("filament_vendor", "Bambu Lab", "Bambu Lab", "Bambu Lab"),
+                ("filament_ids", "GFA00", "GFG02", "GFG00"),
+                (
+                    "filament_settings_id",
+                    "Bambu PLA Basic @BBL P1S 0.4 nozzle",
+                    "Bambu PETG HF @BBL P1S 0.4 nozzle",
+                    "Bambu PETG Basic @BBL X1C",
+                ),
+                ("nozzle_temperature_initial_layer", "220", "230", "245"),
+                ("nozzle_temperature", "220", "245", "255"),
+                ("textured_plate_temp", "55", "70", "70"),
+                ("textured_plate_temp_initial_layer", "55", "70", "70"),
+                ("filament_flow_ratio", "0.98", "0.95", "0.95"),
+                ("filament_density", "1.26", "1.28", "1.25"),
+                ("filament_max_volumetric_speed", "21", "21", "15"),
+                ("fan_min_speed", "100", "20", "20"),
+                ("filament_retraction_length", "nil", "nil", "0.4"),
+            ] {
+                let expected = materials.map(|material| match material {
+                    PlaBasic => pla,
+                    PetgHf => hf,
+                    PetgBasic => petg,
+                });
+                assert_eq!(json[key], serde_json::json!(expected), "{name}: {key}");
+            }
+            assert_eq!(
+                json["default_filament_profile"],
+                serde_json::json!([json["filament_settings_id"][0]])
             );
+            assert_eq!(json["printer_settings_id"], "Bambu Lab P1S 0.4 nozzle");
+            assert_eq!(json["extruder_offset"], serde_json::json!(["0x2"]));
         }
-        assert_eq!(
-            json["default_filament_profile"][0],
-            "Bambu PETG Basic @BBL X1C"
-        );
-        assert_eq!(json["printer_settings_id"], "Bambu Lab P1S 0.4 nozzle");
-        assert_eq!(json["extruder_offset"], serde_json::json!(["0x2"]));
     }
     #[test]
     fn legacy_open_bambu_migrates_without_launch_and_settings_roundtrip() {

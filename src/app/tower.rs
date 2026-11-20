@@ -1,5 +1,6 @@
 use super::*;
-mod colors;
+mod color_smoke;
+pub(super) mod colors;
 mod layers;
 mod modifications;
 mod roofs;
@@ -15,6 +16,7 @@ pub(super) struct State {
     reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
     color_edit: Option<colors::Edit>,
+    color_smoke_input: std::collections::VecDeque<Vec<egui::Event>>,
     error: String,
     reset_inserts: bool,
     projects: Vec<Project>,
@@ -41,6 +43,7 @@ impl Default for State {
             reorder: None,
             scroll_to_top: true,
             color_edit: None,
+            color_smoke_input: Default::default(),
             error: String::new(),
             reset_inserts: false,
             projects: vec![],
@@ -602,6 +605,7 @@ impl App {
             self.ensure_members();
         }
         self.restore_member(self.active_member.min(self.members.len() - 1));
+        self.sync_global_colors();
         self.combination_view = true;
         self.workflow_history.clear();
         self.member_edit_baseline = None;
@@ -1273,6 +1277,10 @@ impl App {
                 }
             };
             let Some(first) = all.first() else { return; };
+            if self.smoke && std::env::args().any(|a| a == "--smoke-color-groups") {
+                for group in ["footprint", "layers", "modifications"] { layers::set_group(ui, group, false); }
+                layers::set_group(ui, "colors", true);
+            }
             if self.smoke && self.smoke_stage == 4 && std::env::args().any(|arg| arg == "--smoke-build-panel") {
                 layers::set_group(ui, "footprint", false);
                 layers::set_group(ui, "layers", false);
@@ -2004,6 +2012,12 @@ impl App {
 
 impl App {
     pub(super) fn setup_tower_smoke(&mut self, ctx: &egui::Context) {
+        if std::env::args().any(|a| a == "--smoke-color-groups") {
+            if let Err(error) = self.setup_color_groups_smoke(ctx) {
+                self.tower.error = error;
+            }
+            return;
+        }
         self.tower.name = "工作台抽屉柜 · 层式配置".into();
         let base = self.member_snapshot();
         let mut members = Vec::new();
@@ -2079,6 +2093,10 @@ impl App {
         }
     }
     pub(super) fn tower_smoke(&mut self, ctx: &egui::Context) {
+        if std::env::args().any(|a| a == "--smoke-color-groups") {
+            self.color_groups_smoke(ctx);
+            return;
+        }
         ctx.request_repaint_after(Duration::from_millis(100));
         let workspace_smoke = std::env::args().any(|a| a == "--smoke-workspace");
         let build_panel_smoke = std::env::args().any(|a| a == "--smoke-build-panel");

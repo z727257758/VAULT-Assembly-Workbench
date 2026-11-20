@@ -355,12 +355,11 @@ impl App {
                     if let Some(path) = self.global_color_preview.selected.clone() {
                         ui.label(color_component_name(&path, z)).on_hover_text(&path);
                         ui.push_id("selected-color-properties", |ui| {
-                            component_color_ui(ui, &mut draft, &path, false, z);
+                            super::tower::colors::component_group_picker(ui, &mut draft, &path, z);
                             if crate::label::is_label(&path) || path.starts_with(crate::gridfinity::PREFIX) {
-                                component_color_ui(ui, &mut draft, &path, true, z);
+                                component_text_color_ui(ui, &mut draft, &path, z);
                             }
                         });
-                        ui.small(t(z, "同类零件共用配色；蓝色线框标出示例中的对应零件。", "Matching components share colors; blue boxes mark them in the sample."));
                     } else {
                         ui.label(t(z, "点击左侧零件开始配色，可先点击“爆炸”展开模型。", "Click a part in the preview to color it. Explode the model to reach internal parts."));
                     }
@@ -369,7 +368,7 @@ impl App {
                         ui.strong(t(z, "耗材颜色", "Filament colors"));
                         egui::Grid::new("overall-palette").num_columns(3).show(ui, |ui| {
                             for i in 0..6 {
-                                ui.label(format!("Bambu PETG Basic {}", i + 1));
+                                material_picker(ui, i, &mut draft.materials[i]);
                                 ui.color_edit_button_srgb(&mut draft.palette[i]);
                                 let [r,g,b] = draft.palette[i];
                                 ui.monospace(format!("#{r:02X}{g:02X}{b:02X}"));
@@ -393,8 +392,7 @@ impl App {
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
                             ui.strong(t(z, "零件与文字", "Components and text"));
-                            if ui.button(t(z, "恢复用途配色", "Reset component colors")).clicked() {
-                                draft.components.clear();
+                            if ui.button(t(z, "恢复默认文字颜色", "Reset text colors")).clicked() {
                                 draft.component_text.clear();
                             }
                         });
@@ -553,6 +551,7 @@ fn slot_picker(
 /// Print parameters, text contents and quantities are intentionally independent.
 fn copy_member_colors(source: &Config, target: &mut Config) {
     target.palette = source.palette;
+    target.materials = source.materials;
     target.filament = source.filament;
     target.role_filaments = source.role_filaments.clone();
     target.component_filaments = source.component_filaments.clone();
@@ -588,26 +587,30 @@ pub(super) fn color_component_name(path: &str, z: bool) -> String {
         ),
     }
 }
-fn component_color_ui(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, text: bool, z: bool) {
+pub(super) fn material_picker(
+    ui: &mut egui::Ui,
+    i: usize,
+    material: &mut crate::print_plate::FilamentMaterial,
+) -> bool {
+    let previous = *material;
+    egui::ComboBox::from_id_salt(("filament-material", i))
+        .selected_text(format!("{} · {}", i + 1, material.name()))
+        .show_ui(ui, |ui| {
+            for option in crate::print_plate::FilamentMaterial::ALL {
+                ui.selectable_value(material, option, option.name());
+            }
+        });
+    *material != previous
+}
+
+fn component_text_color_ui(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool) {
     let key = crate::catalog::colors::component(path);
     let mut config = Config::default();
     theme.apply(&mut config);
-    let current = if text {
-        config.text_slot(path)
-    } else {
-        config.slot(path)
-    };
-    let map = if text {
-        &mut theme.component_text
-    } else {
-        &mut theme.components
-    };
+    let current = config.text_slot(path);
+    let map = &mut theme.component_text;
     let mut slot = map.get(&key).copied().unwrap_or(0);
-    ui.label(if text {
-        t(z, "文字颜色", "Text color")
-    } else {
-        t(z, "零件颜色", "Part color")
-    });
+    ui.label(t(z, "文字颜色", "Text color"));
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut slot, 0, t(z, "跟随用途配色", "Use role color"));
         for value in 1..=6 {
@@ -719,11 +722,11 @@ mod tests {
     #[test]
     fn theme_roundtrip_preserves_custom_members_and_independent_contents() {
         let mut state = snapshot();
-        state.colors.roles.insert("label".into(), 3);
-        state
-            .colors
-            .components
-            .insert(crate::catalog::colors::component("part.stl"), 4);
+        state.colors.roles.insert("accessory".into(), 3);
+        state.colors.role_overrides.insert(
+            crate::catalog::colors::component("part.stl"),
+            "divider".into(),
+        );
         state
             .colors
             .component_text

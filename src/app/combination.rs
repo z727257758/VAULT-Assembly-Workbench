@@ -28,7 +28,7 @@ pub(super) struct Member {
 pub(super) struct CombinationPreset {
     #[serde(default = "super::tower::default_name")]
     pub project_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::print_plate::ColorTheme::load")]
     pub colors: crate::print_plate::ColorTheme,
     #[serde(flatten)]
     pub preset: Preset,
@@ -1698,8 +1698,8 @@ impl App {
             }
             23 => {
                 let mut theme = self.global_colors_draft.take().unwrap();
-                theme.roles.insert("shell".into(), 4);
-                theme.roles.insert("label".into(), 2);
+                theme.roles.insert("body".into(), 4);
+                theme.roles.insert("accessory".into(), 2);
                 theme.roles.insert("text".into(), 1);
                 self.apply_global_theme(theme).unwrap();
             }
@@ -1713,7 +1713,7 @@ impl App {
                     .set_part_slot(crate::label::PATH, 5);
                 self.commit_member();
                 let mut theme = self.global_colors.clone();
-                theme.roles.insert("label".into(), 3);
+                theme.roles.insert("accessory".into(), 3);
                 self.apply_global_theme(theme).unwrap();
             }
             26 => {
@@ -1740,20 +1740,11 @@ impl App {
                 self.global_color_preview
                     .request(&self.catalog, &self.home, AssemblyKind::Drawer);
                 let draft = self.global_colors_draft.as_mut().unwrap();
-                let module = "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl";
-                draft
-                    .components
-                    .insert(crate::catalog::colors::component(module), 3);
-                draft
-                    .components
-                    .insert(crate::catalog::colors::component(crate::label::PATH), 2);
+                draft.roles.insert("body".into(), 3);
+                draft.roles.insert("accessory".into(), 2);
                 draft
                     .component_text
                     .insert(crate::catalog::colors::component(crate::label::PATH), 6);
-                draft.components.insert(
-                    crate::catalog::colors::component(crate::label::SUSTAINER_PATH),
-                    2,
-                );
                 draft.component_text.insert(
                     crate::catalog::colors::component(crate::label::SUSTAINER_PATH),
                     6,

@@ -79,6 +79,8 @@ struct Preset {
 }
 #[derive(Serialize, Deserialize)]
 struct Settings {
+    #[serde(default, deserialize_with = "crate::print_plate::ColorTheme::load")]
+    global_colors: crate::print_plate::ColorTheme,
     #[serde(default)]
     appearance: appearance::Appearance,
     #[serde(default)]
@@ -323,7 +325,7 @@ impl App {
             member_edit_baseline: None,
             global_colors: settings
                 .as_ref()
-                .map(|s| crate::print_plate::ColorTheme::from_config(&s.export.plate))
+                .map(|s| s.global_colors.clone())
                 .unwrap_or_default(),
             global_colors_draft: None,
             global_color_preview: Default::default(),
@@ -851,6 +853,7 @@ impl App {
     }
     fn save_settings(&self) -> Result<(), String> {
         let settings = Settings {
+            global_colors: self.global_colors.clone(),
             appearance: self.appearance,
             export: self.export_options.clone(),
             model_root: self.last_model_root.to_string_lossy().into(),
@@ -953,6 +956,7 @@ impl App {
                                 "--smoke-tower"
                                     | "--smoke-workspace"
                                     | "--smoke-build-panel"
+                                    | "--smoke-color-groups"
                                     | "--smoke-project-menu"
                             )
                         })
@@ -2884,12 +2888,11 @@ impl App {
         let mut changed = false;
         egui::Window::new(t(z,"当前成员配色","Current member colors")).id(egui::Id::new("print-colors"))
             .open(&mut open).default_width(570.).default_height(650.).vscroll(true).show(ctx,|ui| {
-            ui.label(t(z,"编辑 6 个 Bambu PETG Basic 颜色槽；小盒和可拆标牌分别按同类型统一配色，其他零件的同源份数共用颜色。","Edit six Bambu PETG Basic slots. Bins and removable labels each share type colors; other source copies share colors."));
             ui.add_enabled_ui(self.export_rx.is_none(),|ui| {
                 let c=&mut self.export_options.plate;
                 egui::Grid::new("color-palette").num_columns(3).show(ui,|ui| {
                     for i in 0..6 {
-                        ui.label(format!("Bambu PETG Basic {}",i+1));
+                        changed |= workflow::material_picker(ui, i, &mut c.materials[i]);
                         if ui.color_edit_button_srgb(&mut c.palette[i]).changed(){changed=true;c.preview_colors=true;}
                         ui.monospace(c.color_hex(i as u32+1));ui.end_row();
                     }
@@ -2899,7 +2902,7 @@ impl App {
                     egui::ComboBox::from_id_salt("default-filament").selected_text(format!("{} · {}",c.filament,c.color_hex(c.filament))).show_ui(ui,|ui| {
                         for slot in 1..=6 {let name=format!("{slot} · {}",c.color_hex(slot));if ui.selectable_value(&mut c.filament,slot,name).changed(){changed=true;c.preview_colors=true;}}
                     });
-                    if ui.button(t(z,"全部恢复默认颜色","Reset assignments")).clicked(){c.part_filaments.clear();c.text_filaments.clear();c.role_filaments.clear();c.component_filaments.clear();c.component_text_filaments.clear();changed=true;}
+                    if ui.button(t(z,"全部恢复分组颜色","Reset to group colors")).clicked(){self.global_colors.apply(c);changed=true;}
                 });
                 ui.separator();
                 let mut color_rows=std::collections::BTreeSet::new();
@@ -3123,6 +3126,9 @@ impl eframe::App for App {
         if self.smoke && std::env::args().any(|arg| arg == "--smoke-bin-editor") {
             self.bin_editor_smoke_input(input);
         }
+        if self.smoke && std::env::args().any(|arg| arg == "--smoke-color-groups") {
+            self.color_groups_smoke_input(input);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -3257,6 +3263,7 @@ impl eframe::App for App {
                     "--smoke-tower"
                         | "--smoke-workspace"
                         | "--smoke-build-panel"
+                        | "--smoke-color-groups"
                         | "--smoke-project-menu"
                 )
             })
@@ -4352,6 +4359,7 @@ mod accessory_export_tests {
         std::fs::create_dir(home.path().join("state")).unwrap();
         let library = tempfile::tempdir().unwrap();
         let saved = Settings {
+            global_colors: Default::default(),
             appearance: appearance::Appearance::Dark,
             model_root: library.path().to_string_lossy().into(),
             language: "en".into(),

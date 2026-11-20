@@ -227,7 +227,11 @@ impl App {
         Ok(())
     }
 
-    fn capture_bin_smoke(&mut self, ctx: &egui::Context, path: &Path) -> Result<bool, String> {
+    pub(super) fn capture_native_smoke(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+    ) -> Result<bool, String> {
         self.smoke_frame += 1;
         if self.smoke_frame >= 4 && !self.screenshot_requested {
             self.screenshot_requested = true;
@@ -511,7 +515,7 @@ impl App {
                 let (from, to) = if stage == 11 {
                     ([1.5, 1.5], [0.5, 0.5])
                 } else {
-                    if !self.capture_bin_smoke(ctx, &folder.join("drawn-bins.png"))? {
+                    if !self.capture_native_smoke(ctx, &folder.join("drawn-bins.png"))? {
                         return Ok(());
                     }
                     ([1., 1.98], [1., 0.98])
@@ -563,7 +567,7 @@ impl App {
                     return Ok(());
                 }
                 std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-                if !self.capture_bin_smoke(ctx, &folder.join("before.png"))? {
+                if !self.capture_native_smoke(ctx, &folder.join("before.png"))? {
                     return Ok(());
                 }
                 let central = ctx.available_rect();
@@ -672,7 +676,7 @@ impl App {
                 } else {
                     names[stage as usize]
                 };
-                if !self.capture_bin_smoke(ctx, &folder.join(format!("{name}.png")))? {
+                if !self.capture_native_smoke(ctx, &folder.join(format!("{name}.png")))? {
                     return Ok(());
                 }
             }

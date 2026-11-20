@@ -66,6 +66,8 @@ pub struct Config {
     pub module_clip_supports: bool,
     pub filament: u32,
     pub palette: [[u8; 3]; 6],
+    #[serde(default = "legacy_materials")]
+    pub materials: [FilamentMaterial; 6],
     pub part_filaments: std::collections::BTreeMap<String, u32>,
     pub preview_colors: bool,
     pub text_filaments: std::collections::BTreeMap<String, u32>,
@@ -74,7 +76,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             follow_global_colors: false,
-            role_filaments: Default::default(),
+            role_filaments: default_role_slots(),
             component_filaments: Default::default(),
             component_text_filaments: Default::default(),
             margin: 0.5,
@@ -91,14 +93,8 @@ impl Default for Config {
             support_by_name: true,
             module_clip_supports: true,
             filament: 1,
-            palette: [
-                [22, 22, 22],
-                [249, 140, 54],
-                [255, 255, 255],
-                [188, 188, 188],
-                [22, 22, 22],
-                [246, 246, 243],
-            ],
+            palette: DEFAULT_PALETTE,
+            materials: DEFAULT_MATERIALS,
             part_filaments: Default::default(),
             preview_colors: false,
             text_filaments: Default::default(),
@@ -238,66 +234,164 @@ impl Config {
         let colors: Vec<_> = (1..=6).map(|slot| self.color_hex(slot)).collect();
         d["filament_colour"] = serde_json::json!(colors);
         d["filament_multi_colour"] = serde_json::json!(colors);
+        let profiles: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = serde_json::from_str(include_str!("../config/export/filament-overrides.json"))
+            .map_err(|e| e.to_string())?;
+        for (i, material) in self.materials.iter().enumerate() {
+            if let Some(profile) = profiles.get(material.name()) {
+                for (key, value) in profile {
+                    d[key][i] = serde_json::Value::String(value.clone());
+                }
+            }
+        }
+        d["default_filament_profile"][0] = d["filament_settings_id"][0].clone();
         d["wipe_tower_x"] = serde_json::json!(["0"]);
         d["wipe_tower_y"] = serde_json::json!(["0"]);
         serde_json::to_vec_pretty(&d).map_err(|e| e.to_string())
     }
 }
 
+const DEFAULT_PALETTE: [[u8; 3]; 6] = [
+    [167, 170, 170],
+    [248, 82, 0],
+    [82, 82, 82],
+    [0, 0, 0],
+    [142, 144, 137],
+    [246, 246, 243],
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilamentMaterial {
+    PlaBasic,
+    PetgHf,
+    PetgBasic,
+}
+impl FilamentMaterial {
+    pub const ALL: [Self; 3] = [Self::PlaBasic, Self::PetgHf, Self::PetgBasic];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PlaBasic => "PLA Basic",
+            Self::PetgHf => "PETG HF",
+            Self::PetgBasic => "PETG Basic",
+        }
+    }
+}
+const DEFAULT_MATERIALS: [FilamentMaterial; 6] = [
+    FilamentMaterial::PlaBasic,
+    FilamentMaterial::PetgHf,
+    FilamentMaterial::PlaBasic,
+    FilamentMaterial::PlaBasic,
+    FilamentMaterial::PlaBasic,
+    FilamentMaterial::PlaBasic,
+];
+fn legacy_materials() -> [FilamentMaterial; 6] {
+    [FilamentMaterial::PetgBasic; 6]
+}
+fn default_role_slots() -> std::collections::BTreeMap<String, u32> {
+    crate::catalog::colors::ROLES
+        .iter()
+        .zip(1..)
+        .map(|((role, _, _), slot)| ((*role).to_owned(), slot))
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColorGroup {
     pub name: String,
     pub components: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub slot: u32,
 }
 
 /// Color-only data: applying a theme must not overwrite plate or support settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorTheme {
+    #[serde(default)]
+    grouping_version: u8,
     pub palette: [[u8; 3]; 6],
+    pub materials: [FilamentMaterial; 6],
     pub filament: u32,
     pub roles: std::collections::BTreeMap<String, u32>,
-    pub components: std::collections::BTreeMap<String, u32>,
+    pub role_overrides: std::collections::BTreeMap<String, String>,
     pub component_text: std::collections::BTreeMap<String, u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<ColorGroup>,
 }
 impl Default for ColorTheme {
     fn default() -> Self {
-        Self::from_config(&Config::default())
-    }
-}
-impl ColorTheme {
-    pub fn from_config(c: &Config) -> Self {
         Self {
-            palette: c.palette,
-            filament: c.filament,
-            roles: c.role_filaments.clone(),
-            components: c.component_filaments.clone(),
-            component_text: c.component_text_filaments.clone(),
+            grouping_version: 1,
+            palette: DEFAULT_PALETTE,
+            materials: DEFAULT_MATERIALS,
+            filament: 1,
+            roles: default_role_slots(),
+            role_overrides: Default::default(),
+            component_text: Default::default(),
             groups: Vec::new(),
         }
     }
+}
+impl ColorTheme {
+    pub fn load<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let theme = Self::deserialize(de)?;
+        if theme.grouping_version == 0 {
+            return Ok(Self::default());
+        }
+        theme.validate().map_err(serde::de::Error::custom)?;
+        Ok(theme)
+    }
+    pub fn role_slot(&self, role: &str) -> u32 {
+        self.roles.get(role).copied().unwrap_or(self.filament)
+    }
+    pub fn role_for(&self, path: &str) -> &str {
+        self.role_overrides
+            .get(&crate::catalog::colors::component(path))
+            .map(String::as_str)
+            .unwrap_or_else(|| crate::catalog::colors::role(path))
+    }
+    pub fn group_slot(&self, path: &str) -> u32 {
+        let component = crate::catalog::colors::component(path);
+        self.groups
+            .iter()
+            .find(|g| g.components.contains(&component))
+            .map_or_else(|| self.role_slot(self.role_for(path)), |g| g.slot)
+    }
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=6).contains(&self.filament)
-            || self
-                .components
+        let valid_role = |key: &str| {
+            crate::catalog::colors::ROLES
                 .iter()
-                .chain(self.component_text.iter())
+                .any(|(role, _, _)| *role == key)
+        };
+        if self.grouping_version != 1
+            || !(1..=6).contains(&self.filament)
+            || self
+                .role_overrides
+                .iter()
+                .any(|(key, role)| key.is_empty() || !valid_role(role))
+            || self
+                .component_text
+                .iter()
                 .any(|(key, slot)| key.is_empty() || !(1..=6).contains(slot))
-            || self.roles.iter().any(|(key, slot)| {
-                !(1..=6).contains(slot)
-                    || !crate::catalog::colors::ROLES
-                        .iter()
-                        .any(|(role, _, _)| role == key)
-            })
+            || self
+                .roles
+                .iter()
+                .any(|(key, slot)| !(1..=6).contains(slot) || (key != "text" && !valid_role(key)))
         {
             return Err("无效的整体配色 / Invalid overall colors".into());
         }
         let mut assigned = std::collections::BTreeSet::new();
+        let mut names: std::collections::BTreeSet<_> = crate::catalog::colors::ROLES
+            .iter()
+            .flat_map(|(_, cn, en)| [cn.to_lowercase(), en.to_lowercase()])
+            .collect();
         if self.groups.len() > 64
             || self.groups.iter().any(|group| {
-                group.name.trim().is_empty()
+                !(1..=6).contains(&group.slot)
+                    || group.name.trim().is_empty()
+                    || !names.insert(group.name.trim().to_lowercase())
                     || group.name.chars().count() > 48
                     || group.components.is_empty()
                     || group
@@ -312,9 +406,18 @@ impl ColorTheme {
     }
     pub fn apply(&self, c: &mut Config) {
         c.palette = self.palette;
+        c.materials = self.materials;
         c.filament = self.filament;
         c.role_filaments = self.roles.clone();
-        c.component_filaments = self.components.clone();
+        c.component_filaments = self
+            .role_overrides
+            .iter()
+            .map(|(key, role)| (key.clone(), self.role_slot(role)))
+            .collect();
+        for group in &self.groups {
+            c.component_filaments
+                .extend(group.components.iter().map(|key| (key.clone(), group.slot)));
+        }
         c.component_text_filaments = self.component_text.clone();
         c.part_filaments.clear();
         c.text_filaments.clear();
@@ -1504,10 +1607,10 @@ mod tests {
         assert_eq!(round.text_slot(&future.label_path()), 2);
         assert_eq!(round.slot(crate::label::PATH), 6);
         c.set_part_slot(&b.label_path(), 0);
-        assert_eq!(c.slot(&a.label_path()), c.filament);
+        assert_eq!(c.slot(&a.label_path()), c.role_filaments["accessory"]);
         assert_eq!(c.text_slot(&a.label_path()), 2);
         c.set_text_slot(&future.label_path(), 0);
-        assert_eq!(c.text_slot(&a.label_path()), c.filament);
+        assert_eq!(c.text_slot(&a.label_path()), c.slot(&a.label_path()));
         assert_eq!(c.slot(&a.path()), 3);
     }
     #[test]
@@ -1526,7 +1629,7 @@ mod tests {
         assert!(!c.part_filaments.contains_key(later));
         assert_eq!(c.part_filaments.get(LABEL_COLOR_KEY), Some(&4));
         c.set_part_slot(first, 0);
-        assert_eq!(c.slot(later), c.filament);
+        assert_eq!(c.slot(later), c.role_filaments["accessory"]);
         assert_eq!(c.slot("other.stl"), 6);
         assert_eq!(
             color_key("library/Gridfinity-2.stl"),
@@ -1597,10 +1700,10 @@ mod tests {
         assert_ne!(out[0].plate, out[2].plate);
         assert_ne!(out[0].plate, out[3].plate);
         let mut c = c;
-        c.text_filaments.insert("label".into(), 3);
+        c.text_filaments.insert("label".into(), 6);
         let round: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
-        assert_eq!(round.text_slot("label"), 3);
-        assert_eq!(round.text_slot("plain"), 1);
+        assert_eq!(round.text_slot("label"), 6);
+        assert_eq!(round.text_slot("plain"), round.slot("plain"));
         c.text_filaments.insert("bad".into(), 7);
         assert!(c.validate().is_err());
     }
@@ -1829,13 +1932,14 @@ mod overall_color_tests {
         let small = "01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl";
         let large = "01. DRAWERS/03. L Families/L7/Modules/L7 Module 4F.stl";
         let mut theme = ColorTheme::default();
-        theme.roles.insert("shell".into(), 2);
+        theme.roles.insert("body".into(), 2);
         theme
-            .components
-            .insert(crate::catalog::colors::component(small), 3);
-        theme
-            .components
-            .insert(crate::catalog::colors::component(crate::label::PATH), 4);
+            .role_overrides
+            .insert(crate::catalog::colors::component(small), "accessory".into());
+        theme.role_overrides.insert(
+            crate::catalog::colors::component(crate::label::PATH),
+            "divider".into(),
+        );
         theme
             .component_text
             .insert(crate::catalog::colors::component(crate::label::PATH), 6);
@@ -1865,13 +1969,22 @@ mod overall_color_tests {
         saved.set_text_slot(crate::label::PATH, 0);
         assert_eq!(saved.slot(large), 3);
         assert_eq!(saved.text_slot(crate::label::PATH), 6);
-        let old: ColorTheme = toml::from_str("filament = 2\n[roles]\nshell = 4").unwrap();
+        #[derive(Deserialize)]
+        struct Saved {
+            #[serde(deserialize_with = "ColorTheme::load")]
+            colors: ColorTheme,
+        }
+        let old = toml::from_str::<Saved>("[colors]\nfilament = 2\n[colors.roles]\nshell = 4")
+            .unwrap()
+            .colors;
         old.apply(&mut saved);
-        assert_eq!(saved.slot(large), 4);
+        assert_eq!(saved.slot(large), 1);
         assert!(saved.component_filaments.is_empty());
         assert!(saved.component_text_filaments.is_empty());
         let mut invalid = theme.clone();
-        invalid.components.insert("bad".into(), 7);
+        invalid
+            .role_overrides
+            .insert("part".into(), "unknown".into());
         assert!(invalid.validate().is_err());
         invalid = theme;
         invalid.component_text.insert("bad".into(), 0);
@@ -1884,10 +1997,10 @@ mod overall_color_tests {
             palette: [[10, 20, 30]; 6],
             filament: 2,
             roles: [
-                ("shell".into(), 3),
-                ("label".into(), 4),
+                ("body".into(), 3),
+                ("accessory".into(), 4),
                 ("text".into(), 5),
-                ("insert".into(), 6),
+                ("gridfinity".into(), 6),
             ]
             .into(),
             ..Default::default()
@@ -1935,7 +2048,7 @@ mod overall_color_tests {
     #[test]
     fn invalid_global_color_rules_are_rejected() {
         let mut c = ColorTheme::default();
-        c.roles.insert("shell".into(), 7);
+        c.roles.insert("body".into(), 7);
         assert!(c.validate().is_err());
         c.roles.clear();
         c.roles.insert("unknown".into(), 1);
