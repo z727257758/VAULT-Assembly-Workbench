@@ -215,6 +215,7 @@ mod display_integration_tests {
         assert!(scene.parts[0].pose.position[0] < 0. && scene.parts[1].pose.position[0] > 0.);
         let old_position = scene.parts[0].pose.position;
         let legacy = scene::Definition {
+            drawer_lock_version: 0,
             geometry_version: 0,
             geometry: vec![],
             calibrated: true,

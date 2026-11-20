@@ -131,6 +131,44 @@ fn slot_stop(mesh: &crate::mesh::Mesh, y: f32, z: f32, lower: bool) -> Option<f3
 mod tests {
     use super::*;
 
+    // Parts are in enclosure, drawer, key, lower bolt, upper bolt order.
+    fn check_lock_contacts(group: &Scene, engaging_shell: bool) {
+        for pair in crate::collision::check(group, 0.01).unwrap().pairs {
+            match (pair.a, pair.b) {
+                // Shoulder contact in the pinion/rack meshes is also present when released.
+                (2, 3 | 4) => {}
+                (0, moving @ 2..=4) if engaging_shell => {
+                    let part = &group.parts[moving];
+                    let local = part.pose.matrix(0.).inverse();
+                    for hit in crate::collision::audit_pair(group, 0, moving) {
+                        let p = local.transform_point3(hit);
+                        if moving == 2 {
+                            // The outer end of the rear cam enters the shell pocket.
+                            let from_back = p.y - part.mesh.min.y;
+                            assert!(
+                                (-0.01..3.22).contains(&from_back) && p.x.hypot(p.z) > 19.,
+                                "Housing crosses key outside rear cam: {p:?}, {from_back}"
+                            );
+                        } else {
+                            // Only the protruding end of the bolt can enter the shell.
+                            let from_tip = part.mesh.max.x - p.x;
+                            assert!(
+                                (-0.01..10.).contains(&from_tip),
+                                "Housing crosses rack away from locking tip: {p:?}, {from_tip}"
+                            );
+                        }
+                    }
+                }
+                _ => panic!(
+                    "Unexpected crossing: {} / {} at {:?}",
+                    group.parts[pair.a].label(false),
+                    group.parts[pair.b].label(false),
+                    pair.point
+                ),
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires VAULT_MODEL_ROOT"]
     fn lock_turn_retracts_opposite_tips_and_carries_the_key_cap() {
@@ -182,20 +220,31 @@ mod tests {
             let facade_inv = facade.pose.matrix(0.).inverse();
             let facade_part = facade.clone();
             let drawer_inv = scene.parts[drawer].pose.matrix(0.).inverse();
+            let locked_centers: Vec<_> = rack_ids
+                .iter()
+                .map(|&i| {
+                    (drawer_inv * scene.parts[i].pose.matrix(0.))
+                        .w_axis
+                        .truncate()
+                })
+                .collect();
             let driver = PartId::of(&scene.parts[drawer]);
             let locked_pivot = scene.parts[key].pose.matrix(0.).w_axis;
             let cap_seat =
                 scene.parts[key].pose.matrix(0.).inverse() * scene.parts[cap].pose.matrix(0.);
             for released in [true, false] {
                 let plan = AssemblyRules::plan_latch(&scene, &driver, released).unwrap();
-                for t in [0., 0.5, 1.] {
+                for t in [0., 0.25, 0.5, 1.] {
                     let sample = plan.sample(plan.duration * t);
                     AssemblyRules::apply_motion_sample(&mut scene, &driver, sample).unwrap();
-                    let angle =
-                        ((1. - sample.latch) * crate::front_panel::KEY_TURN_DEGREES).to_radians();
+                    let angle = ((1. - sample.latch) * 90.).to_radians();
                     let key_pose = scene.parts[key].pose.matrix(0.);
-                    let long_axis = (facade_inv * key_pose).transform_vector3(Vec3::X);
-                    assert!(long_axis.abs_diff_eq(Vec3::new(angle.cos(), 0., -angle.sin()), 0.002));
+                    let expected_axis = Vec3::new(angle.cos(), 0., -angle.sin());
+                    for i in [key, cap] {
+                        let long_axis = (facade_inv * scene.parts[i].pose.matrix(0.))
+                            .transform_vector3(Vec3::X);
+                        assert!(long_axis.abs_diff_eq(expected_axis, 0.002));
+                    }
                     assert!(key_pose.w_axis.abs_diff_eq(locked_pivot, 0.002));
                     assert!(
                         (key_pose.inverse() * scene.parts[cap].pose.matrix(0.))
@@ -217,14 +266,7 @@ mod tests {
                             parts,
                             ..Default::default()
                         };
-                        let report = crate::collision::check(&group, 0.01).unwrap();
-                        // Check the cam and bolt tips against both the housing and drawer.
-                        // The pinion shoulder's existing rack contacts remain diagnostic.
-                        assert!(
-                            report.pairs.iter().all(|p| p.a >= 2 && p.b >= 2),
-                            "Lock intersects housing or drawer at {width}/{height}, release {}",
-                            sample.latch
-                        );
+                        check_lock_contacts(&group, angle >= 60_f32.to_radians());
                         // The close-running shoulder can touch the tessellated bore. Any
                         // reported crossing must stay on that shoulder throughout the turn.
                         let bore = Scene {
@@ -244,6 +286,10 @@ mod tests {
                         // Measure the outermost mesh tip against its corresponding box wall.
                         let outward = if i == 0 { -1. } else { 1. };
                         let pose = drawer_inv * scene.parts[rack].pose.matrix(0.);
+                        let travel = pose.w_axis.truncate() - locked_centers[i];
+                        assert!(
+                            travel.abs_diff_eq(Vec3::X * (-outward * 20. * sample.latch), 0.002)
+                        );
                         let tip = scene.parts[rack]
                             .mesh
                             .vertices
@@ -253,7 +299,7 @@ mod tests {
                         let extension = tip - scene.parts[drawer].source_size.x * 0.5;
                         // The source bolts retract about 12 mm inside their respective walls.
                         assert!(
-                            (extension - (-12. + RACK_TRAVEL * (1. - sample.latch))).abs() < 1.5,
+                            (extension - (-12. + 20. * (1. - sample.latch))).abs() < 1.5,
                             "{width}/{height} rack {i}: {extension} at {}",
                             sample.latch
                         );

@@ -7,10 +7,9 @@ use crate::{
 use glam::{Quat, Vec3};
 
 pub(crate) const DRAWER_KEY: &str = "Drawer lock: key / facade bore";
-// Preview limit from sampled S/M/L housing geometry. The pinion can turn a
-// quarter-turn in the facade bore, but its rear cam meets the mounted housing
-// by 65 degrees with these assembly datums.
-pub(crate) const KEY_TURN_DEGREES: f32 = 60.;
+// The handle is vertical when locked and horizontal when released. The rear
+// cam enters the housing's locking recess during the last part of the turn.
+pub(crate) const KEY_TURN_DEGREES: f32 = 90.;
 
 fn attach_key(scene: &mut Scene, facade: usize, key: usize, seat: Vec3) -> Result<(), String> {
     // Step 7 shows the horizontal head in the open position. The shouldered

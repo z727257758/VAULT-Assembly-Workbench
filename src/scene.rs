@@ -56,6 +56,9 @@ impl Pose {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Definition {
     pub calibrated: bool,
+    /// Version 1 uses the full quarter-turn drawer lock.
+    #[serde(default)]
+    pub drawer_lock_version: u32,
     /// Versioned, deterministic geometry stamps. Legacy files remain unverified.
     #[serde(default)]
     pub geometry_version: u32,
@@ -370,10 +373,15 @@ impl Scene {
                 old.parts.push(part);
             }
         }
+        let lock_travel_changed =
+            definition.drawer_lock_version == 0 && self.upgrade_legacy_lock_ranges(&mut old);
         let mut candidate = self.clone();
         candidate.retain_assembly_state(&old);
         if let Some(error) = &candidate.constraint_warning {
             return Err(error.clone());
+        }
+        if lock_travel_changed {
+            candidate.calibrated = false;
         }
         if definition.calibrated && !geometry_matches {
             candidate.calibrated = false;
@@ -681,6 +689,7 @@ impl Scene {
     pub fn definition(&self) -> Definition {
         Definition {
             calibrated: self.calibrated,
+            drawer_lock_version: 1,
             geometry_version: 1,
             geometry: if self.calibrated {
                 self.geometry_stamps()
@@ -785,7 +794,7 @@ fn ray_box(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn tiny_scene() -> Scene {
+    pub(super) fn tiny_scene() -> Scene {
         let mesh = Arc::new(
             Mesh::parse(b"solid x\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid").unwrap(),
         );

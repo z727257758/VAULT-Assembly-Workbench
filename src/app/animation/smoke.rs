@@ -62,12 +62,41 @@ impl App {
     fn smoke_mechanism(&self, member: usize, drawer: Option<usize>) -> Result<Mechanism, String> {
         AssemblyRules::mechanism(&self.scene, Target { member, drawer })
     }
-    fn check_shared_runners(&self) -> Result<(), String> {
+    fn check_shared_drawers(&self) -> Result<(), String> {
         let closed = &self.animation.smoke.closed_poses;
         let drawers = [
             self.smoke_mechanism(1, Some(0))?,
             self.smoke_mechanism(1, Some(1))?,
         ];
+        for (slot, drawer) in drawers.iter().enumerate() {
+            let target = Target {
+                member: 1,
+                drawer: Some(slot),
+            };
+            let cap = self
+                .scene
+                .parts
+                .iter()
+                .find(|p| target.contains(p) && p.pose.path.ends_with("/Key Cap.stl"))
+                .ok_or("Missing visible drawer knob")?;
+            // Local X follows the long grip of the source cap. The fronts of this
+            // upright stack lie in world XY. Check both drawers throughout playback.
+            let grip = cap
+                .pose
+                .matrix(0.)
+                .transform_vector3(glam::Vec3::X)
+                .normalize()
+                .abs();
+            let (horizontal, vertical) = (drawer.latch * std::f32::consts::FRAC_PI_2).sin_cos();
+            if !grip.abs_diff_eq(glam::Vec3::new(horizontal, vertical, 0.), 0.002) {
+                return Err(format!(
+                    "Stage {}: drawer {} grip axis {grip:?} at release fraction {:.3}, expected vertical when locked and horizontal when released",
+                    self.smoke_stage,
+                    slot + 1,
+                    drawer.latch
+                ));
+            }
+        }
         let mut guides = [0; 2];
         let mut stoppers = 0;
         for (id, datum) in closed.iter().filter(|(id, _)| {
@@ -280,7 +309,7 @@ impl App {
             if wait_for_endpoint || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0) {
                 self.advance_motion(0.05, ctx);
             }
-            self.check_shared_runners()?;
+            self.check_shared_drawers()?;
             let drawer = self.smoke_mechanism(1, Some(1))?;
             if drawer.value > 0.01 && drawer.latch < 0.999 {
                 return Err("Drawer moved before releasing the key".into());
@@ -358,13 +387,6 @@ impl App {
                         }
                     }
                 }
-                6 if lid.value.abs() > 0.001
-                    || lid.latch.abs() > 0.001
-                    || drawer.value.abs() > 0.001
-                    || drawer.latch.abs() > 0.001 =>
-                {
-                    return Err("Closure did not restore locks and drawers".into());
-                }
                 9 | 10 => {
                     let m = self.smoke_mechanism(1, Some(1))?;
                     if (lid.value - 65.).abs() > 0.01
@@ -375,7 +397,7 @@ impl App {
                         return Err("Motion endpoints did not survive a project rebuild".into());
                     }
                 }
-                11 | 14 => self.check_independent_lock(None)?,
+                6 | 11 | 14 => self.check_independent_lock(None)?,
                 12 => self.check_independent_lock(Some(Target {
                     member: 1,
                     drawer: Some(1),
@@ -559,7 +581,7 @@ impl App {
                     self.animate_latch_to(&lid.child, false, ctx)?;
                 }
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: independent key/cap rotation and opposing rack travel on a seated drawer. Independent lid lock release and return. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: both visible drawer grips stand vertically when locked and turn horizontally when released. Independent key/cap rotation and opposing rack travel on a seated drawer. Independent lid lock release and return to its original pose after closing. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
