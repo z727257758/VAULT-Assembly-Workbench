@@ -1292,7 +1292,9 @@ endsolid t";
     }
     #[test]
     fn three_mf_keeps_color_ids_and_separate_plate_memberships() {
-        use crate::print_plate::FilamentMaterial::{PetgBasic, PetgHf, PlaBasic};
+        use crate::print_plate::FilamentMaterial::{
+            PetgBasic, PetgHf, PetgMatte, PlaBasic, PlaMatte,
+        };
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("models");
         std::fs::create_dir(&root).unwrap();
@@ -1317,7 +1319,7 @@ endsolid t";
             ("all-basic", [PetgBasic; 6]),
             (
                 "custom",
-                [PetgHf, PlaBasic, PetgBasic, PlaBasic, PetgHf, PetgBasic],
+                [PetgHf, PlaBasic, PetgBasic, PlaMatte, PetgHf, PetgMatte],
             ),
         ] {
             options.plate.materials = materials;
@@ -1346,30 +1348,44 @@ endsolid t";
                 .map(|[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}"));
             assert_eq!(json["filament_colour"], serde_json::json!(expected_colors));
             assert_eq!(json["filament_multi_colour"], json["filament_colour"]);
-            for (key, pla, hf, petg) in [
-                ("filament_type", "PLA", "PETG", "PETG"),
-                ("filament_vendor", "Bambu Lab", "Bambu Lab", "Bambu Lab"),
-                ("filament_ids", "GFA00", "GFG02", "GFG00"),
+            for (key, pla, matte, hf, petg) in [
+                ("filament_type", "PLA", "PLA", "PETG", "PETG"),
+                (
+                    "filament_vendor",
+                    "Bambu Lab",
+                    "Bambu Lab",
+                    "Bambu Lab",
+                    "Bambu Lab",
+                ),
+                ("filament_ids", "GFA00", "GFA01", "GFG02", "GFG00"),
                 (
                     "filament_settings_id",
                     "Bambu PLA Basic @BBL P1S 0.4 nozzle",
+                    "Bambu PLA Matte @BBL P1S 0.4 nozzle",
                     "Bambu PETG HF @BBL P1S 0.4 nozzle",
                     "Bambu PETG Basic @BBL X1C",
                 ),
-                ("nozzle_temperature_initial_layer", "220", "230", "245"),
-                ("nozzle_temperature", "220", "245", "255"),
-                ("textured_plate_temp", "55", "70", "70"),
-                ("textured_plate_temp_initial_layer", "55", "70", "70"),
-                ("filament_flow_ratio", "0.98", "0.95", "0.95"),
-                ("filament_density", "1.26", "1.28", "1.25"),
-                ("filament_max_volumetric_speed", "21", "21", "15"),
-                ("fan_min_speed", "100", "20", "20"),
-                ("filament_retraction_length", "nil", "nil", "0.4"),
+                (
+                    "nozzle_temperature_initial_layer",
+                    "220",
+                    "220",
+                    "230",
+                    "245",
+                ),
+                ("nozzle_temperature", "220", "220", "245", "255"),
+                ("textured_plate_temp", "55", "55", "70", "70"),
+                ("textured_plate_temp_initial_layer", "55", "55", "70", "70"),
+                ("filament_flow_ratio", "0.98", "0.98", "0.95", "0.95"),
+                ("filament_density", "1.26", "1.32", "1.28", "1.25"),
+                ("filament_max_volumetric_speed", "21", "22", "21", "15"),
+                ("fan_min_speed", "100", "100", "20", "20"),
+                ("filament_retraction_length", "nil", "nil", "nil", "0.4"),
             ] {
                 let expected = materials.map(|material| match material {
                     PlaBasic => pla,
+                    PlaMatte => matte,
                     PetgHf => hf,
-                    PetgBasic => petg,
+                    PetgBasic | PetgMatte => petg,
                 });
                 assert_eq!(json[key], serde_json::json!(expected), "{name}: {key}");
             }

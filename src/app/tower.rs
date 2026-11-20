@@ -16,6 +16,8 @@ pub(super) struct State {
     reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
     color_edit: Option<colors::Edit>,
+    open_color: Option<String>,
+    reveal_colors: bool,
     color_smoke_input: std::collections::VecDeque<Vec<egui::Event>>,
     error: String,
     reset_inserts: bool,
@@ -43,6 +45,8 @@ impl Default for State {
             reorder: None,
             scroll_to_top: true,
             color_edit: None,
+            open_color: None,
+            reveal_colors: false,
             color_smoke_input: Default::default(),
             error: String::new(),
             reset_inserts: false,
@@ -595,6 +599,8 @@ impl App {
         self.tower.name = project.name;
         self.tower.rename_draft = None;
         self.tower.color_edit = None;
+        self.tower.open_color = None;
+        self.tower.reveal_colors = false;
         self.members = saved.members;
         self.active_member = saved.active_member;
         self.global_colors = saved.colors;
@@ -1235,8 +1241,17 @@ impl App {
         colors::preview_menu(self, ui);
     }
 
-    pub(super) fn tower_colors_dialog(&mut self, ctx: &egui::Context) {
-        colors::dialog(self, ctx);
+    pub(super) fn reveal_tower_colors(&mut self, ctx: &egui::Context) {
+        if !self.combination_view || self.inline_edit.open {
+            self.show_combination(ctx);
+        }
+        if self.gridfinity_open {
+            self.close_bin_editor();
+        }
+        self.tab = 0;
+        self.tower.print_list = false;
+        self.tower.reveal_colors = true;
+        ctx.request_repaint();
     }
 
     pub(super) fn tower_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1270,9 +1285,7 @@ impl App {
                     for (i, m) in self.members.iter().enumerate() {
                         if ui.button(&m.name).clicked() { action = Some(Action::Edit(i, None)); }
                     }
-                    if ui.button(t(z, "编辑整体配色…", "Edit project colors…")).clicked() {
-                        self.open_global_colors();
-                    }
+                    colors::show(self, ui);
                     return;
                 }
             };

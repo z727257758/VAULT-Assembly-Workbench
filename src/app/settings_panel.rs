@@ -1,4 +1,5 @@
 use super::*;
+use crate::print_plate::{FilamentMaterial, MaterialLibrary};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -7,6 +8,7 @@ pub(super) enum Page {
     Labels,
     Library,
     Printer,
+    Materials,
     Print,
     Export,
 }
@@ -19,10 +21,148 @@ impl Page {
             Self::Labels => t(zh, "标签", "Labels"),
             Self::Library => t(zh, "模型库", "Model library"),
             Self::Printer => t(zh, "打印机", "Printer"),
+            Self::Materials => t(zh, "材料", "Materials"),
             Self::Print => t(zh, "打印参数", "Print parameters"),
             Self::Export => t(zh, "导出", "Export"),
         }
     }
+}
+
+#[derive(Clone)]
+struct MaterialEditor {
+    material: FilamentMaterial,
+    selected: Option<usize>,
+    color: [u8; 3],
+}
+
+impl MaterialEditor {
+    fn first(material: FilamentMaterial, library: &MaterialLibrary) -> Self {
+        let swatch = library.swatches(material).first().copied();
+        Self {
+            material,
+            selected: swatch.map(|_| 0),
+            color: swatch.unwrap_or([255; 3]),
+        }
+    }
+}
+
+fn material_settings_ui(ui: &mut egui::Ui, library: &mut MaterialLibrary, zh: bool) {
+    let id = ui.id().with("material-editor");
+    let mut editor = ui
+        .data_mut(|data| data.get_temp::<MaterialEditor>(id))
+        .unwrap_or_else(|| MaterialEditor::first(FilamentMaterial::PlaBasic, library));
+    let mut material = editor.material;
+    egui::ComboBox::from_id_salt("settings-material")
+        .selected_text(material.name())
+        .width(205.)
+        .show_ui(ui, |ui| {
+            for option in FilamentMaterial::ALL {
+                ui.selectable_value(&mut material, option, option.name());
+            }
+        });
+    if material != editor.material
+        || editor
+            .selected
+            .is_some_and(|i| i >= library.swatches(material).len())
+    {
+        editor = MaterialEditor::first(material, library);
+    }
+    ui.small(format!(
+        "{} · {}",
+        t(zh, "3MF 耗材预设", "3MF filament profile"),
+        material.profile_name()
+    ));
+    if material == FilamentMaterial::PetgMatte {
+        ui.small(t(
+            zh,
+            "PETG Matte 使用独立色板，导出采用 PETG Basic 的打印参数。",
+            "PETG Matte has its own swatches and uses the PETG Basic print profile.",
+        ));
+    }
+    ui.add_space(12.);
+    ui.strong(t(zh, "常用颜色", "Color swatches"));
+    let swatches = library.swatches(material);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4., 5.);
+        for (index, &color) in swatches.iter().enumerate() {
+            let (rect, response) =
+                ui.allocate_exact_size(egui::Vec2::splat(27.), egui::Sense::click());
+            let [r, g, b] = color;
+            let border = ui.visuals().widgets.noninteractive.bg_stroke;
+            ui.painter()
+                .circle(rect.center(), 10., Color32::from_rgb(r, g, b), border);
+            if editor.selected == Some(index) || response.has_focus() || response.hovered() {
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    13.,
+                    egui::Stroke::new(1.5, ui.visuals().text_color()),
+                );
+            }
+            if response
+                .on_hover_text(format!("#{r:02X}{g:02X}{b:02X}"))
+                .clicked()
+            {
+                editor.selected = Some(index);
+                editor.color = color;
+            }
+        }
+    });
+    ui.add_space(8.);
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(t(zh, "添加颜色", "Add color")).clicked() {
+            editor.selected = None;
+            editor.color = [62, 124, 149];
+        }
+        if ui
+            .add_enabled(
+                editor.selected.is_some(),
+                egui::Button::new(t(zh, "移除颜色", "Remove color")),
+            )
+            .clicked()
+            && let Some(index) = editor.selected
+        {
+            library.swatches_mut(material).remove(index);
+            editor = MaterialEditor::first(material, library);
+        }
+        if ui
+            .button(t(zh, "恢复默认色板", "Restore swatches"))
+            .clicked()
+        {
+            library.restore(material);
+            editor = MaterialEditor::first(material, library);
+        }
+    });
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(if editor.selected.is_some() {
+            t(zh, "选中颜色", "Selected color")
+        } else {
+            t(zh, "新颜色", "New color")
+        });
+        ui.color_edit_button_srgb(&mut editor.color);
+        let [r, g, b] = editor.color;
+        ui.monospace(format!("#{r:02X}{g:02X}{b:02X}"));
+        let swatches = library.swatches(material);
+        let available = !swatches.contains(&editor.color);
+        let label = if editor.selected.is_some() {
+            t(zh, "保存颜色", "Save color")
+        } else {
+            t(zh, "加入色板", "Add to swatches")
+        };
+        if ui
+            .add_enabled(available, egui::Button::new(label))
+            .clicked()
+        {
+            let colors = library.swatches_mut(material);
+            if let Some(index) = editor.selected {
+                colors[index] = editor.color;
+            } else {
+                colors.push(editor.color);
+                editor.selected = Some(colors.len() - 1);
+            }
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(id, editor));
 }
 
 impl App {
@@ -34,6 +174,7 @@ impl App {
         let previous_theme = self.appearance;
         let previous_font = self.label_font;
         let previous_export = self.export_options.clone();
+        let previous_materials = self.material_library.clone();
         let mut done = false;
         let mut library = false;
         let size = ctx.content_rect().size();
@@ -65,7 +206,7 @@ impl App {
                                     t(zh, "工作区", "Workspace"),
                                     &[Page::Appearance, Page::View, Page::Labels, Page::Library][..],
                                 ),
-                                (t(zh, "打印", "Printing"), &[Page::Printer, Page::Print, Page::Export][..]),
+                                (t(zh, "打印", "Printing"), &[Page::Printer, Page::Materials, Page::Print, Page::Export][..]),
                             ] {
                                     ui.add_space(4.);
                                     ui.label(RichText::new(group).small().weak());
@@ -130,11 +271,12 @@ impl App {
                                         ui.strong("Bambu Lab P1S · 0.4 mm");
                                         ui.label(t(zh, "平台 256 × 256 mm · 参考配置限高 250 mm", "256 × 256 mm bed · 250 mm profile height limit"));
                                         for material in crate::print_plate::FilamentMaterial::ALL {
-                                            if self.export_options.plate.materials.contains(&material) {
-                                                ui.label(format!("Bambu {}", material.name()));
+                                            if (1..=self.export_options.plate.slot_count()).any(|slot| self.export_options.plate.appearance(slot).material == material) {
+                                                ui.label(material.name()).on_hover_text(material.profile_name());
                                             }
                                         }
                                     }
+                                    Page::Materials => material_settings_ui(ui, &mut self.material_library, zh),
                                     Page::Print => {
                                         ui.small(t(zh, "参数应用于当前成员的 3MF 和打印板预览。", "Parameters apply to the current member’s 3MF and plate preview."));
                                         ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
@@ -176,10 +318,12 @@ impl App {
             || font_changed
             || theme_changed
             || language_changed
+            || self.material_library != previous_materials
             || self.export_options.format != previous_export.format
         {
             if let Err(error) = self.save_settings() {
                 self.export_options = previous_export;
+                self.material_library = previous_materials;
                 self.label_font = previous_font;
                 self.appearance = previous_theme;
                 self.zh = zh;

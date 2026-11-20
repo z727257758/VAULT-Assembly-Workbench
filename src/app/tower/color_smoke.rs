@@ -1,12 +1,12 @@
-//! Exercise the rendered build-panel rows, the preview's group menu and the saved print config.
+//! Check the material cards, preview group menu and saved print configuration through the UI.
 use super::*;
 use crate::catalog::colors::{ROLES, component, role};
-use crate::print_plate::Config;
+use crate::print_plate::{ColorTheme, Config, FilamentMaterial, PaletteGroup};
 use egui::{Event, LayerId, Pos2};
 
 const GUIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Guide.stl";
 const SLIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Slide.stl";
-const SLOT: u32 = 6;
+const MATERIAL: FilamentMaterial = FilamentMaterial::PlaMatte;
 
 // Read the actual texts painted by egui so that duplicated, hidden or incorrectly
 // labelled rows cannot pass through a separate representation built by the test.
@@ -56,9 +56,44 @@ fn control(texts: &[Text], title: &str, sidebar: bool) -> Result<Pos2, String> {
     }
 }
 
+fn card_material_button(texts: &[Text], current: &str) -> Result<Pos2, String> {
+    let header = control(texts, "配件", true)?;
+    texts
+        .iter()
+        .filter(|t| {
+            t.layer == LayerId::background() && t.value == current && t.center.y > header.y + 12.
+        })
+        .min_by(|a, b| a.center.y.total_cmp(&b.center.y))
+        .map(|t| t.center)
+        .ok_or_else(|| format!("Expanded accessory card has no {current} material button"))
+}
+
+fn swatch(ctx: &egui::Context, rgb: [u8; 3], below: f32) -> Result<Pos2, String> {
+    let fill = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    ctx.graphics(|graphics| {
+        graphics
+            .get(LayerId::background())?
+            .all_entries()
+            .find_map(|entry| {
+                if let egui::Shape::Circle(c) = &entry.shape
+                    && c.fill == fill
+                    && c.radius >= 6.
+                    && c.center.y > below
+                    && entry.clip_rect.contains(c.center)
+                {
+                    Some(c.center)
+                } else {
+                    None
+                }
+            })
+    })
+    .ok_or_else(|| format!("No visible color swatch matching {rgb:?}"))
+}
+
 impl App {
     pub(super) fn setup_color_groups_smoke(&mut self, ctx: &egui::Context) -> Result<(), String> {
         self.zh = true;
+        self.material_library = Default::default();
         // A project from the color-bucket UI could store two slots for functional parts.
         let mut old = serde_json::to_value(self.tower_snapshot()).map_err(|e| e.to_string())?;
         old["colors"] =
@@ -69,7 +104,6 @@ impl App {
         self.global_colors.validate()?;
         self.global_colors.roles.insert("functional".into(), 2);
         self.global_colors.roles.insert("accessory".into(), 3);
-        self.global_colors.palette[(SLOT - 1) as usize] = [155, 83, 166];
         self.tower.name = "配色分组验收".into();
         let mut members = Vec::new();
         for level in 0..2 {
@@ -207,13 +241,27 @@ impl App {
             toml::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
         read.validate(&self.catalog)?;
+        let accessory = read
+            .colors
+            .group_appearance(PaletteGroup::Role("accessory"));
+        let rgb = self.color_smoke_swatch()?;
         if read.colors != self.global_colors
             || read.colors.role_for(GUIDE) != "accessory"
-            || read.colors.role_slot("accessory") != SLOT
+            || accessory.material != MATERIAL
+            || accessory.rgb != rgb
             || self.renderer.print_colors.is_none()
             || self.renderer.member_colors.len() != read.members.len()
         {
             return Err("Saved project or active preview did not retain the edited group".into());
+        }
+        let original = ColorTheme::default();
+        for (role, _, _) in ROLES {
+            let group = PaletteGroup::Role(role);
+            if role != "accessory"
+                && read.colors.group_appearance(group) != original.group_appearance(group)
+            {
+                return Err(format!("Editing the accessory card also changed {role}"));
+            }
         }
         for (member, preview) in read.members.iter().zip(&self.renderer.member_colors) {
             for job in member.preset.print_jobs(&member.name) {
@@ -221,20 +269,20 @@ impl App {
                     .preset
                     .print_config
                     .ok_or("Missing member export colors")?;
-                if [preview, &export].iter().any(|config| {
-                    config.palette != read.colors.palette
-                        || config.materials != read.colors.materials
-                }) {
-                    return Err(
-                        "Member preview or export lost the project RGB palette or materials".into(),
-                    );
-                }
+                let json: serde_json::Value =
+                    serde_json::from_slice(&export.project_json()?).map_err(|e| e.to_string())?;
                 for item in job.items.iter().filter(|item| item.enabled) {
                     let slot = read.colors.group_slot(&item.path);
+                    let expected = read.colors.appearance(slot);
                     if preview.slot(&item.path) != slot
                         || export.slot(&item.path) != slot
-                        || (item.path == GUIDE && slot != SLOT)
-                        || (item.path == SLIDE && slot != 2)
+                        || preview.appearance(slot) != expected
+                        || export.appearance(slot) != expected
+                        || json["filament_colour"][(slot - 1) as usize] != export.color_hex(slot)
+                        || (item.path == GUIDE
+                            && !json["filament_settings_id"][(slot - 1) as usize]
+                                .as_str()
+                                .is_some_and(|name| name.contains(MATERIAL.name())))
                     {
                         return Err(format!(
                             "Preview/export slot differs for {} (expected {slot})",
@@ -245,6 +293,15 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn color_smoke_swatch(&self) -> Result<[u8; 3], String> {
+        self.material_library
+            .swatches(MATERIAL)
+            .iter()
+            .copied()
+            .max_by_key(|[r, _, b]| i16::from(*b) - i16::from(*r))
+            .ok_or_else(|| format!("No configured swatches for {}", MATERIAL.name()))
     }
 
     pub(super) fn color_groups_smoke(&mut self, ctx: &egui::Context) {
@@ -300,26 +357,59 @@ impl App {
                     self.check_color_rows(&ui, true)?;
                     self.click_color_control(control(&ui, "配件", true)?);
                 }
-                4 => self.click_color_control(control(&ui, &SLOT.to_string(), false)?),
-                5 => self.click_color_control(control(&ui, "应用", false)?),
-                _ => {
-                    self.check_color_rows(&ui, true)?;
-                    let row = control(&ui, "配件", true)?;
-                    let material = self.global_colors.materials[(SLOT - 1) as usize].name();
-                    for label in ["紫色", material] {
-                        if !ui.iter().any(|t| {
-                            t.layer == LayerId::background()
-                                && t.value == label
-                                && (t.center.y - row.y).abs() < 20.
-                        }) {
-                            return Err(format!("Recolored accessory row missing '{label}'"));
-                        }
+                4 => {
+                    let button = card_material_button(&ui, "PLA Basic")?;
+                    if !self.capture_native_smoke(ctx, &folder.join("card.png"))? {
+                        return Ok(());
                     }
+                    self.click_color_control(button);
+                }
+                5 => {
+                    for material in FilamentMaterial::ALL {
+                        control(&ui, material.name(), false)?;
+                    }
+                    if !self.capture_native_smoke(ctx, &folder.join("materials-menu.png"))? {
+                        return Ok(());
+                    }
+                    self.click_color_control(control(&ui, MATERIAL.name(), false)?);
+                }
+                6 => {
+                    if self
+                        .global_colors
+                        .group_appearance(PaletteGroup::Role("accessory"))
+                        .material
+                        != MATERIAL
+                    {
+                        return Err(
+                            "Choosing a dropdown item did not update the group's material".into(),
+                        );
+                    }
+                    let button = card_material_button(&ui, MATERIAL.name())?;
+                    self.click_color_control(swatch(ctx, self.color_smoke_swatch()?, button.y)?);
+                }
+                7 => {
+                    self.check_saved_colors(&folder)?;
+                    self.click_color_control(control(&ui, "配件", true)?);
+                }
+                8 => {
+                    self.check_color_rows(&ui, true)?;
                     if !self.capture_native_smoke(ctx, &folder.join("regrouped.png"))? {
                         return Ok(());
                     }
-                    self.check_saved_colors(&folder)?;
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: Five unique groups matched the full BOM before and after moving all runner guides through the preview menu. Changing the accessory slot through its row persisted across both members, their preview and export materials and a saved project round trip.").map_err(|e| e.to_string())?;
+                    self.click_color_control(control(&ui, "设置", true)?);
+                }
+                9 => self.click_color_control(control(&ui, "材料", false)?),
+                _ => {
+                    if !ui
+                        .iter()
+                        .any(|t| t.layer != LayerId::background() && t.value.contains("添加颜色"))
+                    {
+                        return Err("Material settings did not open with swatch editing".into());
+                    }
+                    if !self.capture_native_smoke(ctx, &folder.join("material-settings.png"))? {
+                        return Ok(());
+                    }
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: inline cards matched the BOM, selected a different material from the dropdown and changed color from its swatches. Regrouping and edits persisted for both members in the preview, the exported filament settings and the saved project. Other groups retained their colors and materials. Material settings opened from the toolbar.").map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return Ok(());

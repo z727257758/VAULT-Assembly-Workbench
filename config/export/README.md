@@ -1,10 +1,10 @@
 # P1S 0.4 mm reference profile
 
-The machine and process settings come from `Metadata/project_settings.config` in the user-provided `M4 Module 1F.3mf`, saved by Bambu Studio 02.05.00.66. The embedded project settings include editable machine and filament start/end G-code. Each of the six filament slots has a material preset and an independent RGB color.
+The machine and process settings come from `Metadata/project_settings.config` in the user-provided `M4 Module 1F.3mf`, saved by Bambu Studio 02.05.00.66. The embedded project settings include editable machine and filament start/end G-code. Each filament slot has a material preset and an independent RGB color.
 
 The P1S profile retains its official single-nozzle offset `0x2`. Bambu subtracts this offset from model coordinates when writing G-code. Packing intersects the model-space bed with the translated machine-space bed, and protects the front-left keep-out in both coordinate systems. With the default 0.5 mm margin, model Y must be at least 2.5 mm. This applies to rotation, overflow plates and optional centering; printer calibration is not changed to hide a packing error.
 
-The exporter overlays the selected plate, layer height, wall loops, infill, brim and per-object filament/support settings. Each source model can use a selected filament slot, with unassigned parts following the default slot. Six editable RGB colors are written to the project. Plates are grouped by the complete material set (even for equal RGB values). Text and body regions share one object and plate; each material set may overflow to additional plates. Copies of one source share its slot. Printing is by layer; prime tower and skirts are disabled. Bed area is 256 × 256 mm, front-left keep-out 18 × 28 mm, and reference-profile printable height 250 mm. The template is embedded in the executable and does not require the original 3MF or a Bambu Studio installation at runtime.
+The exporter overlays the selected plate, layer height, wall loops, infill, brim and per-object filament/support settings. Each source model can use a selected filament slot, with unassigned parts following the default slot. The color and material of every slot are written to the project. Plates are grouped by the complete material set (even for equal RGB values). Text and body regions share one object and plate. Each material set may overflow to additional plates. Copies of one source share its slot. Printing is by layer. Prime tower and skirts are disabled. Bed area is 256 × 256 mm, front-left keep-out 18 × 28 mm, and reference-profile printable height 250 mm. The template is embedded in the executable.
 
 `Application=BambuStudio-02.05.00.66` is a compatibility marker required by Bambu's project importer; `VAULT:Generator` identifies the actual exporter. Each copy uses a unique component wrapper with an explicit plate membership. Multi-plate origins use a 1.2 × bed-size stride, columns rounded up from sqrt(plate count).
 
@@ -14,17 +14,20 @@ Lettering colors are stored per source separately from the body. The exporter pa
 
 ## Bambu filament presets
 
-The supported presets come from the installed Bambu Studio 02.05.00.66 BBL profile package **02.05.00.05**. The PLA Basic and PETG HF presets target the P1S 0.4 mm nozzle. The PETG Basic X1C preset lists the P1S 0.4 mm nozzle among its compatible printers. [Official BBL filament profiles](https://github.com/bambulab/BambuStudio/tree/master/resources/profiles/BBL/filament)
+The supported presets come from the installed Bambu Studio 02.05.00.66 BBL profile package **02.05.00.05**. The PLA Basic, PLA Matte and PETG HF presets target the P1S 0.4 mm nozzle. The PETG Basic X1C preset lists the P1S 0.4 mm nozzle among its compatible printers. The PETG Matte swatch collection uses the PETG Basic slicing preset, as shown in material settings. [Official BBL filament profiles](https://github.com/bambulab/BambuStudio/tree/master/resources/profiles/BBL/filament)
 
 | Material | Exported profile name | Setting ID | Filament ID | Nozzle, initial / later (°C) | Textured bed (°C) | Flow ratio | Max flow (mm³/s) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | PLA Basic | `Bambu PLA Basic @BBL P1S 0.4 nozzle` | `GFSA00_34` | `GFA00` | 220 / 220 | 55 | 0.98 | 21 |
+| PLA Matte | `Bambu PLA Matte @BBL P1S 0.4 nozzle` | `GFSA01_34` | `GFA01` | 220 / 220 | 55 | 0.98 | 22 |
 | PETG HF | `Bambu PETG HF @BBL P1S 0.4 nozzle` | `GFSG02_36` | `GFG02` | 230 / 245 | 70 | 0.95 | 21 |
 | PETG Basic | `Bambu PETG Basic @BBL X1C` | `GFSG00_01` | `GFG00` | 245 / 255 | 70 | 0.95 | 15 |
 
-The bundled template contains the resolved PETG Basic values. `filament-overrides.json` stores the differences for PLA Basic and PETG HF after resolving preset inheritance, included templates and the final preset's overrides. Multi-drive settings use the first entry (Direct Drive Standard) for the P1S single nozzle. The exporter writes each slot's profile name, filament ID and process values, including cooling, retraction and filament G-code, into the 3MF project. Both settings files are embedded in the application.
+The bundled template contains the resolved PETG Basic values. `filament-overrides.json` stores the differences for PLA Basic, PLA Matte and PETG HF after resolving preset inheritance, included templates and the final preset's overrides. Multi-drive settings use the first entry (Direct Drive Standard) for the P1S single nozzle. The exporter writes each slot's profile name, filament ID and process values, including cooling, retraction and filament G-code, into the 3MF project. Both settings files are embedded in the application.
 
-New projects assign PETG HF to slot 2 and PLA Basic to slots 1 and 3–6. Any slot can use any of the three presets. `default_filament_profile` follows slot 1. The material set used for packing consists of the slot numbers assigned to each printed object, including its lettering.
+New projects assign PETG HF to slot 2 and PLA Basic to slots 1 and 3–6. `default_filament_profile` follows slot 1. Additional group colors extend the filament columns, indexing and unload/load pairs. For new pairs of distinct slots, the flush matrix uses the largest transition volume from the reference template. Existing pairs keep their reference values. The material set used for packing consists of the slot numbers assigned to each printed object, including its lettering.
+
+Projects support up to 32 distinct filament slots, matching the `ExtruderMax` limit in the target version of Bambu Studio. [Bambu Studio 02.05.00.66 extruder indices](https://github.com/bambulab/BambuStudio/blob/v02.05.00.66/src/libslic3r/Model.hpp#L655-L695)
 
 ## Start purge-line clearance
 

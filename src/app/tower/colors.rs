@@ -1,16 +1,11 @@
 use super::*;
 use crate::catalog::colors as catalog_colors;
-use crate::print_plate::{ColorGroup, ColorTheme};
+use crate::print_plate::{ColorGroup, ColorTheme, GroupAppearance, PaletteGroup as Group};
+mod card;
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Group {
-    Role(&'static str),
-    Custom(usize),
-}
-
 pub(super) struct Edit {
-    group: Option<Group>,
+    original: Option<String>,
     name: String,
     keys: BTreeSet<String>,
     slot: u32,
@@ -18,37 +13,42 @@ pub(super) struct Edit {
 
 impl Edit {
     fn apply_to(&self, theme: &mut ColorTheme) {
-        if let Some(Group::Role(role)) = self.group {
-            theme.roles.insert(role.to_owned(), self.slot);
-            return;
-        }
+        let index = match &self.original {
+            Some(name) => {
+                let Some(index) = theme.groups.iter().position(|group| &group.name == name) else {
+                    return;
+                };
+                Some(index)
+            }
+            None => None,
+        };
         for group in &mut theme.groups {
             group.components.retain(|key| !self.keys.contains(key));
         }
-        let updated = ColorGroup {
-            name: self.name.trim().to_owned(),
-            components: self.keys.clone(),
-            slot: self.slot,
-        };
-        if let Some(Group::Custom(index)) = self.group {
-            theme.groups[index] = updated;
+        if let Some(index) = index {
+            let group = &mut theme.groups[index];
+            group.name = self.name.trim().into();
+            group.components.clone_from(&self.keys);
         } else {
-            theme.groups.push(updated);
+            theme.groups.push(ColorGroup {
+                name: self.name.trim().into(),
+                components: self.keys.clone(),
+                slot: self.slot,
+                initial_appearance: None,
+            });
         }
         theme.groups.retain(|group| !group.components.is_empty());
     }
 
     fn name_available(&self, theme: &ColorTheme) -> bool {
-        if matches!(self.group, Some(Group::Role(_))) {
-            return true;
-        }
         let name = self.name.trim().to_lowercase();
         !name.is_empty()
             && !catalog_colors::ROLES
                 .iter()
                 .any(|(_, cn, en)| name == cn.to_lowercase() || name == en.to_lowercase())
-            && !theme.groups.iter().enumerate().any(|(index, group)| {
-                Some(Group::Custom(index)) != self.group && group.name.trim().to_lowercase() == name
+            && !theme.groups.iter().any(|group| {
+                Some(&group.name) != self.original.as_ref()
+                    && group.name.trim().to_lowercase() == name
             })
     }
 }
@@ -75,7 +75,6 @@ fn items(app: &App) -> BTreeMap<String, Item> {
 struct Row {
     group: Group,
     name: String,
-    slot: u32,
     count: u32,
 }
 
@@ -85,13 +84,11 @@ fn groups(theme: &ColorTheme, z: bool) -> Vec<Row> {
         .map(|&(role, cn, en)| Row {
             group: Group::Role(role),
             name: t(z, cn, en).into(),
-            slot: theme.role_slot(role),
             count: 0,
         })
         .chain(theme.groups.iter().enumerate().map(|(index, group)| Row {
             group: Group::Custom(index),
             name: group.name.clone(),
-            slot: group.slot,
             count: 0,
         }))
         .collect()
@@ -180,125 +177,171 @@ fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
     }
 }
 
-fn group_button(ui: &mut egui::Ui, row: &Row, theme: &ColorTheme, z: bool) -> egui::Response {
-    let slot_index = (row.slot - 1) as usize;
-    let rgb = theme.palette[slot_index];
-    let material = theme.materials[slot_index].name();
-    let weak = ui.visuals().weak_text_color();
-    let ink = ui.visuals().text_color();
-    let body = egui::TextStyle::Body.resolve(ui.style());
-    let small = egui::TextStyle::Small.resolve(ui.style());
-    let painter = ui.painter();
-    let count = painter.layout_no_wrap(
-        format!("{} {}", row.count, t(z, "件", "pcs")),
-        small.clone(),
-        weak,
+fn edit_members(
+    ui: &mut egui::Ui,
+    edit: &mut Edit,
+    items: &BTreeMap<String, Item>,
+    theme: &ColorTheme,
+    z: bool,
+) -> (bool, bool) {
+    ui.add(
+        egui::TextEdit::singleline(&mut edit.name)
+            .hint_text(t(z, "分组名称", "Group name"))
+            .char_limit(48)
+            .desired_width(f32::INFINITY),
     );
-    let color = painter.layout_no_wrap(color_label(rgb, z).into(), body.clone(), weak);
-    let filament = painter.layout_no_wrap(material.into(), small, weak);
-    let width = ui.available_width();
-    let left_pad = 38.;
-    let right_pad = 12.;
-    let meta_width = color.size().x + 8. + filament.size().x;
-    let label_width = width - left_pad - right_pad - count.size().x - meta_width - 20.;
-    let compact = label_width < if z { 59. } else { 84. };
-    let height = if compact { 48. } else { 42. };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let visuals = ui.visuals();
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        10.,
-        if response.hovered() {
-            visuals.faint_bg_color
-        } else {
-            visuals.panel_fill
-        },
-        visuals.widgets.noninteractive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-    painter.circle(
-        egui::pos2(rect.left() + 19., rect.center().y),
-        9.5,
-        Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
-        visuals.widgets.noninteractive.bg_stroke,
-    );
-    let left = rect.left() + left_pad;
-    let right = rect.right() - right_pad;
-    let (label_width, label_y, meta_y) = if compact {
-        (
-            right - left - count.size().x - 7.,
-            rect.center().y - 8.,
-            rect.center().y + 10.,
-        )
-    } else {
-        (label_width, rect.center().y, rect.center().y)
-    };
-    let mut label = egui::text::LayoutJob::simple(row.name.clone(), body, ink, label_width.max(1.));
-    label.wrap.max_rows = 1;
-    label.wrap.break_anywhere = true;
-    let label = painter.layout_job(label);
-    let count_x = left + label.size().x + 7.;
-    painter.galley(egui::pos2(left, label_y - label.size().y * 0.5), label, ink);
-    painter.galley(
-        egui::pos2(count_x, label_y - count.size().y * 0.5),
-        count,
-        weak,
-    );
-    let color_x = if compact { left } else { right - meta_width };
-    let material_x = color_x + color.size().x + 8.;
-    painter.galley(
-        egui::pos2(color_x, meta_y - color.size().y * 0.5),
-        color,
-        weak,
-    );
-    painter.galley(
-        egui::pos2(material_x, meta_y - filament.size().y * 0.5),
-        filament,
-        weak,
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &row.name));
-    response
+    if !edit.name.trim().is_empty() && !edit.name_available(theme) {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            t(z, "已有同名分组", "This group name is already in use"),
+        );
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("group-parts")
+        .max_height(150.)
+        .show(ui, |ui| {
+            for (key, item) in items {
+                let mut checked = edit.keys.contains(key);
+                if ui
+                    .checkbox(
+                        &mut checked,
+                        format!(
+                            "{}  ×{}",
+                            workflow::color_component_name(&item.path, z),
+                            item.count
+                        ),
+                    )
+                    .on_hover_text(&item.path)
+                    .changed()
+                {
+                    if checked {
+                        edit.keys.insert(key.clone());
+                    } else {
+                        edit.keys.remove(key);
+                    }
+                }
+            }
+        });
+    ui.horizontal_wrapped(|ui| {
+        let valid =
+            (!edit.keys.is_empty() || edit.original.is_some()) && edit.name_available(theme);
+        let apply = ui
+            .add_enabled(valid, egui::Button::new(t(z, "保存分组", "Save group")))
+            .clicked();
+        let cancel = ui.button(t(z, "取消", "Cancel")).clicked();
+        let remove =
+            edit.original.is_some() && ui.button(t(z, "解散分组", "Remove group")).clicked();
+        if remove {
+            edit.keys.clear();
+        }
+        (apply || remove, cancel)
+    })
+    .inner
 }
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     let z = app.zh;
-    let rows = group_rows(&app.global_colors, &items(app), z);
+    let items = items(app);
+    let rows = group_rows(&app.global_colors, &items, z);
     let mut palette = Vec::new();
     for row in rows.iter().filter(|row| row.count > 0) {
-        let rgb = app.global_colors.palette[(row.slot - 1) as usize];
+        let rgb = app.global_colors.group_appearance(row.group).rgb;
         if !palette.contains(&rgb) {
             palette.push(rgb);
         }
     }
-    if !layers::group(ui, "colors", t(z, "颜色", "Colors"), false, |ui| {
+    let reveal = std::mem::take(&mut app.tower.reveal_colors);
+    if reveal {
+        layers::set_group(ui, "colors", true);
+    }
+    let start = ui.cursor().min;
+    let expanded = layers::group(ui, "colors", t(z, "颜色", "Colors"), false, |ui| {
         layers::palette(ui, &palette, palette.len().min(5));
-    }) {
+    });
+    if !expanded {
         return;
     }
-    let can_create = app.global_colors.groups.len() < 64 && rows.iter().any(|row| row.count > 0);
+    let busy = app.export_rx.is_some();
+    let mut draft = app.global_colors.clone();
+    let mut edit = app.tower.color_edit.take();
+    let mut save = false;
+    let mut cancel = false;
     for row in rows {
-        if ui
-            .push_id(row.group, |ui| {
-                group_button(ui, &row, &app.global_colors, z)
+        let open = app.tower.open_color.as_ref() == Some(&row.name);
+        let result = ui
+            .push_id(("group-card", &row.name), |ui| {
+                card::frame(ui, open)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let appearance = draft.group_appearance(row.group);
+                        match card::header(ui, &row, appearance, open, z) {
+                            Some(card::HeaderAction::Toggle) => {
+                                app.tower.open_color = (!open).then(|| row.name.clone());
+                                edit = None;
+                            }
+                            Some(card::HeaderAction::Reset) if !busy => {
+                                if let Err(error) = draft.reset_group_appearance(row.group) {
+                                    app.tower.error = error;
+                                }
+                            }
+                            _ => {}
+                        }
+                        if open {
+                            ui.add_enabled_ui(!busy, |ui| {
+                                let mut next = appearance;
+                                card::appearance_ui(ui, &app.material_library, &mut next, z);
+                                if next != appearance
+                                    && let Err(error) = draft.set_group_appearance(row.group, next)
+                                {
+                                    app.tower.error = error;
+                                }
+                                if let Group::Custom(index) = row.group {
+                                    if let Some(current) = edit.as_mut().filter(|current| {
+                                        current.original.as_ref() == Some(&row.name)
+                                    }) {
+                                        (save, cancel) =
+                                            edit_members(ui, current, &items, &draft, z);
+                                    } else if ui
+                                        .small_button(t(z, "编辑分组", "Edit group"))
+                                        .clicked()
+                                    {
+                                        edit = Some(Edit {
+                                            original: Some(row.name.clone()),
+                                            name: row.name.clone(),
+                                            keys: draft.groups[index].components.clone(),
+                                            slot: draft.groups[index].slot,
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    })
+                    .response
             })
-            .inner
-            .clicked()
-        {
-            app.tower.color_edit = Some(Edit {
-                group: Some(row.group),
-                name: row.name,
-                keys: match row.group {
-                    Group::Role(_) => BTreeSet::new(),
-                    Group::Custom(index) => app.global_colors.groups[index].components.clone(),
-                },
-                slot: row.slot,
-            });
+            .inner;
+        if reveal && open {
+            result.scroll_to_me(Some(egui::Align::Min));
         }
-        ui.add_space(4.);
+        ui.add_space(3.);
     }
-    ui.horizontal_wrapped(|ui| {
+    let editing_new = edit.as_ref().is_some_and(|edit| edit.original.is_none());
+    if editing_new {
+        let response = card::frame(ui, true)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.strong(t(z, "新建分组", "New group"));
+                ui.add_enabled_ui(!busy, |ui| {
+                    if let Some(edit) = &mut edit {
+                        (save, cancel) = edit_members(ui, edit, &items, &draft, z);
+                    }
+                });
+            })
+            .response;
+        if reveal {
+            response.scroll_to_me(Some(egui::Align::Min));
+        }
+    } else {
+        let can_create = !busy && draft.groups.len() < 64 && !items.is_empty();
         if ui
             .add_enabled(
                 can_create,
@@ -306,17 +349,45 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             )
             .clicked()
         {
-            app.tower.color_edit = Some(Edit {
-                group: None,
+            app.tower.open_color = None;
+            app.tower.reveal_colors = true;
+            edit = Some(Edit {
+                original: None,
                 name: String::new(),
                 keys: BTreeSet::new(),
-                slot: app.global_colors.filament,
+                slot: draft.filament,
             });
+            ui.ctx().request_repaint();
         }
-        if ui.button(t(z, "整体配色…", "Overall colors…")).clicked() {
-            app.open_global_colors();
+    }
+    if reveal && !editing_new && app.tower.open_color.is_none() {
+        ui.scroll_to_rect(
+            egui::Rect::from_min_size(start, egui::Vec2::splat(1.)),
+            Some(egui::Align::Min),
+        );
+    }
+    if save && let Some(current) = &edit {
+        current.apply_to(&mut draft);
+    }
+    if draft != app.global_colors {
+        match app.apply_global_theme(draft) {
+            Ok(()) => {
+                if save && let Some(current) = &edit {
+                    app.tower.open_color =
+                        (!current.keys.is_empty()).then(|| current.name.trim().to_owned());
+                    edit = None;
+                }
+                ui.ctx().request_repaint();
+            }
+            Err(error) => app.tower.error = error,
         }
-    });
+    } else if save {
+        edit = None;
+    }
+    if cancel {
+        edit = None;
+    }
+    app.tower.color_edit = edit;
     ui.add_space(6.);
 }
 
@@ -324,8 +395,8 @@ fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool)
     let key = catalog_colors::component(path);
     let current = component_group(theme, &key, path);
     for row in groups(theme, z) {
-        let index = (row.slot - 1) as usize;
-        let rgb = theme.palette[index];
+        let appearance = theme.group_appearance(row.group);
+        let rgb = appearance.rgb;
         let clicked = ui
             .horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(12.), egui::Sense::hover());
@@ -339,7 +410,7 @@ fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool)
                     .on_hover_text(format!(
                         "{} · {}",
                         color_label(rgb, z),
-                        theme.materials[index].name()
+                        appearance.material.name()
                     ))
                     .clicked()
             })
@@ -369,23 +440,56 @@ fn group_choices(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool)
     false
 }
 
-pub(in crate::app) fn component_group_picker(
-    ui: &mut egui::Ui,
-    theme: &mut ColorTheme,
-    path: &str,
-    z: bool,
-) {
-    let current = component_group(theme, &catalog_colors::component(path), path);
-    let name = groups(theme, z)
-        .into_iter()
-        .find(|row| row.group == current)
-        .map(|row| row.name)
-        .unwrap_or_default();
-    egui::ComboBox::from_label(t(z, "颜色分组", "Color group"))
-        .selected_text(name)
-        .show_ui(ui, |ui| {
-            group_choices(ui, theme, path, z);
-        });
+fn text_color_menu(ui: &mut egui::Ui, theme: &mut ColorTheme, path: &str, z: bool) -> bool {
+    let key = catalog_colors::component(path);
+    let selected = theme.component_text.get(&key).copied();
+    let mut changed = false;
+    ui.menu_button(t(z, "文字颜色", "Text color"), |ui| {
+        if ui
+            .selectable_label(
+                selected.is_none(),
+                if theme.roles.contains_key("text") {
+                    t(z, "跟随项目文字颜色", "Use project text color")
+                } else {
+                    t(z, "跟随分组颜色", "Use group color")
+                },
+            )
+            .clicked()
+        {
+            theme.component_text.remove(&key);
+            changed = selected.is_some();
+            ui.close();
+        }
+        for slot in 1..=theme.slot_count() {
+            let appearance = theme.appearance(slot);
+            let [r, g, b] = appearance.rgb;
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14., 14.), egui::Sense::hover());
+                ui.painter().circle(
+                    rect.center(),
+                    5.,
+                    Color32::from_rgb(r, g, b),
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                if ui
+                    .selectable_label(
+                        selected == Some(slot),
+                        format!(
+                            "{slot} · {} · {}",
+                            color_label([r, g, b], z),
+                            appearance.material.name()
+                        ),
+                    )
+                    .clicked()
+                {
+                    theme.component_text.insert(key.clone(), slot);
+                    changed = selected != Some(slot);
+                    ui.close();
+                }
+            });
+        }
+    });
+    changed
 }
 
 pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
@@ -406,7 +510,11 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
             let theme = &app.global_colors;
             ui.strong(workflow::color_component_name(path, z));
             let mut draft = theme.clone();
-            if group_choices(ui, &mut draft, path, z) {
+            let mut changed = group_choices(ui, &mut draft, path, z);
+            if crate::label::is_label(path) || path.starts_with(crate::gridfinity::PREFIX) {
+                changed |= text_color_menu(ui, &mut draft, path, z);
+            }
+            if changed {
                 changed_theme = Some(draft);
             }
             if ui
@@ -417,7 +525,7 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
             {
                 new = Some(Edit {
-                    group: None,
+                    original: None,
                     name: String::new(),
                     keys: [key].into(),
                     slot: theme.group_slot(path),
@@ -464,152 +572,11 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
         ui.ctx().request_repaint();
     }
     if let Some(edit) = new {
+        app.reveal_tower_colors(ui.ctx());
+        app.tower.open_color = None;
         app.tower.color_edit = Some(edit);
         ui.ctx().request_repaint();
     }
-}
-
-pub(super) fn dialog(app: &mut App, ctx: &egui::Context) {
-    let Some(mut edit) = app.tower.color_edit.take() else {
-        return;
-    };
-    let z = app.zh;
-    let theme = &app.global_colors;
-    let modifying_membership = !matches!(edit.group, Some(Group::Role(_)));
-    let items = modifying_membership.then(|| items(app));
-    let mut apply = false;
-    let mut cancel = false;
-    let mut remove = false;
-    let modal = egui::Modal::new(egui::Id::new("tower-color-group")).show(ctx, |ui| {
-        ui.set_width((ctx.content_rect().width() - 48.).clamp(150., 380.));
-        ui.heading(if edit.group.is_none() {
-            t(z, "新建分组", "New color group")
-        } else {
-            &edit.name
-        });
-        if modifying_membership {
-            ui.add(
-                egui::TextEdit::singleline(&mut edit.name)
-                    .hint_text(t(z, "分组名称", "Group name"))
-                    .char_limit(48)
-                    .desired_width(f32::INFINITY),
-            );
-            if !edit.name.trim().is_empty() && !edit.name_available(theme) {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    t(z, "已有同名分组", "This group name is already in use"),
-                );
-            }
-        }
-        let index = (edit.slot - 1) as usize;
-        ui.horizontal_wrapped(|ui| {
-            ui.strong(t(z, "耗材槽", "Filament slot"));
-            ui.label(format!(
-                "{} · {}",
-                color_label(theme.palette[index], z),
-                theme.materials[index].name()
-            ));
-        });
-        ui.horizontal_wrapped(|ui| {
-            for (index, &[r, g, b]) in theme.palette.iter().enumerate() {
-                let slot = (index + 1) as u32;
-                let rgb = Color32::from_rgb(r, g, b);
-                let linear = egui::Rgba::from(rgb);
-                let luminance = 0.2126 * linear.r() + 0.7152 * linear.g() + 0.0722 * linear.b();
-                let ink = if luminance > 0.179 {
-                    Color32::BLACK
-                } else {
-                    Color32::WHITE
-                };
-                let selected = edit.slot == slot;
-                let response = ui.add(
-                    egui::Button::new(RichText::new(slot.to_string()).color(ink))
-                        .min_size(egui::vec2(36., 30.))
-                        .selected(selected)
-                        .fill(rgb)
-                        .stroke(if selected {
-                            egui::Stroke::new(2., ui.visuals().selection.stroke.color)
-                        } else {
-                            ui.visuals().widgets.noninteractive.bg_stroke
-                        }),
-                );
-                if response
-                    .on_hover_text(format!(
-                        "{} · {} · #{r:02X}{g:02X}{b:02X}",
-                        color_label([r, g, b], z),
-                        theme.materials[index].name()
-                    ))
-                    .clicked()
-                {
-                    edit.slot = slot;
-                }
-            }
-        });
-        if let Some(items) = &items {
-            ui.separator();
-            ui.strong(t(z, "零件", "Parts"));
-            ui.small(t(
-                z,
-                "勾选移入本组，取消勾选后回到用途分组。",
-                "Check parts to move them here. Unchecked parts return to their role groups.",
-            ));
-            egui::ScrollArea::vertical()
-                .max_height((ctx.content_rect().height() * 0.38).min(280.))
-                .show(ui, |ui| {
-                    for (key, item) in items {
-                        let mut selected = edit.keys.contains(key);
-                        ui.horizontal(|ui| {
-                            let caption = workflow::color_component_name(&item.path, z);
-                            if ui
-                                .checkbox(&mut selected, caption)
-                                .on_hover_text(&item.path)
-                                .changed()
-                            {
-                                if selected {
-                                    edit.keys.insert(key.clone());
-                                } else {
-                                    edit.keys.remove(key);
-                                }
-                            }
-                            ui.weak(format!("×{}", item.count));
-                        });
-                    }
-                });
-        }
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            let valid = (edit.group.is_some() || !edit.keys.is_empty())
-                && edit.name_available(theme)
-                && app.export_rx.is_none();
-            apply = ui
-                .add_enabled(valid, egui::Button::new(t(z, "应用", "Apply")))
-                .clicked();
-            cancel = ui.button(t(z, "取消", "Cancel")).clicked();
-            if matches!(edit.group, Some(Group::Custom(_))) {
-                remove = ui
-                    .add_enabled(
-                        app.export_rx.is_none(),
-                        egui::Button::new(t(z, "解散分组", "Remove group")),
-                    )
-                    .clicked();
-            }
-        });
-    });
-    if cancel || modal.should_close() {
-        return;
-    }
-    if apply || remove {
-        let mut theme = theme.clone();
-        if remove {
-            edit.keys.clear();
-        }
-        edit.apply_to(&mut theme);
-        match app.apply_global_theme(theme) {
-            Ok(()) => return,
-            Err(error) => app.tower.error = error,
-        }
-    }
-    app.tower.color_edit = Some(edit);
 }
 
 #[cfg(test)]
@@ -642,7 +609,7 @@ mod tests {
 
     fn new_custom(theme: &mut ColorTheme, name: &str, paths: &[&str], slot: u32) {
         Edit {
-            group: None,
+            original: None,
             name: name.into(),
             keys: paths
                 .iter()
@@ -659,7 +626,7 @@ mod tests {
         let labels = groups(&theme, true)
             .into_iter()
             .map(|group| {
-                let rgb = theme.palette[(group.slot - 1) as usize];
+                let rgb = theme.group_appearance(group.group).rgb;
                 (color_label(rgb, true), color_label(rgb, false))
             })
             .collect::<Vec<_>>();
@@ -684,20 +651,13 @@ mod tests {
         assert_eq!(row(&rows, "功能件").count, 6);
         assert_eq!(row(&rows, "分隔板").count, 0);
         assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
-        let role = Group::Role("functional");
-        Edit {
-            group: Some(role),
-            name: "功能件".into(),
-            keys: BTreeSet::new(),
-            slot: 4,
-        }
-        .apply_to(&mut theme);
+        theme.roles.insert("functional".into(), 4);
 
         new_custom(&mut theme, "活动件", &[SLIDE], 5);
         let rows = group_rows(&theme, &items, true);
         assert_eq!(rows.len(), 6);
         assert_eq!(row(&rows, "功能件").count, 2);
-        assert_eq!(row(&rows, "功能件").slot, 4);
+        assert_eq!(theme.role_slot("functional"), 4);
         assert_eq!(row(&rows, "活动件").count, 4);
         assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
         let mut config = Config::default();
@@ -723,7 +683,7 @@ mod tests {
 
         // Releasing a component restores the manual role it had before the custom group.
         let edit = Edit {
-            group: Some(Group::Custom(0)),
+            original: Some("备用".into()),
             name: "备用".into(),
             keys: BTreeSet::new(),
             slot: 3,
@@ -744,11 +704,39 @@ mod tests {
     }
 
     #[test]
+    fn inline_membership_edit_keeps_current_appearance_and_reset_color() {
+        let mut theme = ColorTheme::default();
+        new_custom(&mut theme, "卡扣", &[GUIDE], 2);
+        let group = Group::Custom(0);
+        let initial = theme.group_appearance(group);
+        let custom = GroupAppearance {
+            rgb: [11, 33, 72],
+            ..initial
+        };
+        theme.set_group_appearance(group, custom).unwrap();
+        Edit {
+            original: Some("卡扣".into()),
+            name: "铰链".into(),
+            keys: [catalog_colors::component(BIN)].into(),
+            slot: 1,
+        }
+        .apply_to(&mut theme);
+        assert_eq!(theme.group_appearance(group), custom);
+        theme.reset_group_appearance(group).unwrap();
+        assert_eq!(theme.group_appearance(group), initial);
+        assert_eq!(theme.groups[0].name, "铰链");
+        assert_eq!(
+            theme.groups[0].components,
+            [catalog_colors::component(BIN)].into()
+        );
+    }
+
+    #[test]
     fn custom_names_cannot_duplicate_roles_or_other_groups() {
         let mut theme = ColorTheme::default();
         new_custom(&mut theme, "备用", &[GUIDE], 2);
         let mut edit = Edit {
-            group: None,
+            original: None,
             name: " 功能件 ".into(),
             keys: BTreeSet::new(),
             slot: 3,
@@ -756,7 +744,7 @@ mod tests {
         assert!(!edit.name_available(&theme));
         edit.name = "备用".into();
         assert!(!edit.name_available(&theme));
-        edit.group = Some(Group::Custom(0));
+        edit.original = Some("备用".into());
         assert!(edit.name_available(&theme));
     }
 }

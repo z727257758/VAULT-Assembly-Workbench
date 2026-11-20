@@ -183,7 +183,6 @@ impl App {
             || self.combination_spec.is_some()
             || self.export_open
             || self.colors_open
-            || self.global_colors_draft.is_some()
             || self.exterior_edit.is_some()
         {
             return false;

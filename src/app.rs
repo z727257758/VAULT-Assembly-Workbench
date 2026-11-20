@@ -3,7 +3,6 @@ mod appearance;
 mod bin_editor_smoke;
 mod bin_view;
 mod bin_workspace;
-mod color_preview;
 mod combination;
 mod exterior_smoke;
 mod inline_edit;
@@ -79,6 +78,8 @@ struct Preset {
 }
 #[derive(Serialize, Deserialize)]
 struct Settings {
+    #[serde(default)]
+    material_library: crate::print_plate::MaterialLibrary,
     #[serde(default, deserialize_with = "crate::print_plate::ColorTheme::load")]
     global_colors: crate::print_plate::ColorTheme,
     #[serde(default)]
@@ -180,8 +181,7 @@ pub struct App {
     workflow_history: workflow::History,
     member_edit_baseline: Option<workflow::Snapshot>,
     global_colors: crate::print_plate::ColorTheme,
-    global_colors_draft: Option<crate::print_plate::ColorTheme>,
-    global_color_preview: color_preview::Preview,
+    material_library: crate::print_plate::MaterialLibrary,
     member_selection: std::collections::BTreeSet<usize>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
     sustainer_divider_editor: crate::sustainer_divider_editor::Editor,
@@ -327,8 +327,10 @@ impl App {
                 .as_ref()
                 .map(|s| s.global_colors.clone())
                 .unwrap_or_default(),
-            global_colors_draft: None,
-            global_color_preview: Default::default(),
+            material_library: settings
+                .as_ref()
+                .map(|s| s.material_library.clone())
+                .unwrap_or_default(),
             member_selection: Default::default(),
             assembly_kind: if smoke && std::env::args().any(|a| a == "--smoke-sustainer") {
                 AssemblyKind::Sustainer
@@ -853,6 +855,7 @@ impl App {
     }
     fn save_settings(&self) -> Result<(), String> {
         let settings = Settings {
+            material_library: self.material_library.clone(),
             global_colors: self.global_colors.clone(),
             appearance: self.appearance,
             export: self.export_options.clone(),
@@ -1886,8 +1889,8 @@ impl App {
             let mut choice = old;
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut choice, 0, t(z, "跟随默认", "Use default"));
-                for slot in 1..=6 {
-                    let [r, g, b] = c.palette[(slot - 1) as usize];
+                for slot in 1..=c.slot_count() {
+                    let [r, g, b] = c.appearance(slot).rgb;
                     let button = egui::Button::new(egui::RichText::new(format!(" {slot} ")).color(
                         if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
                             Color32::BLACK
@@ -1920,8 +1923,8 @@ impl App {
                 let mut text_choice = old_text;
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut text_choice, 0, t(z, "跟随文字默认色", "Default text color"));
-                    for slot in 1..=6 {
-                        let [r, g, b] = c.palette[(slot - 1) as usize];
+                    for slot in 1..=c.slot_count() {
+                        let [r, g, b] = c.appearance(slot).rgb;
                         let ink = if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
                             Color32::BLACK
                         } else {
@@ -2891,16 +2894,22 @@ impl App {
             ui.add_enabled_ui(self.export_rx.is_none(),|ui| {
                 let c=&mut self.export_options.plate;
                 egui::Grid::new("color-palette").num_columns(3).show(ui,|ui| {
-                    for i in 0..6 {
-                        changed |= workflow::material_picker(ui, i, &mut c.materials[i]);
-                        if ui.color_edit_button_srgb(&mut c.palette[i]).changed(){changed=true;c.preview_colors=true;}
-                        ui.monospace(c.color_hex(i as u32+1));ui.end_row();
+                    for slot in 1..=c.slot_count() {
+                        let mut appearance = c.appearance(slot);
+                        workflow::material_picker(ui, (slot - 1) as usize, &mut appearance.material);
+                        ui.color_edit_button_srgb(&mut appearance.rgb);
+                        if appearance != c.appearance(slot) {
+                            c.set_appearance(slot, appearance);
+                            changed = true;
+                            c.preview_colors = true;
+                        }
+                        ui.monospace(c.color_hex(slot));ui.end_row();
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.label(t(z,"默认颜色","Default color"));
                     egui::ComboBox::from_id_salt("default-filament").selected_text(format!("{} · {}",c.filament,c.color_hex(c.filament))).show_ui(ui,|ui| {
-                        for slot in 1..=6 {let name=format!("{slot} · {}",c.color_hex(slot));if ui.selectable_value(&mut c.filament,slot,name).changed(){changed=true;c.preview_colors=true;}}
+                        for slot in 1..=c.slot_count() {let name=format!("{slot} · {}",c.color_hex(slot));if ui.selectable_value(&mut c.filament,slot,name).changed(){changed=true;c.preview_colors=true;}}
                     });
                     if ui.button(t(z,"全部恢复分组颜色","Reset to group colors")).clicked(){self.global_colors.apply(c);changed=true;}
                 });
@@ -2912,7 +2921,7 @@ impl App {
                     let quantity:u32=self.bom.iter().filter(|b|b.enabled && crate::print_plate::color_key(&b.path)==key).map(|b|b.qty).sum();
                     ui.push_id(&item.path,|ui| {ui.horizontal(|ui| {
                         let slot=c.slot(&item.path);let mut choice=c.part_assignment(&item.path);
-                        let [r,g,b]=c.palette[(slot-1) as usize];ui.colored_label(Color32::from_rgb(r,g,b),"●");
+                        let [r,g,b]=c.appearance(slot).rgb;ui.colored_label(Color32::from_rgb(r,g,b),"●");
                         let name=match key {
                             crate::print_plate::BIN_COLOR_KEY=>t(z,"Gridfinity 小盒（同类型）","Gridfinity bins (shared type)").to_owned(),
                             crate::print_plate::LABEL_COLOR_KEY=>t(z,"Cullenect 可拆标牌（同类型）","Cullenect labels (shared type)").to_owned(),
@@ -2921,7 +2930,7 @@ impl App {
                         ui.label(format!("{name} ×{quantity}"));
                         egui::ComboBox::from_id_salt("part-color").selected_text(if choice==0 {format!("{} · {}",t(z,"默认","Default"),c.color_hex(slot))}else{format!("{slot} · {}",c.color_hex(slot))}).show_ui(ui,|ui| {
                             ui.selectable_value(&mut choice,0,t(z,"跟随默认颜色","Use default"));
-                            for slot in 1..=6 {ui.selectable_value(&mut choice,slot,format!("{slot} · {}",c.color_hex(slot)));}
+                            for slot in 1..=c.slot_count() {ui.selectable_value(&mut choice,slot,format!("{slot} · {}",c.color_hex(slot)));}
                         });
                         if choice!=c.part_assignment(&item.path) {
                             c.set_part_slot(&item.path,choice);
@@ -3154,8 +3163,6 @@ impl eframe::App for App {
         }
         self.divider_view(ctx);
         self.color_window(ctx);
-        self.global_colors_window(ctx);
-        self.tower_colors_dialog(ctx);
         self.renderer.print_colors = self
             .export_options
             .plate
@@ -4359,6 +4366,7 @@ mod accessory_export_tests {
         std::fs::create_dir(home.path().join("state")).unwrap();
         let library = tempfile::tempdir().unwrap();
         let saved = Settings {
+            material_library: Default::default(),
             global_colors: Default::default(),
             appearance: appearance::Appearance::Dark,
             model_root: library.path().to_string_lossy().into(),

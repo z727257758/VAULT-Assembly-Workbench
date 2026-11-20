@@ -1404,16 +1404,6 @@ impl App {
         if self.busy || self.preview.has_pending() || self.scene.parts.is_empty() {
             return;
         }
-        if self.global_colors_draft.is_some() {
-            if let Some(error) = self.global_color_preview.error() {
-                let _ = std::fs::write(folder.join("combination-smoke-error.txt"), error);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-            if !self.global_color_preview.ready() {
-                return;
-            }
-        }
         self.smoke_frame += 1;
         if self.smoke_frame == 5 && self.smoke_stage == 0 {
             self.camera.fit(&self.scene, 0.);
@@ -1694,10 +1684,9 @@ impl App {
             22 => {
                 self.member_selection = (0..self.members.len()).collect();
                 self.batch_colors(true);
-                self.open_global_colors();
             }
             23 => {
-                let mut theme = self.global_colors_draft.take().unwrap();
+                let mut theme = self.global_colors.clone();
                 theme.roles.insert("body".into(), 4);
                 theme.roles.insert("accessory".into(), 2);
                 theme.roles.insert("text".into(), 1);
@@ -1735,45 +1724,11 @@ impl App {
             }
             28 => self.undo_workflow(ctx),
             29 => self.redo_workflow(ctx),
-            30 => {
-                self.open_global_colors();
-                self.global_color_preview
-                    .request(&self.catalog, &self.home, AssemblyKind::Drawer);
-                let draft = self.global_colors_draft.as_mut().unwrap();
-                draft.roles.insert("body".into(), 3);
-                draft.roles.insert("accessory".into(), 2);
-                draft
-                    .component_text
-                    .insert(crate::catalog::colors::component(crate::label::PATH), 6);
-                draft.component_text.insert(
-                    crate::catalog::colors::component(crate::label::SUSTAINER_PATH),
-                    6,
-                );
-            }
-            31 => self.global_color_preview.request(
-                &self.catalog,
-                &self.home,
-                AssemblyKind::Sustainer,
-            ),
-            32 | 34 => {
-                if let Err(e) = self.global_color_preview.smoke_select_exploded_label() {
-                    let _ = std::fs::write(folder.join("combination-smoke-error.txt"), e);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-            33 => {
-                self.global_color_preview
-                    .request(&self.catalog, &self.home, AssemblyKind::Drawer)
-            }
-            35 => {
-                self.global_color_preview.isolate = true;
-                self.global_color_preview.explode(1.);
-            }
             _ => {
                 let _ = std::fs::write(
                     folder.join("combination-smoke-result.txt"),
                     format!(
-                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; one assembly viewport with inline member editing; label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove; detailed overall colors with S3 drawer and box previews; exploded ray selection and isolated color editing. GPU: {}. Parts: {}",
+                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; one assembly viewport with inline member editing; label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
                         self.renderer.state.adapter.get_info().name,
                         self.scene.parts.len()
                     ),

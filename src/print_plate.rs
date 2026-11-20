@@ -1,7 +1,11 @@
 //! P1S print-bed packing and Bambu project settings. No assembly transforms.
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
+mod materials;
+pub use materials::{FilamentMaterial, MaterialLibrary};
 pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
+// The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
+const MAX_PROJECT_SLOTS: u32 = 32;
 pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
 fn generated_color_type(path: &str) -> Option<(&'static str, u32)> {
     let file = path
@@ -68,6 +72,8 @@ pub struct Config {
     pub palette: [[u8; 3]; 6],
     #[serde(default = "legacy_materials")]
     pub materials: [FilamentMaterial; 6],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_filaments: Vec<GroupAppearance>,
     pub part_filaments: std::collections::BTreeMap<String, u32>,
     pub preview_colors: bool,
     pub text_filaments: std::collections::BTreeMap<String, u32>,
@@ -95,6 +101,7 @@ impl Default for Config {
             filament: 1,
             palette: DEFAULT_PALETTE,
             materials: DEFAULT_MATERIALS,
+            extra_filaments: Vec::new(),
             part_filaments: Default::default(),
             preview_colors: false,
             text_filaments: Default::default(),
@@ -132,7 +139,8 @@ impl Config {
             || !(0.08..=0.28).contains(&self.layer)
             || !(1..=10).contains(&self.walls)
             || self.infill > 100
-            || !(1..=6).contains(&self.filament)
+            || self.slot_count() > MAX_PROJECT_SLOTS
+            || !(1..=self.slot_count()).contains(&self.filament)
             || self
                 .part_filaments
                 .values()
@@ -140,7 +148,7 @@ impl Config {
                 .chain(self.role_filaments.values())
                 .chain(self.component_filaments.values())
                 .chain(self.component_text_filaments.values())
-                .any(|slot| !(1..=6).contains(slot))
+                .any(|slot| !(1..=self.slot_count()).contains(slot))
         {
             return Err("无效的 P1S 打印或摆盘参数".into());
         }
@@ -171,7 +179,7 @@ impl Config {
                     .copied()
             })
             .unwrap_or(self.filament)
-            .clamp(1, 6)
+            .clamp(1, self.slot_count())
     }
     pub fn text_slot(&self, path: &str) -> u32 {
         assignment(&self.text_filaments, path)
@@ -182,18 +190,33 @@ impl Config {
             })
             .or_else(|| self.role_filaments.get("text").copied())
             .unwrap_or_else(|| self.slot(path))
-            .clamp(1, 6)
+            .clamp(1, self.slot_count())
     }
     pub fn slot_color(&self, slot: u32) -> [f32; 4] {
-        let [r, g, b] = self.palette[(slot.clamp(1, 6) - 1) as usize];
+        let [r, g, b] = self.appearance(slot).rgb;
         [r as f32 / 255., g as f32 / 255., b as f32 / 255., 1.]
     }
     pub fn color_hex(&self, slot: u32) -> String {
-        let [r, g, b] = self.palette[(slot.clamp(1, 6) - 1) as usize];
+        let [r, g, b] = self.appearance(slot).rgb;
         format!("#{r:02X}{g:02X}{b:02X}")
     }
     pub fn color(&self, path: &str) -> [f32; 4] {
         self.slot_color(self.slot(path))
+    }
+    pub fn slot_count(&self) -> u32 {
+        (self.palette.len() + self.extra_filaments.len()) as u32
+    }
+    pub fn appearance(&self, slot: u32) -> GroupAppearance {
+        slot_appearance(&self.palette, &self.materials, &self.extra_filaments, slot)
+    }
+    pub fn set_appearance(&mut self, slot: u32, appearance: GroupAppearance) {
+        write_slot(
+            &mut self.palette,
+            &mut self.materials,
+            &mut self.extra_filaments,
+            slot,
+            appearance,
+        );
     }
     pub fn project_json(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
@@ -231,7 +254,11 @@ impl Config {
         ] {
             d[key] = serde_json::Value::String(value);
         }
-        let colors: Vec<_> = (1..=6).map(|slot| self.color_hex(slot)).collect();
+        let count = self.slot_count();
+        if count > 6 {
+            materials::extend_project_slots(&mut d, count as usize)?;
+        }
+        let colors: Vec<_> = (1..=count).map(|slot| self.color_hex(slot)).collect();
         d["filament_colour"] = serde_json::json!(colors);
         d["filament_multi_colour"] = serde_json::json!(colors);
         let profiles: std::collections::BTreeMap<
@@ -239,10 +266,14 @@ impl Config {
             std::collections::BTreeMap<String, String>,
         > = serde_json::from_str(include_str!("../config/export/filament-overrides.json"))
             .map_err(|e| e.to_string())?;
-        for (i, material) in self.materials.iter().enumerate() {
-            if let Some(profile) = profiles.get(material.name()) {
+        for slot in 1..=count {
+            let material = self.appearance(slot).material;
+            if material != FilamentMaterial::PetgBasic && material != FilamentMaterial::PetgMatte {
+                let profile = profiles
+                    .get(material.name())
+                    .ok_or_else(|| format!("Missing embedded profile for {}", material.name()))?;
                 for (key, value) in profile {
-                    d[key][i] = serde_json::Value::String(value.clone());
+                    d[key][(slot - 1) as usize] = serde_json::Value::String(value.clone());
                 }
             }
         }
@@ -262,22 +293,6 @@ const DEFAULT_PALETTE: [[u8; 3]; 6] = [
     [246, 246, 243],
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FilamentMaterial {
-    PlaBasic,
-    PetgHf,
-    PetgBasic,
-}
-impl FilamentMaterial {
-    pub const ALL: [Self; 3] = [Self::PlaBasic, Self::PetgHf, Self::PetgBasic];
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::PlaBasic => "PLA Basic",
-            Self::PetgHf => "PETG HF",
-            Self::PetgBasic => "PETG Basic",
-        }
-    }
-}
 const DEFAULT_MATERIALS: [FilamentMaterial; 6] = [
     FilamentMaterial::PlaBasic,
     FilamentMaterial::PetgHf,
@@ -303,6 +318,53 @@ pub struct ColorGroup {
     pub components: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub slot: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_appearance: Option<GroupAppearance>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PaletteGroup {
+    Role(&'static str),
+    Custom(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupAppearance {
+    pub rgb: [u8; 3],
+    pub material: FilamentMaterial,
+}
+
+fn slot_appearance(
+    palette: &[[u8; 3]; 6],
+    materials: &[FilamentMaterial; 6],
+    extra: &[GroupAppearance],
+    slot: u32,
+) -> GroupAppearance {
+    let i = (slot as usize).clamp(1, palette.len() + extra.len()) - 1;
+    if i < palette.len() {
+        GroupAppearance {
+            rgb: palette[i],
+            material: materials[i],
+        }
+    } else {
+        extra[i - palette.len()]
+    }
+}
+
+fn write_slot(
+    palette: &mut [[u8; 3]; 6],
+    materials: &mut [FilamentMaterial; 6],
+    extra: &mut [GroupAppearance],
+    slot: u32,
+    appearance: GroupAppearance,
+) {
+    let i = (slot - 1) as usize;
+    if i < palette.len() {
+        palette[i] = appearance.rgb;
+        materials[i] = appearance.material;
+    } else {
+        extra[i - palette.len()] = appearance;
+    }
 }
 
 /// Color-only data: applying a theme must not overwrite plate or support settings.
@@ -313,6 +375,8 @@ pub struct ColorTheme {
     grouping_version: u8,
     pub palette: [[u8; 3]; 6],
     pub materials: [FilamentMaterial; 6],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_filaments: Vec<GroupAppearance>,
     pub filament: u32,
     pub roles: std::collections::BTreeMap<String, u32>,
     pub role_overrides: std::collections::BTreeMap<String, String>,
@@ -326,6 +390,7 @@ impl Default for ColorTheme {
             grouping_version: 1,
             palette: DEFAULT_PALETTE,
             materials: DEFAULT_MATERIALS,
+            extra_filaments: Vec::new(),
             filament: 1,
             roles: default_role_slots(),
             role_overrides: Default::default(),
@@ -345,6 +410,116 @@ impl ColorTheme {
     }
     pub fn role_slot(&self, role: &str) -> u32 {
         self.roles.get(role).copied().unwrap_or(self.filament)
+    }
+    pub fn slot_count(&self) -> u32 {
+        (self.palette.len() + self.extra_filaments.len()) as u32
+    }
+    pub fn appearance(&self, slot: u32) -> GroupAppearance {
+        slot_appearance(&self.palette, &self.materials, &self.extra_filaments, slot)
+    }
+    fn palette_group_slot(&self, group: PaletteGroup) -> u32 {
+        match group {
+            PaletteGroup::Role(role) => self.role_slot(role),
+            PaletteGroup::Custom(i) => self.groups[i].slot,
+        }
+    }
+    pub fn group_appearance(&self, group: PaletteGroup) -> GroupAppearance {
+        self.appearance(self.palette_group_slot(group))
+    }
+
+    /// Detach a shared slot when an edit would recolor another group or lettering.
+    pub fn set_group_appearance(
+        &mut self,
+        group: PaletteGroup,
+        appearance: GroupAppearance,
+    ) -> Result<(), String> {
+        self.check_group(group)?;
+        let old_slot = self.palette_group_slot(group);
+        let previous = self.appearance(old_slot);
+        if previous == appearance {
+            return Ok(());
+        }
+        let mut protected = std::collections::BTreeSet::from([self.filament]);
+        protected.extend(self.component_text.values().copied());
+        for (role, slot) in &self.roles {
+            if !matches!(group, PaletteGroup::Role(key) if key == role) {
+                protected.insert(*slot);
+            }
+        }
+        for (i, custom) in self.groups.iter().enumerate() {
+            if group != PaletteGroup::Custom(i) {
+                protected.insert(custom.slot);
+            }
+        }
+        let slots = 1..=self.slot_count();
+        let slot = if let Some(existing) = slots.clone().find(|&s| self.appearance(s) == appearance)
+        {
+            existing
+        } else if !protected.contains(&old_slot) {
+            old_slot
+        } else if let Some(free) = slots.into_iter().find(|s| !protected.contains(s)) {
+            free
+        } else {
+            if self.slot_count() >= MAX_PROJECT_SLOTS {
+                return Err("当前工程的 32 个耗材槽都已使用，请选择现有的材料和颜色组合。 / All 32 project filaments are in use. Choose an existing material and color.".into());
+            }
+            self.extra_filaments.push(appearance);
+            self.slot_count()
+        };
+        write_slot(
+            &mut self.palette,
+            &mut self.materials,
+            &mut self.extra_filaments,
+            slot,
+            appearance,
+        );
+        match group {
+            PaletteGroup::Role(role) => {
+                self.roles.insert(role.to_owned(), slot);
+            }
+            PaletteGroup::Custom(i) => {
+                self.groups[i].initial_appearance.get_or_insert(previous);
+                self.groups[i].slot = slot;
+            }
+        }
+        Ok(())
+    }
+    pub fn trim_unused_slots(&mut self) {
+        let last = self
+            .roles
+            .values()
+            .chain(self.component_text.values())
+            .copied()
+            .chain(self.groups.iter().map(|group| group.slot))
+            .fold(self.filament, u32::max);
+        self.extra_filaments
+            .truncate((last as usize).saturating_sub(self.palette.len()));
+    }
+    fn check_group(&self, group: PaletteGroup) -> Result<(), String> {
+        let exists = match group {
+            PaletteGroup::Role(role) => crate::catalog::colors::ROLES
+                .iter()
+                .any(|(id, _, _)| *id == role),
+            PaletteGroup::Custom(i) => i < self.groups.len(),
+        };
+        exists
+            .then_some(())
+            .ok_or_else(|| "颜色分组不存在 / Color group not found".into())
+    }
+    pub fn reset_group_appearance(&mut self, group: PaletteGroup) -> Result<(), String> {
+        self.check_group(group)?;
+        let original = match group {
+            PaletteGroup::Role(role) => slot_appearance(
+                &DEFAULT_PALETTE,
+                &DEFAULT_MATERIALS,
+                &[],
+                default_role_slots()[role],
+            ),
+            PaletteGroup::Custom(i) => self.groups[i]
+                .initial_appearance
+                .unwrap_or_else(|| self.group_appearance(group)),
+        };
+        self.set_group_appearance(group, original)
     }
     pub fn role_for(&self, path: &str) -> &str {
         self.role_overrides
@@ -366,7 +541,8 @@ impl ColorTheme {
                 .any(|(role, _, _)| *role == key)
         };
         if self.grouping_version != 1
-            || !(1..=6).contains(&self.filament)
+            || self.slot_count() > MAX_PROJECT_SLOTS
+            || !(1..=self.slot_count()).contains(&self.filament)
             || self
                 .role_overrides
                 .iter()
@@ -374,11 +550,10 @@ impl ColorTheme {
             || self
                 .component_text
                 .iter()
-                .any(|(key, slot)| key.is_empty() || !(1..=6).contains(slot))
-            || self
-                .roles
-                .iter()
-                .any(|(key, slot)| !(1..=6).contains(slot) || (key != "text" && !valid_role(key)))
+                .any(|(key, slot)| key.is_empty() || !(1..=self.slot_count()).contains(slot))
+            || self.roles.iter().any(|(key, slot)| {
+                !(1..=self.slot_count()).contains(slot) || (key != "text" && !valid_role(key))
+            })
         {
             return Err("无效的整体配色 / Invalid overall colors".into());
         }
@@ -389,7 +564,7 @@ impl ColorTheme {
             .collect();
         if self.groups.len() > 64
             || self.groups.iter().any(|group| {
-                !(1..=6).contains(&group.slot)
+                !(1..=self.slot_count()).contains(&group.slot)
                     || group.name.trim().is_empty()
                     || !names.insert(group.name.trim().to_lowercase())
                     || group.name.chars().count() > 48
@@ -407,6 +582,7 @@ impl ColorTheme {
     pub fn apply(&self, c: &mut Config) {
         c.palette = self.palette;
         c.materials = self.materials;
+        c.extra_filaments.clone_from(&self.extra_filaments);
         c.filament = self.filament;
         c.role_filaments = self.roles.clone();
         c.component_filaments = self
@@ -1087,7 +1263,7 @@ pub fn arrange_grouped_materials(
         let mut key = slots.clone();
         key.sort_unstable();
         key.dedup();
-        if key.is_empty() || key.iter().any(|s| !(1..=6).contains(s)) {
+        if key.is_empty() || key.iter().any(|s| !(1..=c.slot_count()).contains(s)) {
             return Err("无效耗材组合".into());
         }
         groups.entry((plate_groups[i], key)).or_default().push(i);
@@ -1926,6 +2102,85 @@ mod tests {
 #[cfg(test)]
 mod overall_color_tests {
     use super::*;
+
+    #[test]
+    fn card_edits_detach_shared_slots_and_restore_custom_groups_after_reopening() {
+        let mut theme = ColorTheme::default();
+        let body = PaletteGroup::Role("body");
+        let guides = PaletteGroup::Custom(0);
+        let path = "01. DRAWERS/07. Universal/Runners/x3 Runner Guide.stl";
+        let label = crate::label::PATH;
+        let original = theme.group_appearance(body);
+        theme.groups.push(ColorGroup {
+            name: "导轨".into(),
+            components: [crate::catalog::colors::component(path)].into(),
+            slot: theme.role_slot("body"),
+            initial_appearance: None,
+        });
+        theme
+            .component_text
+            .insert(crate::catalog::colors::component(label), 6);
+        let purple = GroupAppearance {
+            rgb: [113, 76, 164],
+            material: FilamentMaterial::PetgHf,
+        };
+        theme.set_group_appearance(guides, purple).unwrap();
+        assert_eq!(theme.group_appearance(body), original);
+        assert_eq!(theme.group_slot(path), 7);
+        assert_eq!(theme.slot_count(), 7);
+        let mut c = Config::default();
+        theme.apply(&mut c);
+        assert_eq!(c.appearance(c.slot(path)), purple);
+        assert_eq!(c.text_slot(label), 6);
+        assert_eq!(c.appearance(6).rgb, DEFAULT_PALETTE[5]);
+        arrange_materials(&[(path.into(), Vec3::splat(10.), 1)], &[vec![7]], &c).unwrap();
+        let mut saved: ColorTheme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
+        saved.reset_group_appearance(guides).unwrap();
+        assert_eq!(saved.group_appearance(guides), original);
+        assert_eq!(saved.group_appearance(body), original);
+        saved.trim_unused_slots();
+        assert_eq!(saved.slot_count(), 6);
+        saved.validate().unwrap();
+    }
+
+    #[test]
+    fn full_project_palette_can_share_existing_colors_or_edit_a_dedicated_slot() {
+        let mut theme = ColorTheme::default();
+        for slot in 1..=MAX_PROJECT_SLOTS {
+            if slot > 6 {
+                theme.extra_filaments.push(GroupAppearance {
+                    rgb: [slot as u8, 24, 198],
+                    material: FilamentMaterial::PlaBasic,
+                });
+            }
+            theme.groups.push(ColorGroup {
+                name: format!("Group {slot}"),
+                components: [format!("component-{slot}")].into(),
+                slot,
+                initial_appearance: None,
+            });
+        }
+        let gray = theme.appearance(3);
+        let new = GroupAppearance {
+            rgb: [103, 21, 126],
+            material: FilamentMaterial::PlaBasic,
+        };
+        let body = PaletteGroup::Role("body");
+        let original = theme.clone();
+        assert!(theme.set_group_appearance(body, new).is_err());
+        assert_eq!(theme, original);
+        theme.set_group_appearance(body, gray).unwrap();
+        theme
+            .set_group_appearance(PaletteGroup::Custom(31), new)
+            .unwrap();
+        assert_eq!(theme.slot_count(), MAX_PROJECT_SLOTS);
+        assert_eq!(theme.group_appearance(body), gray);
+        let mut config = Config::default();
+        theme.apply(&mut config);
+        config.validate().unwrap();
+        config.extra_filaments.push(new);
+        assert!(config.project_json().is_err());
+    }
 
     #[test]
     fn component_colors_persist_cross_sizes_and_allow_local_overrides() {
