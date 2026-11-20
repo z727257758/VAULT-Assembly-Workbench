@@ -155,7 +155,8 @@ pub(super) fn cube(ui: &mut egui::Ui, camera: &Camera, zh: bool) -> Option<Face>
 }
 
 pub(super) fn home(ui: &mut egui::Ui, zh: bool) -> bool {
-    let response = ui.add(egui::Button::new("").min_size(Vec2::splat(28.)));
+    let response =
+        ui.add(egui::Button::new("").min_size(Vec2::splat(ui.spacing().interact_size.y)));
     let label = t(zh, "恢复默认视角", "Reset to default view");
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let center = response.rect.center();
@@ -174,7 +175,7 @@ pub(super) fn home(ui: &mut egui::Ui, zh: bool) -> bool {
     .map(|(x, y)| pos2(center.x + x, center.y + y));
     ui.painter().add(egui::Shape::line(
         outline.to_vec(),
-        Stroke::new(1.3, ui.visuals().text_color()),
+        Stroke::new(1.3, ui.style().interact(&response).fg_stroke.color),
     ));
     response.on_hover_text(label).clicked()
 }

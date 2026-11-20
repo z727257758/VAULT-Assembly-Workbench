@@ -163,7 +163,7 @@ impl Editor {
                 if ui.add_enabled(!self.redo.is_empty(),egui::Button::new("重做")).clicked() {
                     changed|=self.history(layout,true);
                 }
-                if ui.add_enabled(layout.enabled || !layout.items.is_empty(),egui::Button::new("移除分隔配置")).clicked() {
+                if ui.add_enabled(layout.enabled || !layout.items.is_empty(), crate::ui_style::danger_button("移除分隔配置")).clicked() {
                     let next=Layout {specification:dividers::spec(s),..Default::default()};changed|=self.commit(layout,next,c,s);self.selected=None;
                 }
                 ui.separator();ui.label(format!("{} 块隔板",layout.items.len()));
@@ -183,7 +183,7 @@ impl Editor {
                 egui::ComboBox::from_id_salt("divider-length").width(175.).selected_text(self.path.rsplit('/').next().unwrap_or("选择型号")).show_ui(ui,|ui| {
                     for e in &choices {let n=dividers::code(&e.path).unwrap();ui.selectable_value(&mut self.path,e.path.clone(),format!("{} · {:.1} mm",e.name,n as f32*PITCH));}
                 });
-                if ui.button("添加隔板").clicked() {changed|=self.add(layout,c,s,g,None);}
+                if ui.add(crate::ui_style::primary_button("添加隔板")).clicked() {changed|=self.add(layout,c,s,g,None);}
                 if ui.toggle_value(&mut self.add_mode,"点击放置").changed() {self.error.clear();self.drag=None;}
                 if self.add_mode && ui.button("结束放置").clicked() {self.add_mode=false;self.error.clear();}
             });
@@ -206,7 +206,7 @@ impl Editor {
                 }
                 ui.add_enabled_ui(self.selected.is_some_and(|i|i<layout.items.len()),|ui| {
                     let i=self.selected.unwrap_or(0);
-                    if ui.button("删除选中").clicked() {let mut next=layout.clone();next.items.remove(i);changed|=self.commit(layout,next,c,s);self.selected=None;}
+                    if ui.add(crate::ui_style::danger_button("删除选中")).clicked() {let mut next=layout.clone();next.items.remove(i);changed|=self.commit(layout,next,c,s);self.selected=None;}
                     if ui.button("复制选中").clicked() {self.path=layout.items[i].path.clone();self.vertical=layout.items[i].vertical;changed|=self.add(layout,c,s,g,None);}
                     if ui.button("旋转 90°").clicked() {
                         let mut next=layout.clone();let p=&mut next.items[i];let n=dividers::code(&p.path).unwrap();
@@ -233,7 +233,8 @@ impl Editor {
             });
             if self.add_mode && ctx.input(|i|i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked()) {self.add_mode=false;self.error.clear();}
             let hint=if !self.error.is_empty() {self.error.as_str()} else if self.add_mode {"放置模式：绿色可放置，红色有冲突；点击连续添加，Esc / 右键退出。"} else {"选择模式：单击选中，拖动移动。点击放置开关可进入添加模式。"};
-            ui.add(egui::Label::new(egui::RichText::new(hint).color(if self.error.is_empty(){Color32::GRAY}else{Color32::LIGHT_RED})).truncate()).on_hover_text(hint);
+            let color = if self.error.is_empty() { ui.visuals().weak_text_color() } else { ui.visuals().error_fg_color };
+            ui.add(egui::Label::new(egui::RichText::new(hint).color(color)).truncate()).on_hover_text(hint);
             let available=Vec2::new(ui.available_width(),ui.available_height().clamp(260.,470.));
             let (canvas,response)=ui.allocate_exact_size(available,egui::Sense::click_and_drag());
             let margin=36.;let size=Vec2::new(g.right-g.left,g.front-g.rear);
@@ -243,8 +244,9 @@ impl Editor {
             let box_rect=Rect::from_min_max(to_screen(g.left,g.rear),to_screen(g.right,g.front));
             let paint=ui.painter();paint.rect_filled(box_rect,5.,Color32::from_rgb(32,43,52));
             paint.rect_stroke(box_rect,5.,Stroke::new(2.,Color32::GRAY),egui::StrokeKind::Inside);
-            paint.text(box_rect.center_top()-Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("{:.1} mm · 后部",size.x),egui::FontId::proportional(13.),Color32::WHITE);
-            paint.text(box_rect.center_bottom()+Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("前部 / 面板 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),Color32::WHITE);
+            let caption_color = ui.visuals().text_color();
+            paint.text(box_rect.center_top()-Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("{:.1} mm · 后部",size.x),egui::FontId::proportional(13.),caption_color);
+            paint.text(box_rect.center_bottom()+Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("前部 / 面板 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),caption_color);
             for y in 0..g.rows {for x in 0..g.cols {let p=g.point([x as f32,y as f32]);paint.circle_filled(to_screen(p[0],p[1]),1.8,Color32::from_gray(100));}}
             let mut hit=None;
             for (i,p) in layout.items.iter().enumerate() {

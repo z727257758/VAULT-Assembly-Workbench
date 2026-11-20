@@ -327,6 +327,16 @@ impl App {
             if self.smoke_frame < 4 {
                 return Ok(());
             }
+            // Native popups fade by elapsed time, so a fixed frame count can capture them mid-fade.
+            let settled_before = ctx.input(|i| i.time) - f64::from(ctx.style().animation_time);
+            let layers = ctx.memory(|m| m.areas().visible_layer_ids());
+            if layers.into_iter().any(|layer| {
+                egui::AreaState::load(ctx, layer.id)
+                    .and_then(|area| area.last_became_visible_at)
+                    .is_some_and(|shown| shown > settled_before)
+            }) {
+                return Ok(());
+            }
             let ui = painted(ctx);
             match self.smoke_stage {
                 0 => {

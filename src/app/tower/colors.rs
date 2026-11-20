@@ -226,11 +226,20 @@ fn edit_members(
         let valid =
             (!edit.keys.is_empty() || edit.original.is_some()) && edit.name_available(theme);
         let apply = ui
-            .add_enabled(valid, egui::Button::new(t(z, "保存分组", "Save group")))
+            .add_enabled(
+                valid,
+                crate::ui_style::primary_button(t(z, "保存分组", "Save group")),
+            )
             .clicked();
         let cancel = ui.button(t(z, "取消", "Cancel")).clicked();
-        let remove =
-            edit.original.is_some() && ui.button(t(z, "解散分组", "Remove group")).clicked();
+        let remove = edit.original.is_some()
+            && ui
+                .add(crate::ui_style::danger_button(t(
+                    z,
+                    "解散分组",
+                    "Remove group",
+                )))
+                .clicked();
         if remove {
             edit.keys.clear();
         }
@@ -270,7 +279,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         let open = app.tower.open_color.as_ref() == Some(&row.name);
         let result = ui
             .push_id(("group-card", &row.name), |ui| {
-                card::frame(ui, open)
+                crate::ui_style::card_frame(ui, open)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let appearance = draft.group_appearance(row.group);
@@ -326,7 +335,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     let editing_new = edit.as_ref().is_some_and(|edit| edit.original.is_none());
     if editing_new {
-        let response = card::frame(ui, true)
+        let response = crate::ui_style::card_frame(ui, true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.strong(t(z, "新建分组", "New group"));

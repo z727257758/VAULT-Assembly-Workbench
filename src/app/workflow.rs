@@ -130,7 +130,7 @@ impl App {
                         ) {
                             Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
                             Err(e) => {
-                                ui.colored_label(Color32::LIGHT_RED, e);
+                                ui.colored_label(ui.visuals().error_fg_color, e);
                             }
                         }
                     }
@@ -366,7 +366,7 @@ impl App {
             if ui
                 .add_enabled(
                     self.member_selection.len() < self.members.len(),
-                    egui::Button::new(t(z, "删除勾选成员", "Delete selected members")),
+                    crate::ui_style::danger_button(t(z, "删除勾选成员", "Delete selected members")),
                 )
                 .clicked()
             {

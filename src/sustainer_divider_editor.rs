@@ -82,7 +82,7 @@ impl Editor {
                 if ui.add_enabled(!self.redo.is_empty(),egui::Button::new("重做")).clicked() {
                     self.undo.push(layout.clone());*layout=self.redo.pop().unwrap();self.selected=None;changed=true;self.error.clear();
                 }
-                if ui.add_enabled(!layout.items.is_empty(),egui::Button::new("清空隔板")).clicked() {
+                if ui.add_enabled(!layout.items.is_empty(),crate::ui_style::danger_button("清空隔板")).clicked() {
                     changed|=self.commit(layout,Layout{specification:dividers::spec(s,o),..Default::default()});self.selected=None;
                 }
                 ui.label(format!("共 {} 块",layout.items.len()));
@@ -96,7 +96,7 @@ impl Editor {
                     ui.label("区域");
                     for lane in 0..g.lanes.len() {ui.selectable_value(&mut self.lane,lane,format!("{}",lane+1));}
                 }
-                if ui.button("添加隔板").clicked() {
+                if ui.add(crate::ui_style::primary_button("添加隔板")).clicked() {
                     let choices=g.choices(self.axis,self.lane);
                     let center=(choices.len().saturating_sub(1)) as f32/2.;
                     if let Some(p)=choices.into_iter().filter(|p|!layout.items.contains(p)).min_by(|a,b|((a.slot as f32-center).abs()).total_cmp(&(b.slot as f32-center).abs())) {
@@ -112,7 +112,7 @@ impl Editor {
                     for p in g.choices(self.axis,self.lane) {if !next.items.contains(&p){next.items.push(p);}}
                     changed|=self.commit(layout,next);
                 }
-                if ui.add_enabled(self.selected.is_some_and(|i|i<layout.items.len()),egui::Button::new("删除选中")).clicked() {
+                if ui.add_enabled(self.selected.is_some_and(|i|i<layout.items.len()),crate::ui_style::danger_button("删除选中")).clicked() {
                     let mut next=layout.clone();next.items.remove(self.selected.take().unwrap());changed|=self.commit(layout,next);
                 }
             });
@@ -126,7 +126,8 @@ impl Editor {
                 } else {ui.label("选择模式：点击选中隔板，拖动更换槽位。");}
             });
             let hint=if self.error.is_empty() {if self.add_mode {"放置模式：点击虚线槽位添加，Esc 退出。"}else{"关闭编辑器后恢复完整箱体视图。"}}else{&self.error};
-            ui.add(egui::Label::new(egui::RichText::new(hint).color(if self.error.is_empty(){Color32::GRAY}else{Color32::LIGHT_RED})).truncate()).on_hover_text(hint);
+            let color = if self.error.is_empty() { ui.visuals().weak_text_color() } else { ui.visuals().error_fg_color };
+            ui.add(egui::Label::new(egui::RichText::new(hint).color(color)).truncate()).on_hover_text(hint);
             if ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.add_mode=false;}
             let (canvas,response)=ui.allocate_exact_size(Vec2::new(ui.available_width(),ui.available_height().clamp(280.,440.)),egui::Sense::click_and_drag());
             let size=Vec2::new(g.bounds[2]-g.bounds[0],g.bounds[3]-g.bounds[1]);
@@ -137,8 +138,9 @@ impl Editor {
             let paint=ui.painter();
             paint.rect_filled(rect,3.,Color32::from_rgb(32,43,52));
             paint.rect_stroke(rect,3.,Stroke::new(2.,Color32::GRAY),egui::StrokeKind::Inside);
-            paint.text(rect.center_top()-Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("后部 · {:.1} mm",size.x),egui::FontId::proportional(13.),Color32::WHITE);
-            paint.text(rect.center_bottom()+Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("面板侧 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),Color32::WHITE);
+            let caption_color = ui.visuals().text_color();
+            paint.text(rect.center_top()-Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("后部 · {:.1} mm",size.x),egui::FontId::proportional(13.),caption_color);
+            paint.text(rect.center_bottom()+Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,format!("面板侧 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),caption_color);
             for lane in g.lanes.windows(2) {
                 paint.rect_filled(Rect::from_min_max(screen([lane[0][1],g.bounds[1]]),screen([lane[1][0],g.bounds[3]])),0.,Color32::GRAY);
             }

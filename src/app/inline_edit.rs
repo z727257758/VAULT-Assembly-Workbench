@@ -1,6 +1,7 @@
 //! One assembly viewport with a compact editor bound to a member/drawer identity.
 use super::*;
 use crate::scene::Target;
+use crate::ui_style;
 use glam::Vec3;
 
 #[cfg(test)]
@@ -404,43 +405,38 @@ impl App {
             .order(egui::Order::Foreground)
             .fixed_pos(rect.left_top() + egui::vec2(16., 106.))
             .show(ctx, |ui| {
-                appearance::floating_frame(ui)
-                    .inner_margin(14.)
-                    .show(ui, |ui| {
-                        ui.set_width(width);
-                        // The editor can grow as more options become visible above the view toolbar.
-                        ui.set_max_height((rect.bottom() - ui.max_rect().top() - 70.).max(0.));
-                        ui.horizontal(|ui| {
-                            ui.strong(format!(
-                                "{}{} · {}",
-                                self.selection.width, self.selection.depth, self.selection.height
-                            ));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    close = ui
-                                        .button("×")
-                                        .on_hover_text(t(
-                                            z,
-                                            "完成编辑，查看整体",
-                                            "Finish editing and view project",
-                                        ))
-                                        .clicked();
-                                    self.inline_motion_toggle_ui(ui, ctx);
-                                },
-                            );
+                ui_style::floating_frame(ui).show(ui, |ui| {
+                    ui.set_width(width);
+                    // The editor can grow as more options become visible above the view toolbar.
+                    ui.set_max_height((rect.bottom() - ui.max_rect().top() - 70.).max(0.));
+                    ui.horizontal(|ui| {
+                        ui.strong(format!(
+                            "{}{} · {}",
+                            self.selection.width, self.selection.depth, self.selection.height
+                        ));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close = ui
+                                .add(ui_style::quiet_button("×"))
+                                .on_hover_text(t(
+                                    z,
+                                    "完成编辑，查看整体",
+                                    "Finish editing and view project",
+                                ))
+                                .clicked();
+                            self.inline_motion_toggle_ui(ui, ctx);
                         });
-                        ui.add(
-                            egui::Label::new(RichText::new(self.editor_context()).small().weak())
-                                .truncate(),
-                        );
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("inline-member-scroll")
-                            .show(ui, |ui| {
-                                self.inline_contents_ui(ui, ctx);
-                            });
                     });
+                    ui.add(
+                        egui::Label::new(RichText::new(self.editor_context()).small().weak())
+                            .truncate(),
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("inline-member-scroll")
+                        .show(ui, |ui| {
+                            self.inline_contents_ui(ui, ctx);
+                        });
+                });
             });
         if close {
             self.close_inline_editor(ctx);
@@ -572,7 +568,7 @@ impl App {
                         if ui
                             .add_enabled(
                                 !self.sustainer_dividers.items.is_empty(),
-                                egui::Button::new(t(z, "移除全部", "Remove all")),
+                                ui_style::danger_button(t(z, "移除全部", "Remove all")),
                             )
                             .clicked()
                         {
@@ -665,7 +661,7 @@ impl App {
                     "Baseplates and dividers are exclusive. Switching removes the current insert.",
                 ))
                 .small()
-                .color(Color32::GRAY),
+                .weak(),
             );
             }
             if mode == 2 {
@@ -680,7 +676,10 @@ impl App {
                         if ui.button(label).clicked() {
                             self.divider_editor.open = true;
                         }
-                        if ui.button(t(z, "移除", "Remove")).clicked() {
+                        if ui
+                            .add(ui_style::danger_button(t(z, "移除", "Remove")))
+                            .clicked()
+                        {
                             self.remove_dividers(ctx);
                         }
                     });
@@ -746,7 +745,7 @@ impl App {
                     });
                 }
                 if let Some(error) = &self.gridfinity_error {
-                    ui.colored_label(Color32::LIGHT_RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.add_space(6.);
                 option_row(ui, t(z, "收纳盒", "Bins"), |ui| {
@@ -762,7 +761,9 @@ impl App {
                             self.open_bin_editor(ctx);
                         }
                         if !self.gridfinity.bins.is_empty()
-                            && ui.button(t(z, "移除全部", "Remove all")).clicked()
+                            && ui
+                                .add(ui_style::danger_button(t(z, "移除全部", "Remove all")))
+                                .clicked()
                         {
                             self.gridfinity.bins.clear();
                             self.assembly(ctx);

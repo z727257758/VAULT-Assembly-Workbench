@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui_style;
 
 impl App {
     pub(super) fn choose_library(&mut self, ctx: &egui::Context) {
@@ -17,11 +18,10 @@ impl App {
     pub(super) fn workspace_toolbar(&mut self, ctx: &egui::Context) {
         let z = self.zh;
         egui::TopBottomPanel::top("workspace-toolbar")
-            .frame(
-                egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(egui::Margin::symmetric(16, 8)),
-            )
+            .frame(ui_style::panel_frame(
+                &ctx.style(),
+                egui::Margin::symmetric(16, 8),
+            ))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let tools_width = if z { 240. } else { 300. };
@@ -67,10 +67,7 @@ impl App {
                             )
                         };
                         if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(RichText::new(label).small()).frame(false),
-                            )
+                            .add_enabled(!self.busy, ui_style::quiet_button(label))
                             .on_hover_text(self.last_model_root.display().to_string())
                             .clicked()
                         {
@@ -131,23 +128,7 @@ impl App {
                 } else {
                     title.into()
                 };
-                let text = RichText::new(title).strong().color(if selected {
-                    ui.visuals().text_color()
-                } else {
-                    ui.visuals().weak_text_color()
-                });
-                let response = ui.add(egui::Button::new(text).frame(false));
-                if selected {
-                    let y = response.rect.bottom();
-                    ui.painter().line_segment(
-                        [
-                            egui::pos2(response.rect.left() + 5., y),
-                            egui::pos2(response.rect.right() - 5., y),
-                        ],
-                        egui::Stroke::new(2., ui.visuals().text_color()),
-                    );
-                }
-                if response.clicked() {
+                if ui.add(ui_style::choice_button(selected, title)).clicked() {
                     self.tab = tab;
                     if tab == 0 {
                         self.tower.print_list = print;
@@ -162,7 +143,7 @@ impl App {
                     if ui
                         .add_enabled(
                             !self.bom.is_empty(),
-                            egui::Button::new(t(z, "配色…", "Colors…")).frame(false),
+                            ui_style::quiet_button(t(z, "配色…", "Colors…")),
                         )
                         .clicked()
                     {
@@ -195,14 +176,13 @@ impl App {
 
     pub(super) fn member_footer_panel(&mut self, ui: &mut egui::Ui) {
         egui::TopBottomPanel::bottom("member-summary")
-            .frame(
-                egui::Frame::new()
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin {
-                        top: 8,
-                        ..Default::default()
-                    }),
-            )
+            .frame(ui_style::panel_frame(
+                ui.style(),
+                egui::Margin {
+                    top: 8,
+                    ..Default::default()
+                },
+            ))
             .show_inside(ui, |ui| {
                 let z = self.zh;
                 ui.separator();
@@ -242,11 +222,7 @@ impl App {
                     if ui
                         .add_enabled(
                             files > 0,
-                            egui::Button::new(
-                                RichText::new(t(z, "导出当前模块…", "Export module…"))
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(appearance::BRAND),
+                            ui_style::primary_button(t(z, "导出当前模块…", "Export module…")),
                         )
                         .clicked()
                     {
@@ -280,58 +256,58 @@ impl App {
             .order(egui::Order::Middle)
             .fixed_pos(rect.left_top() + egui::vec2(16., 16.))
             .show(ctx, |ui| {
-                appearance::floating_frame(ui)
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.set_max_width((rect.width() - 280.).clamp(130., 280.));
-                        let name = if self.combination_view {
-                            &self.tower.name
-                        } else if self.scene.title.is_empty() {
-                            crate::app_name(z)
-                        } else {
-                            &self.scene.title
-                        };
-                        ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
-                        ui.horizontal(|ui| {
-                            if self.busy || self.preview.has_pending() {
-                                ui.spinner();
-                            }
-                            ui.small(if self.busy || self.preview.has_pending() {
-                                t(z, "正在更新预览…", "Updating preview…")
-                            } else {
-                                match self.preview_modes.mode {
-                                    preview_modes::Mode::Plates => {
-                                        t(z, "打印板预览", "Print plate preview")
-                                    }
-                                    preview_modes::Mode::Layers => {
-                                        t(z, "分层预览", "Layer preview")
-                                    }
-                                    _ => t(z, "三维装配预览", "3D assembly preview"),
-                                }
-                            });
-                        });
-                        if !self.busy
-                            && !self.preview.has_pending()
-                            && self.failed_preview.is_some()
-                        {
-                            ui.colored_label(
-                                ui.visuals().error_fg_color,
-                                t(z, "预览更新失败", "Preview update failed"),
-                            )
-                            .on_hover_text(&self.status);
-                            if ui.small_button(t(z, "重试", "Retry")).clicked() {
-                                self.assembly(ctx);
-                            }
+                ui_style::floating_frame(ui).show(ui, |ui| {
+                    ui.set_max_width((rect.width() - 280.).clamp(130., 280.));
+                    let name = if self.combination_view {
+                        &self.tower.name
+                    } else if self.scene.title.is_empty() {
+                        crate::app_name(z)
+                    } else {
+                        &self.scene.title
+                    };
+                    ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                    ui.horizontal(|ui| {
+                        if self.busy || self.preview.has_pending() {
+                            ui.spinner();
                         }
-                        if !self.scene.assembly
-                            && !self.bom.is_empty()
-                            && ui
-                                .small_button(t(z, "← 装配预览", "← Assembly view"))
-                                .clicked()
+                        ui.small(if self.busy || self.preview.has_pending() {
+                            t(z, "正在更新预览…", "Updating preview…")
+                        } else {
+                            match self.preview_modes.mode {
+                                preview_modes::Mode::Plates => {
+                                    t(z, "打印板预览", "Print plate preview")
+                                }
+                                preview_modes::Mode::Layers => t(z, "分层预览", "Layer preview"),
+                                _ => t(z, "三维装配预览", "3D assembly preview"),
+                            }
+                        });
+                    });
+                    if !self.busy && !self.preview.has_pending() && self.failed_preview.is_some() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            t(z, "预览更新失败", "Preview update failed"),
+                        )
+                        .on_hover_text(&self.status);
+                        if ui
+                            .add(ui_style::quiet_button(t(z, "重试", "Retry")))
+                            .clicked()
                         {
                             self.assembly(ctx);
                         }
-                    });
+                    }
+                    if !self.scene.assembly
+                        && !self.bom.is_empty()
+                        && ui
+                            .add(ui_style::quiet_button(t(
+                                z,
+                                "← 装配预览",
+                                "← Assembly view",
+                            )))
+                            .clicked()
+                    {
+                        self.assembly(ctx);
+                    }
+                });
             });
         let tools = egui::Area::new(egui::Id::new("stage-view-tools"))
             .order(egui::Order::Middle)
@@ -340,7 +316,7 @@ impl App {
                 rect.right_top() + egui::vec2(-16., if rect.width() < 580. { 94. } else { 16. }),
             )
             .show(ctx, |ui| {
-                appearance::floating_frame(ui).show(ui, |ui| {
+                ui_style::floating_frame(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.menu_button(t(z, "视图", "View"), |ui| {
                             if ui.button(t(z, "立体", "Orbit")).clicked() {
@@ -424,56 +400,55 @@ impl App {
     pub(super) fn workspace_empty(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         let bounds = ui.max_rect();
-        let card = egui::Rect::from_center_size(bounds.center(), egui::vec2(420., 240.));
+        let card = egui::Rect::from_center_size(
+            bounds.center(),
+            bounds.size().min(egui::vec2(420., 240.)),
+        );
         ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(22.);
-                ui.label(
-                    RichText::new(t(
+            ui_style::card_frame(ui, false).show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.);
+                    ui.heading(t(
                         z,
                         "从一个抽屉，搭出你的收纳塔",
                         "Build your storage, one layer at a time",
-                    ))
-                    .size(22.)
-                    .strong(),
-                );
-                ui.add_space(8.);
-                ui.label(
-                    RichText::new(t(
-                        z,
-                        "关联本地 VAULT 模型库，即可配置、预览和导出。",
-                        "Link your local VAULT library to configure, preview and export.",
-                    ))
-                    .weak(),
-                );
-                ui.add_space(16.);
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new(
-                            RichText::new(t(z, "打开模型库", "Open model library"))
-                                .color(Color32::WHITE),
-                        )
-                        .fill(appearance::BRAND)
-                        .min_size(egui::vec2(160., 40.)),
-                    )
-                    .clicked()
-                {
-                    self.choose_library(ctx);
-                }
-                ui.add_space(12.);
-                ui.small(t(
-                    z,
-                    "模型保留在原目录，只读使用。",
-                    "Your source models stay in their original folder, read-only.",
-                ));
-                if self.busy {
-                    ui.spinner();
-                }
-                if !self.status.is_empty() {
+                    ));
                     ui.add_space(8.);
-                    ui.small(&self.status);
-                }
+                    ui.label(
+                        RichText::new(t(
+                            z,
+                            "关联本地 VAULT 模型库，即可配置、预览和导出。",
+                            "Link your local VAULT library to configure, preview and export.",
+                        ))
+                        .weak(),
+                    );
+                    ui.add_space(16.);
+                    if ui
+                        .add_enabled_ui(!self.busy, |ui| {
+                            ui.add_sized(
+                                [160., 40.],
+                                ui_style::primary_button(t(z, "打开模型库", "Open model library")),
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.choose_library(ctx);
+                    }
+                    ui.add_space(12.);
+                    ui.small(t(
+                        z,
+                        "模型保留在原目录，只读使用。",
+                        "Your source models stay in their original folder, read-only.",
+                    ));
+                    if self.busy {
+                        ui.spinner();
+                    }
+                    if !self.status.is_empty() {
+                        ui.add_space(8.);
+                        ui.small(&self.status);
+                    }
+                });
             });
         });
     }

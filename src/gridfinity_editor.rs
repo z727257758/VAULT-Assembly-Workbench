@@ -148,7 +148,9 @@ impl Editor {
                     .iter()
                     .any(|bin| bin.span[1] != settings.depth_cells)
                 {
-                    apply_depth = ui.small_button("应用到全部").clicked();
+                    apply_depth = ui
+                        .add(crate::ui_style::quiet_button("应用到全部"))
+                        .clicked();
                 }
                 ui.checkbox(&mut settings.auto_height, "自动高度");
                 if !settings.auto_height {
@@ -209,7 +211,10 @@ impl Editor {
             self.shared_error = layout.set_uniform_depth(settings.depth_cells, s).err();
         }
         if let Some(error) = &self.shared_error {
-            ui.colored_label(Color32::LIGHT_RED, format!("统一配置未修改：{error}"));
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("统一配置未修改：{error}"),
+            );
         }
     }
     pub fn cancel(&mut self) {

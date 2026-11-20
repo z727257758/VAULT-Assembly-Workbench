@@ -274,7 +274,7 @@ impl App {
             .fixed_pos(rect.center_bottom() - egui::vec2(0., 40.))
             .show(ctx, |ui| {
                 ui.set_max_width((rect.width() - 48.).min(540.));
-                appearance::floating_frame(ui).show(ui, |ui| {
+                crate::ui_style::floating_frame(ui).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         for (mode, label) in [
                             (Mode::Assembly, t(z, "整体", "Assembly")),
@@ -575,7 +575,7 @@ impl App {
         let restored_camera = self.pump_print_layout(ctx);
         if let Some(error) = &self.preview_modes.error {
             ui.centered_and_justified(|ui| {
-                appearance::floating_frame(ui).show(ui, |ui| {
+                crate::ui_style::floating_frame(ui).show(ui, |ui| {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                     if ui.button(t(z, "重新计算", "Retry")).clicked() {
                         self.preview_modes.key.clear();
@@ -586,7 +586,7 @@ impl App {
         }
         let Some(mut layout) = self.preview_modes.layout.take() else {
             ui.centered_and_justified(|ui| {
-                appearance::floating_frame(ui).show(ui, |ui| {
+                crate::ui_style::floating_frame(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(t(z, "正在准备打印板…", "Preparing print plates…"));
@@ -719,8 +719,8 @@ fn hint(ui: &egui::Ui, rect: egui::Rect, z: bool) {
             "拖动旋转 · 右键平移 · 滚轮缩放 · 双击适配",
             "Drag orbit · Right drag pan · Scroll zoom · Double-click fit",
         ),
-        egui::FontId::proportional(12.),
-        Color32::GRAY,
+        egui::TextStyle::Small.resolve(ui.style()),
+        ui.visuals().weak_text_color(),
     );
 }
 fn paint_plate_titles(
@@ -862,7 +862,6 @@ fn paint_plate_numbers(
         2. * half_diagonal / rect.width(),
         2. * half_diagonal / rect.height(),
     );
-    let dark = ui.visuals().dark_mode;
     for (i, plate) in layout.plates.iter().enumerate() {
         if filter.is_some_and(|selected| selected != i) {
             continue;
@@ -883,11 +882,10 @@ fn paint_plate_numbers(
         }) {
             continue;
         }
-        let ink = match (i == active_plate, dark) {
-            (true, true) => Color32::from_rgb(95, 218, 136),
-            (true, false) => Color32::from_rgb(0, 125, 53),
-            (false, true) => Color32::from_gray(194),
-            (false, false) => Color32::from_gray(82),
+        let ink = if i == active_plate {
+            ui.visuals().hyperlink_color
+        } else {
+            ui.visuals().weak_text_color()
         };
         let galley = painter.layout_no_wrap(
             format!("{:02}", i + 1),
@@ -934,7 +932,7 @@ fn outline(ui: &egui::Ui, rect: egui::Rect, camera: &Camera, part: &crate::scene
             if i < j
                 && let (Some(a), Some(b)) = (points[i], points[j])
             {
-                painter.line_segment([a, b], egui::Stroke::new(1.5, Color32::LIGHT_BLUE));
+                painter.line_segment([a, b], egui::Stroke::new(1.5, ui.visuals().hyperlink_color));
             }
         }
     }

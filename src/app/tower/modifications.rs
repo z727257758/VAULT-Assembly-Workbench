@@ -74,51 +74,44 @@ fn cards(
             .as_ref()
             .is_ok_and(|plan| !plan.supports.iter().any(|support| support.contains(&index)));
         ui.push_id(("rear-modification", index), |ui| {
-            layers::card_frame(ui, true)
-                .inner_margin(4.)
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(32.);
-                        ui.add_space(4.);
-                        let accessories = t(z, "其他配件…", "Other accessories…");
-                        let icon = rear_icon(ui, egui::Sense::click()).on_hover_text(accessories);
-                        icon.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessories)
-                        });
-                        if icon.clicked() {
-                            *action = Some(Action::Accessories(index));
-                        }
-                        ui.strong(t(z, "背面", "Rear"));
-                        ui.label(RichText::new(rear_name(kind, z)).weak());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if layers::icon_button(
-                                ui,
-                                layers::Icon::Delete,
-                                true,
-                                t(z, "移除背面改装", "Remove rear modification"),
-                            )
-                            .clicked()
-                            {
-                                set_rear(&mut draft, None);
-                            }
-                            if members.len() > 1 {
-                                let label = member_label(member, z);
-                                ui.add(
-                                    egui::Label::new(RichText::new(&label).small().weak())
-                                        .truncate(),
-                                )
-                                .on_hover_text(label);
-                            }
-                        });
+            crate::ui_style::card_frame(ui, true).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.set_min_height(32.);
+                    ui.add_space(4.);
+                    let accessories = t(z, "其他配件…", "Other accessories…");
+                    let icon = rear_icon(ui, egui::Sense::click()).on_hover_text(accessories);
+                    icon.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessories)
                     });
-                    egui::Frame::new()
-                        .fill(ui.visuals().faint_bg_color)
-                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                        .corner_radius(9.)
-                        .inner_margin(egui::Margin::symmetric(4, 5))
-                        .show(ui, |ui| rear_controls(ui, member, &mut draft, kind, top, z));
+                    if icon.clicked() {
+                        *action = Some(Action::Accessories(index));
+                    }
+                    ui.strong(t(z, "背面", "Rear"));
+                    ui.label(RichText::new(rear_name(kind, z)).weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if layers::icon_button(
+                            ui,
+                            layers::Icon::Delete,
+                            true,
+                            t(z, "移除背面改装", "Remove rear modification"),
+                        )
+                        .clicked()
+                        {
+                            set_rear(&mut draft, None);
+                        }
+                        if members.len() > 1 {
+                            let label = member_label(member, z);
+                            ui.add(
+                                egui::Label::new(RichText::new(&label).small().weak()).truncate(),
+                            )
+                            .on_hover_text(label);
+                        }
+                    });
                 });
+                crate::ui_style::inset_frame(ui)
+                    .show(ui, |ui| rear_controls(ui, member, &mut draft, kind, top, z));
+            });
         });
         ui.add_space(5.);
         if draft != member.exterior {
@@ -180,65 +173,53 @@ fn rear_controls(
 ) {
     ui.spacing_mut().item_spacing.y = 2.;
     let mut selected = kind;
-    control_row(
-        ui,
-        t(z, "类型", "Type"),
-        if z { 86. } else { 150. },
-        34.,
+    ui.add_enabled_ui(
+        Rear::Backbone.available(member) && Rear::Wall.available(member),
         |ui| {
-            ui.add_enabled_ui(
-                Rear::Backbone.available(member) && Rear::Wall.available(member),
-                |ui| {
-                    segmented(
-                        ui,
-                        &mut selected,
-                        &[
-                            (Rear::Backbone, rear_name(Rear::Backbone, z)),
-                            (Rear::Wall, rear_name(Rear::Wall, z)),
-                        ],
-                    );
-                },
-            )
-            .response
-            .on_disabled_hover_text(t(
-                z,
-                "4F 无背板安装位；带底座的成员无法挂墙。",
-                "4F has no backbone mount. Wall mounting requires a member without a base.",
-            ));
+            layers::choice_row(
+                ui,
+                t(z, "类型", "Type"),
+                if z { 104. } else { 184. },
+                &mut selected,
+                &[
+                    (Rear::Backbone, rear_name(Rear::Backbone, z)),
+                    (Rear::Wall, rear_name(Rear::Wall, z)),
+                ],
+            );
         },
-    );
+    )
+    .response
+    .on_disabled_hover_text(t(
+        z,
+        "4F 无背板安装位；带底座的成员无法挂墙。",
+        "4F has no backbone mount. Wall mounting requires a member without a base.",
+    ));
     if selected != kind {
         set_rear(draft, Some(selected));
     }
     if rear(draft) != Some(Rear::Backbone) {
         return;
     }
-    control_row(
-        ui,
-        t(z, "洞洞板挂件", "Pegboard"),
-        if z { 132. } else { 144. },
-        34.,
-        |ui| {
-            ui.add_enabled_ui(!draft.pull_handle && !draft.stationary_handle, |ui| {
-                segmented(
-                    ui,
-                    &mut draft.board,
-                    &[
-                        (Board::None, t(z, "无", "None")),
-                        (Board::Ikea, "IKEA"),
-                        (Board::Ussa, "USSA"),
-                    ],
-                );
-            })
-            .response
-            .on_disabled_hover_text(t(
-                z,
-                "洞洞板挂件与把手共用安装位。",
-                "Pegboard mounts and handles share the mounting points.",
-            ));
-        },
-    );
-    switch(
+    ui.add_enabled_ui(!draft.pull_handle && !draft.stationary_handle, |ui| {
+        layers::choice_row(
+            ui,
+            t(z, "洞洞板挂件", "Pegboard"),
+            158.,
+            &mut draft.board,
+            &[
+                (Board::None, t(z, "无", "None")),
+                (Board::Ikea, "IKEA"),
+                (Board::Ussa, "USSA"),
+            ],
+        );
+    })
+    .response
+    .on_disabled_hover_text(t(
+        z,
+        "洞洞板挂件与把手共用安装位。",
+        "Pegboard mounts and handles share the mounting points.",
+    ));
+    option_checkbox(
         ui,
         t(z, "拉杆", "Pull handle"),
         &mut draft.pull_handle,
@@ -254,7 +235,7 @@ fn rear_controls(
     if !draft.pull_handle {
         draft.pull_extension = 0.;
     }
-    switch(
+    option_checkbox(
         ui,
         t(z, "固定把手", "Fixed handle"),
         &mut draft.stationary_handle,
@@ -330,130 +311,7 @@ fn rear_icon(ui: &mut egui::Ui, sense: egui::Sense) -> egui::Response {
     }
 }
 
-fn control_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    width: f32,
-    height: f32,
-    controls: impl FnOnce(&mut egui::Ui),
-) {
-    let (row, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
-    ui.painter().text(
-        row.left_center(),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::TextStyle::Body.resolve(ui.style()),
-        ui.visuals().weak_text_color(),
-    );
-    let right = egui::Rect::from_min_max(
-        egui::pos2((row.right() - width).max(row.left()), row.top()),
-        row.right_bottom(),
-    );
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt(label)
-            .max_rect(right)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    controls(&mut child);
-}
-
-fn segmented<T: PartialEq + Clone>(ui: &mut egui::Ui, value: &mut T, choices: &[(T, &str)]) {
-    let track = ui.available_rect_before_wrap().shrink2(egui::vec2(0., 1.));
-    let visuals = ui.visuals();
-    ui.painter().rect(
-        track,
-        8.,
-        Color32::from_gray(if visuals.dark_mode { 52 } else { 233 }),
-        visuals.widgets.noninteractive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-    let content = track.shrink(3.);
-    let segment = content.width() / choices.len() as f32;
-    for (index, (choice, label)) in choices.iter().enumerate() {
-        let rect = egui::Rect::from_min_size(
-            content.min + egui::vec2(segment * index as f32, 0.),
-            egui::vec2(segment, content.height()),
-        )
-        .shrink2(egui::vec2(0.7, 0.));
-        let selected = value == choice;
-        let response = ui.interact(rect, ui.make_persistent_id(index), egui::Sense::click());
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
-                ui.is_enabled(),
-                selected,
-                *label,
-            )
-        });
-        if selected || response.hovered() || response.has_focus() {
-            ui.painter().rect(
-                rect,
-                6.,
-                ui.visuals().panel_fill,
-                ui.visuals().widgets.noninteractive.bg_stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        let color = if ui.is_enabled() && selected {
-            ui.visuals().text_color()
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            *label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            color,
-        );
-        if response.clicked() {
-            *value = choice.clone();
-        }
-    }
-}
-
-fn switch(ui: &mut egui::Ui, label: &str, value: &mut bool, enabled: bool, hint: &str) {
-    control_row(ui, label, 36., 34., |ui| {
-        ui.add_enabled_ui(enabled || *value, |ui| {
-            let response = ui.add(
-                egui::Button::new("")
-                    .frame(false)
-                    .min_size(egui::vec2(36., 20.)),
-            );
-            if response.clicked() {
-                *value = !*value;
-            }
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::Checkbox,
-                    ui.is_enabled(),
-                    *value,
-                    label,
-                )
-            });
-            let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(36., 20.));
-            let fill = if *value {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().weak_text_color().gamma_multiply(0.6)
-            };
-            let knob = egui::pos2(
-                if *value {
-                    rect.right() - 10.
-                } else {
-                    rect.left() + 10.
-                },
-                rect.center().y,
-            );
-            ui.painter().rect_filled(rect, 10., fill);
-            ui.painter()
-                .circle_filled(knob, 8., ui.visuals().panel_fill);
-        })
-        .response
+fn option_checkbox(ui: &mut egui::Ui, label: &str, value: &mut bool, enabled: bool, hint: &str) {
+    ui.add_enabled(enabled || *value, egui::Checkbox::new(value, label))
         .on_disabled_hover_text(hint);
-    });
 }

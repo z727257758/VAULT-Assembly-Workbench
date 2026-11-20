@@ -197,7 +197,7 @@ impl App {
             .order(egui::Order::Foreground)
             .fixed_pos(rect.left_top() + egui::vec2(8., 8.))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                crate::ui_style::floating_frame(ui).show(ui, |ui| {
                     ui.set_max_width((rect.width() - 32.).max(140.));
                     if let Some(source) = self.combination_move_source {
                         ui.strong(format!(
@@ -252,14 +252,20 @@ impl App {
                             if ui
                                 .add_enabled(
                                     self.members.len() > 1,
-                                    egui::Button::new(t(z, "删除", "Remove")),
+                                    crate::ui_style::danger_button(t(z, "删除", "Remove")),
                                 )
                                 .clicked()
                             {
                                 self.remove_member(ctx);
                             }
                             if pair.len() == 2
-                                && ui.button(t(z, "删除配对", "Remove pair")).clicked()
+                                && ui
+                                    .add(crate::ui_style::danger_button(t(
+                                        z,
+                                        "删除配对",
+                                        "Remove pair",
+                                    )))
+                                    .clicked()
                             {
                                 self.remove_members(&pair, ctx);
                             }
@@ -307,7 +313,7 @@ impl App {
                 .order(egui::Order::Foreground)
                 .fixed_pos(pos)
                 .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    crate::ui_style::floating_frame(ui).show(ui, |ui| {
                         if let Some(source) = self.combination_move_source {
                             let pair = paired_members(&self.members, source);
                             if ui

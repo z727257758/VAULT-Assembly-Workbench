@@ -393,7 +393,6 @@ pub(crate) fn stroke_check_ui(ui: &mut eframe::egui::Ui, config: &Config) {
     stroke_check_label_ui(ui, config, PATH);
 }
 pub(crate) fn stroke_check_label_ui(ui: &mut eframe::egui::Ui, config: &Config, path: &str) {
-    use eframe::egui;
     use std::sync::Mutex;
     let half_width: f64 = if path == SUSTAINER_PATH { 16. } else { 19. };
     let id = ui.id().with(("stroke-width-check", half_width.to_bits()));
@@ -417,7 +416,10 @@ pub(crate) fn stroke_check_label_ui(ui: &mut eframe::egui::Ui, config: &Config, 
                 ui.small(report);
             }
             Err(error) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, format!("笔画检查失败：{error}"));
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("笔画检查失败：{error}"),
+                );
             }
         }
         return;

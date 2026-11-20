@@ -8,133 +8,14 @@ pub(super) enum Appearance {
     Dark,
 }
 
-pub(super) const BRAND: Color32 = Color32::from_rgb(47, 125, 79);
-
 impl Appearance {
     pub fn apply(self, ctx: &egui::Context) {
-        let dark = self == Self::Dark;
-        ctx.set_theme(if dark {
-            egui::Theme::Dark
-        } else {
-            egui::Theme::Light
-        });
-        let mut style = (*ctx.style()).clone();
-        let mut visuals = if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
+        let theme = match self {
+            Self::Light => egui::Theme::Light,
+            Self::Dark => egui::Theme::Dark,
         };
-        let surface = if dark {
-            Color32::from_gray(17)
-        } else {
-            Color32::WHITE
-        };
-        let subtle = if dark {
-            Color32::from_gray(25)
-        } else {
-            Color32::from_gray(247)
-        };
-        let border = if dark {
-            Color32::from_gray(56)
-        } else {
-            Color32::from_gray(212)
-        };
-        let text = if dark {
-            Color32::from_gray(245)
-        } else {
-            Color32::from_gray(20)
-        };
-        visuals.panel_fill = surface;
-        visuals.window_fill = surface;
-        visuals.extreme_bg_color = if dark {
-            Color32::from_rgb(43, 50, 46)
-        } else {
-            Color32::from_rgb(226, 232, 228)
-        };
-        visuals.faint_bg_color = subtle;
-        visuals.hyperlink_color = if dark {
-            Color32::from_rgb(127, 209, 159)
-        } else {
-            BRAND
-        };
-        visuals.selection.bg_fill = if dark {
-            Color32::from_rgb(51, 108, 72)
-        } else {
-            Color32::from_rgb(136, 193, 155)
-        };
-        visuals.selection.stroke = egui::Stroke::new(1., text);
-        visuals.slider_trailing_fill = true;
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., border);
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1., text);
-        for widget in [
-            &mut visuals.widgets.inactive,
-            &mut visuals.widgets.hovered,
-            &mut visuals.widgets.active,
-        ] {
-            widget.corner_radius = egui::CornerRadius::same(6);
-            widget.fg_stroke = egui::Stroke::new(1., text);
-        }
-        visuals.widgets.inactive.bg_fill = border;
-        visuals.widgets.inactive.weak_bg_fill = subtle;
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1., border);
-        visuals.widgets.hovered.bg_fill = if dark {
-            Color32::from_gray(44)
-        } else {
-            Color32::from_gray(239)
-        };
-        visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., text.gamma_multiply(0.5));
-        visuals.widgets.hovered.fg_stroke.color = visuals.hyperlink_color;
-        visuals.widgets.active.bg_fill = visuals.selection.bg_fill;
-        visuals.widgets.active.weak_bg_fill = visuals.selection.bg_fill;
-        visuals.widgets.active.fg_stroke.color = if dark {
-            Color32::from_rgb(193, 240, 208)
-        } else {
-            Color32::from_rgb(24, 67, 40)
-        };
-        visuals.window_corner_radius = egui::CornerRadius::same(12);
-        style.visuals = visuals;
-        style.spacing.item_spacing = egui::vec2(8., 8.);
-        style.spacing.button_padding = egui::vec2(10., 6.);
-        style.spacing.interact_size.y = 32.;
-        style.spacing.window_margin = egui::Margin::same(16);
-        // Reserve the resting width so the visible thumb stays clear of the content.
-        style.spacing.scroll = egui::style::ScrollStyle {
-            floating_width: 5.,
-            floating_allocated_width: 5.,
-            dormant_background_opacity: 1.,
-            active_background_opacity: 1.,
-            interact_background_opacity: 1.,
-            dormant_handle_opacity: 0.6,
-            active_handle_opacity: 0.8,
-            ..egui::style::ScrollStyle::floating()
-        };
-        for (kind, size) in [
-            (egui::TextStyle::Body, 14.),
-            (egui::TextStyle::Button, 14.),
-            (egui::TextStyle::Small, 12.),
-            (egui::TextStyle::Heading, 20.),
-        ] {
-            style
-                .text_styles
-                .insert(kind, egui::FontId::proportional(size));
-        }
-        ctx.set_style(style);
+        crate::ui_style::apply(ctx, theme);
     }
-}
-
-pub(super) fn floating_frame(ui: &egui::Ui) -> egui::Frame {
-    egui::Frame::new()
-        .fill(ui.visuals().window_fill.gamma_multiply(0.97))
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(12.)
-        .inner_margin(8.)
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 4],
-            blur: 14,
-            spread: 0,
-            color: Color32::from_black_alpha(18),
-        })
 }
 
 /// A restrained radial stage, drawn behind the transparent native GPU target.
@@ -180,40 +61,4 @@ pub(super) fn paint_stage(ui: &egui::Ui, rect: egui::Rect) {
         }
     }
     ui.painter().add(mesh);
-}
-
-pub(super) fn size_choices<T: PartialEq + Clone>(
-    ui: &mut egui::Ui,
-    value: &mut T,
-    choices: &[(T, &str)],
-) {
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(7.)
-        .inner_margin(3.)
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 3.;
-            ui.horizontal(|ui| {
-                let width = ((ui.available_width() - 3. * (choices.len() - 1) as f32)
-                    / choices.len() as f32)
-                    .max(26.);
-                for (choice, label) in choices {
-                    let selected = value == choice;
-                    let button = egui::Button::new(*label)
-                        .fill(if selected {
-                            ui.visuals().panel_fill
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(if selected {
-                            ui.visuals().widgets.noninteractive.bg_stroke
-                        } else {
-                            egui::Stroke::NONE
-                        });
-                    if ui.add_sized([width, 30.], button).clicked() {
-                        *value = choice.clone();
-                    }
-                }
-            });
-        });
 }

@@ -19,6 +19,7 @@ mod stopper_smoke;
 mod tower;
 mod workflow;
 mod workspace;
+use crate::ui_style;
 use crate::{
     catalog::{Bom, Catalog, Selection, SustainerBody, SustainerOptions},
     constraints::AssemblyKind,
@@ -1358,20 +1359,20 @@ impl App {
                             ui.horizontal(|ui|{for (label,value) in [(t(z,"下限","Min"),min),(t(z,"上限","Max"),max)]{ui.label(label);changed|=ui.add(egui::DragValue::new(value).speed(1.).range(-10000. ..=10000.)).changed();}});
                         }
                     }
-                    if ui.button(t(z,"解除此关系（保留当前位置）","Remove relation, keep pose")).clicked(){remove=Some(index);}
+                    if ui.add(ui_style::danger_button(t(z,"解除此关系（保留当前位置）","Remove relation, keep pose"))).clicked(){remove=Some(index);}
                 });
             }
             if let Some(index)=remove{self.scene.relations.remove(index);changed=true;}
             if changed{if let Err(e)=crate::constraints::solve(&mut self.scene){self.scene.relations=previous;self.status=e;}else{self.scene.calibrated=false;}}
             if let Some((child,value))=motion && let Err(error)=self.apply_joint_motion(&child,value,ctx){self.status=error;}
-            if ui.button(t(z,"保存装配位置与关系","Save poses and relations")).clicked(){
+            if ui.add(ui_style::primary_button(t(z,"保存装配位置与关系","Save poses and relations"))).clicked(){
                 self.status=match toml::to_string_pretty(&self.scene.definition()).map_err(|e|e.to_string()).and_then(|s|self.write_state(&format!("assembly-{}.toml",self.scene_key),s)){Ok(_)=>t(z,"装配位置与关系已保存","Poses and relations saved").into(),Err(e)=>e};
             }
             ui.separator();ui.strong(t(z,"3. 合拢状态相交检查","3. Assembled intersection check"));
             ui.label(t(z,"检查实际三角面交叉，包含隐藏零件。共面接触和完整包覆不计入；无结果不代表已通过公差检查。","Tests actual triangle crossings, including hidden parts. Excludes coplanar contact and complete containment; not a tolerance certificate."));
             ui.horizontal(|ui|{ui.label(t(z,"数值容差 mm","Numerical tolerance mm"));ui.add(egui::DragValue::new(&mut self.collision_tolerance).speed(0.001).range(0.0001..=1.));if ui.add_enabled(!self.busy,egui::Button::new(t(z,"检查表面交叉","Check crossings"))).clicked(){self.check_intersections(ctx);}});
             if let Some(report)=&self.collision_report{
-                if !report.is_current(&self.scene){ui.colored_label(Color32::YELLOW,t(z,"装配已改变，结果过期，请重新检查。","Assembly changed; results are stale. Run again."));}
+                if !report.is_current(&self.scene){ui.colored_label(ui.visuals().warn_fg_color,t(z,"装配已改变，结果过期，请重新检查。","Assembly changed; results are stale. Run again."));}
                 else{ui.label(format!("{} {} · {:.4} mm",report.pairs.len(),t(z,"对交叉","crossing pairs"),report.tolerance));for pair in &report.pairs{
                     let label=format!("{} ↔ {}",self.scene.parts[pair.a].label(z),self.scene.parts[pair.b].label(z));
                     if ui.button(label).on_hover_text(format!("{:.2}, {:.2}, {:.2} mm",pair.point.x,pair.point.y,pair.point.z)).clicked(){for(i,p)in self.scene.parts.iter_mut().enumerate(){p.visible=i==pair.a||i==pair.b;}self.selected=Some(pair.a);self.explosion=0.;self.camera.fit(&self.scene,0.);}
@@ -1386,7 +1387,7 @@ impl App {
             .default_width(400.)
             .width_range(360. ..=560.)
             .resizable(true)
-            .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(egui::Margin::symmetric(20, 16)))
+            .frame(ui_style::panel_frame(&ctx.style(), egui::Margin::symmetric(20, 16)))
             .show(ctx, |ui| {
                 self.workspace_header(ui, ctx);
                 if self.combination_view && self.tab==0 {self.tower_panel(ui,ctx);return;}
@@ -1473,13 +1474,13 @@ impl App {
                                 }
                             }
                         }
-                        ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().color(Color32::GRAY));
+                        ui.label(RichText::new(t(z, "配置变更后自动更新预览", "Preview updates automatically")).small().weak());
                     });
                     if self.assembly_kind==AssemblyKind::Sustainer {
                         if !self.combination_view && !self.scene.mating_checks.is_empty() {
                             let results:Vec<_>=self.scene.mating_checks.iter().map(|c|c.evaluate(&self.scene)).filter(|r|r.active).collect();
                             let passed=results.iter().filter(|r|r.within_tolerance).count();
-                            ui.colored_label(if passed==results.len(){Color32::LIGHT_GREEN}else{Color32::from_rgb(225,184,112)},
+                            ui.colored_label(if passed==results.len(){ui.visuals().hyperlink_color}else{ui.visuals().warn_fg_color},
                                 format!("{} {passed}/{}",t(z,"孔轴 / 安装面核对","Axis / seating checks"),results.len()));
                             ui.small(t(z,"按源件几何定位，尚未实物确认。","Positioned from source geometry; physical confirmation pending."));
                             if passed<results.len() {
@@ -1839,31 +1840,7 @@ impl App {
             let c = &mut self.export_options.plate;
             let old = c.part_assignment(&path);
             let mut choice = old;
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut choice, 0, t(z, "跟随默认", "Use default"));
-                for slot in 1..=c.slot_count() {
-                    let [r, g, b] = c.appearance(slot).rgb;
-                    let button = egui::Button::new(egui::RichText::new(format!(" {slot} ")).color(
-                        if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
-                            Color32::BLACK
-                        } else {
-                            Color32::WHITE
-                        },
-                    ))
-                    .fill(Color32::from_rgb(r, g, b))
-                    .stroke(egui::Stroke::new(
-                        if choice == slot { 3. } else { 1. },
-                        if choice == slot {
-                            Color32::LIGHT_BLUE
-                        } else {
-                            Color32::GRAY
-                        },
-                    ));
-                    if ui.add(button).on_hover_text(c.color_hex(slot)).clicked() {
-                        choice = slot;
-                    }
-                }
-            });
+            color_slot_choices(ui, c, &mut choice, t(z, "跟随默认", "Use default"));
             if choice != old {
                 c.set_part_slot(&path,choice);
                 c.preview_colors = true;
@@ -1873,31 +1850,7 @@ impl App {
                 ui.label(t(z, "文字颜色", "Text color"));
                 let old_text = c.text_assignment(&path);
                 let mut text_choice = old_text;
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut text_choice, 0, t(z, "跟随文字默认色", "Default text color"));
-                    for slot in 1..=c.slot_count() {
-                        let [r, g, b] = c.appearance(slot).rgb;
-                        let ink = if u32::from(r) + u32::from(g) + u32::from(b) > 380 {
-                            Color32::BLACK
-                        } else {
-                            Color32::WHITE
-                        };
-                        let button =
-                            egui::Button::new(RichText::new(format!(" {slot} ")).color(ink))
-                                .fill(Color32::from_rgb(r, g, b))
-                                .stroke(egui::Stroke::new(
-                                    if text_choice == slot { 3. } else { 1. },
-                                    if text_choice == slot {
-                                        Color32::LIGHT_BLUE
-                                    } else {
-                                        Color32::GRAY
-                                    },
-                                ));
-                        if ui.add(button).on_hover_text(c.color_hex(slot)).clicked() {
-                            text_choice = slot;
-                        }
-                    }
-                });
+                color_slot_choices(ui, c, &mut text_choice, t(z, "跟随文字默认色", "Default text color"));
                 if text_choice != old_text {
                     c.set_text_slot(&path,text_choice);
                     c.preview_colors = true;
@@ -2047,7 +2000,7 @@ impl App {
                             "Dimensions describe this display body in original axes, assumed mm.",
                         ))
                         .small()
-                        .color(Color32::GRAY),
+                        .weak(),
                     );
                     if self.debug_ui && self.scene.assembly {
                         ui.separator();
@@ -2070,7 +2023,7 @@ impl App {
                                 "坐标为视口 X / Y向上 / Z，旋转为度。",
                                 "Viewport X / Y up / Z; rotation in degrees.",
                             ));
-                            if controlled {ui.colored_label(Color32::LIGHT_BLUE,t(z,"位置与角度由装配关系控制；可调整父件或关系参数。","Pose controlled by relation; edit parent or joint parameters."));}
+                            if controlled {ui.colored_label(ui.visuals().hyperlink_color,t(z,"位置与角度由装配关系控制；可调整父件或关系参数。","Pose controlled by relation; edit parent or joint parameters."));}
                             for (field,(label, values, speed)) in [
                                 (t(z, "位置 mm", "Position mm"), &mut p.pose.position, 0.5),
                                 (t(z, "旋转 °", "Rotation °"), &mut p.pose.rotation, 0.5),
@@ -2103,13 +2056,13 @@ impl App {
                     ));
                 }
                 if self.debug_ui && self.scene.assembly {
-                    if let Some(warning)=&self.scene.constraint_warning {ui.colored_label(Color32::LIGHT_RED,warning);}
+                    if let Some(warning)=&self.scene.constraint_warning {ui.colored_label(ui.visuals().error_fg_color,warning);}
                     ui.separator();
                     ui.colored_label(
                         if self.scene.calibrated {
-                            Color32::LIGHT_GREEN
+                            ui.visuals().hyperlink_color
                         } else {
-                            Color32::from_rgb(225, 184, 112)
+                            ui.visuals().warn_fg_color
                         },
                         if self.scene.calibrated {
                             t(z, "装配坐标已人工确认", "Assembly manually verified")
@@ -2128,7 +2081,7 @@ impl App {
                         t(z, "已人工核对本套装配", "I verified this assembly"),
                     );
                     if ui
-                        .button(t(z, "保存本型号装配坐标", "Save assembly definition"))
+                        .add(ui_style::primary_button(t(z, "保存本型号装配坐标", "Save assembly definition")))
                         .clicked()
                     {
                         save = true;
@@ -2140,7 +2093,7 @@ impl App {
                             "Saved in workspace/state; source STL stays unchanged.",
                         ))
                         .small()
-                        .color(Color32::GRAY),
+                        .weak(),
                     );
                 }
                 if save {
@@ -2494,8 +2447,8 @@ impl App {
                             "拖动旋转 · 右键平移 · 滚轮缩放 · 单击选择",
                             "Drag orbit · Right drag pan · Scroll zoom · Click select",
                         ),
-                        egui::FontId::proportional(12.),
-                        Color32::GRAY,
+                        egui::TextStyle::Small.resolve(ui.style()),
+                        ui.visuals().weak_text_color(),
                     );
                 }
             });
@@ -2658,8 +2611,8 @@ impl App {
                     ui.small(t(z,"停止输入后自动更新；文字会写入导出的 STL / 3MF，原文件不变。","Updates after typing; exported STL / 3MF includes the lettering. Source stays unchanged."));
                 }
                 ui.small(t(z,"选中标签后，可在右侧属性设置独立文字颜色；3MF 保留同盘多色。","Select the label to set text color in Properties; 3MF keeps both materials together."));
-                if let Err(e)=self.label.validate(){ui.colored_label(Color32::LIGHT_RED,e);}
-                if self.failed_preview.is_some() && !self.busy && !self.preview.has_pending(){ui.colored_label(Color32::LIGHT_RED,&self.status);}
+                if let Err(e)=self.label.validate(){ui.colored_label(ui.visuals().error_fg_color,e);}
+                if self.failed_preview.is_some() && !self.busy && !self.preview.has_pending(){ui.colored_label(ui.visuals().error_fg_color,&self.status);}
             });
         self.label_open = open;
         if before != self.label {
@@ -2824,7 +2777,7 @@ impl App {
                         ui.small(t(z, "3MF 为未切片工程。请在 Bambu Studio 核对耗材、支撑与首层。", "3MF projects are unsliced. Review filament, supports, and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled((total > 0 && total <= 1000) && !self.busy && !self.preview.has_pending(),
-                        egui::Button::new(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
+                        ui_style::primary_button(t(z,"选择位置并导出…","Choose destination and export…"))).clicked() {start=true;}
                 });
                 if self.export_rx.is_some() {ui.horizontal(|ui|{ui.spinner();ui.label(t(z,"正在后台导出…","Exporting in background…"));});}
                 if let Some(path)=&self.export_last {ui.label(path.to_string_lossy());}
@@ -3836,6 +3789,31 @@ fn load_scene_definition(scene: &mut Scene, home: &Path, key: &str) -> Result<()
         toml::from_str(&text).map_err(|e| format!("Assembly definition: {e}"))?;
     scene.apply(&definition)
 }
+fn color_slot_choices(
+    ui: &mut egui::Ui,
+    config: &crate::print_plate::Config,
+    selected: &mut u32,
+    default: &str,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(selected, 0, default);
+        for slot in 1..=config.slot_count() {
+            let [r, g, b] = config.appearance(slot).rgb;
+            if ui_style::swatch(
+                ui,
+                Color32::from_rgb(r, g, b),
+                *selected == slot,
+                &slot.to_string(),
+            )
+            .on_hover_text(config.color_hex(slot))
+            .clicked()
+            {
+                *selected = slot;
+            }
+        }
+    });
+}
+
 fn ui_height(ctx: &egui::Context) -> f32 {
     ctx.content_rect().height()
 }

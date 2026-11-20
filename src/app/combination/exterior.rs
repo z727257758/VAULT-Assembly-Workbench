@@ -67,7 +67,7 @@ impl App {
         let backbone_available = m.preset.selection.height != "4F";
         let mut apply = false;
         let mut cancel = false;
-        let response=egui::Modal::new(egui::Id::new("overall-exterior")).show(ctx,|ui|{
+        let response=egui::Modal::new(egui::Id::new("overall-exterior")).frame(crate::ui_style::dialog_frame(&ctx.style())).show(ctx,|ui|{
             ui.set_width(520.);
             ui.heading(t(z,"整体装配 · 外部配件","Overall assembly · accessories"));
             ui.label(format!("{} · {}{} / {}",m.name,m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height));
@@ -110,11 +110,11 @@ impl App {
                         for h in edit.draft.hardware(&m.preset.selection) {ui.label(h.line());}
                     });
                 }
-                if !edit.error.is_empty(){ui.colored_label(Color32::LIGHT_RED,&edit.error);}
+                if !edit.error.is_empty(){ui.colored_label(ui.visuals().error_fg_color,&edit.error);}
             });
             ui.horizontal(|ui|{
-                apply=ui.button(t(z,"应用配件","Apply")).clicked();
-                if ui.button(t(z,"清除全部配件","Clear accessories")).clicked(){edit.draft=Exterior::default();}
+                apply=ui.add(crate::ui_style::primary_button(t(z,"应用配件","Apply"))).clicked();
+                if ui.add(crate::ui_style::danger_button(t(z,"清除全部配件","Clear accessories"))).clicked(){edit.draft=Exterior::default();}
                 cancel=ui.button(t(z,"取消","Cancel")).clicked();
             });
         });

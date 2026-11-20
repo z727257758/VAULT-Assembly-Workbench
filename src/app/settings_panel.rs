@@ -1,5 +1,6 @@
 use super::*;
 use crate::print_plate::{FilamentMaterial, MaterialLibrary, Printer};
+use crate::ui_style;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -90,22 +91,15 @@ fn material_settings_ui(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4., 5.);
         for (index, &color) in swatches.iter().enumerate() {
-            let (rect, response) =
-                ui.allocate_exact_size(egui::Vec2::splat(27.), egui::Sense::click());
             let [r, g, b] = color;
-            let border = ui.visuals().widgets.noninteractive.bg_stroke;
-            ui.painter()
-                .circle(rect.center(), 10., Color32::from_rgb(r, g, b), border);
-            if editor.selected == Some(index) || response.has_focus() || response.hovered() {
-                ui.painter().circle_stroke(
-                    rect.center(),
-                    13.,
-                    egui::Stroke::new(1.5, ui.visuals().text_color()),
-                );
-            }
-            if response
-                .on_hover_text(format!("#{r:02X}{g:02X}{b:02X}"))
-                .clicked()
+            if ui_style::swatch(
+                ui,
+                Color32::from_rgb(r, g, b),
+                editor.selected == Some(index),
+                "",
+            )
+            .on_hover_text(format!("#{r:02X}{g:02X}{b:02X}"))
+            .clicked()
             {
                 editor.selected = Some(index);
                 editor.color = color;
@@ -121,7 +115,7 @@ fn material_settings_ui(
         if ui
             .add_enabled(
                 editor.selected.is_some(),
-                egui::Button::new(t(zh, "移除颜色", "Remove color")),
+                ui_style::danger_button(t(zh, "移除颜色", "Remove color")),
             )
             .clicked()
             && let Some(index) = editor.selected
@@ -188,50 +182,46 @@ impl App {
         let height = (size.y - 180.).clamp(300., 480.);
         let nav_width = 172.;
         let modal = egui::Modal::new(egui::Id::new("workspace-settings"))
-            .frame(
-                egui::Frame::popup(&ctx.style())
-                    .fill(ctx.style().visuals.window_fill)
-                    .corner_radius(14.)
-                    .inner_margin(18.),
-            )
+            .frame(ui_style::dialog_frame(&ctx.style()))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.heading(t(zh, "设置", "Settings"));
                 ui.separator();
                 ui.horizontal_top(|ui| {
-                    egui::Frame::new()
-                        .fill(ui.visuals().faint_bg_color)
-                        .corner_radius(8.)
-                        .inner_margin(8.)
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(nav_width);
-                                ui.set_height(height - 16.);
-                                for (group, pages) in [
+                    let navigation = ui_style::inset_frame(ui);
+                    let nav_height = height - navigation.total_margin().sum().y;
+                    navigation.show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(nav_width);
+                            ui.set_height(nav_height);
+                            for (group, pages) in [
                                 (
                                     t(zh, "工作区", "Workspace"),
-                                    &[Page::Appearance, Page::View, Page::Labels, Page::Library][..],
+                                    [Page::Appearance, Page::View, Page::Labels, Page::Library],
                                 ),
-                                (t(zh, "打印", "Printing"), &[Page::Printer, Page::Materials, Page::Print, Page::Export][..]),
+                                (
+                                    t(zh, "打印", "Printing"),
+                                    [Page::Printer, Page::Materials, Page::Print, Page::Export],
+                                ),
                             ] {
-                                    ui.add_space(4.);
-                                    ui.label(RichText::new(group).small().weak());
-                                    for &target in pages {
-                                        if ui
-                                            .add_sized(
-                                                [nav_width, 34.],
-                                                egui::Button::selectable(page == target, target.title(zh)),
-                                            )
-                                            .clicked()
-                                        {
-                                            page = target;
-                                        }
+                                ui.add_space(4.);
+                                ui.label(RichText::new(group).small().weak());
+                                for target in pages {
+                                    if ui
+                                        .add_sized(
+                                            [nav_width, ui.spacing().interact_size.y],
+                                            ui_style::choice_button(page == target, target.title(zh)),
+                                        )
+                                        .clicked()
+                                    {
+                                        page = target;
                                     }
-                                    ui.add_space(8.);
                                 }
-                            });
+                                ui.add_space(8.);
+                            }
                         });
-                    let content_width = width - nav_width - 16. - ui.spacing().item_spacing.x;
+                    });
+                    let content_width = ui.available_width();
                     ui.allocate_ui_with_layout(
                         egui::vec2(content_width, height),
                         egui::Layout::top_down(egui::Align::Min),
@@ -305,12 +295,7 @@ impl App {
                 });
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    done = ui
-                        .add(
-                            egui::Button::new(RichText::new(t(zh, "完成", "Done")).color(Color32::WHITE))
-                                .fill(appearance::BRAND),
-                        )
-                        .clicked();
+                    done = ui.add(ui_style::primary_button(t(zh, "完成", "Done"))).clicked();
                 });
             });
         self.settings_page = (!(done || modal.should_close())).then_some(page);

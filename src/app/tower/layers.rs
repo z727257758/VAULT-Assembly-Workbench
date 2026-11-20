@@ -19,13 +19,13 @@ pub(super) fn icon_button(
 ) -> egui::Response {
     // Keep disabled action regions above the card's background sense as well.
     let response = ui.add(
-        egui::Button::new("")
-            .frame(false)
+        crate::ui_style::quiet_button("")
+            .frame(enabled)
             .min_size(egui::vec2(28., 28.)),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     let ink = if enabled {
-        ui.visuals().text_color()
+        ui.style().interact(&response).fg_stroke.color
     } else {
         ui.visuals().weak_text_color()
     };
@@ -83,19 +83,6 @@ pub(super) fn icon_button(
     response.on_hover_text(label)
 }
 
-pub(super) fn card_frame(ui: &egui::Ui, expanded: bool) -> egui::Frame {
-    let border = if expanded {
-        ui.visuals().text_color()
-    } else {
-        ui.visuals().widgets.noninteractive.bg_stroke.color
-    };
-    egui::Frame::new()
-        .fill(ui.visuals().panel_fill)
-        .corner_radius(13.)
-        .inner_margin(8.)
-        .stroke(egui::Stroke::new(1., border))
-}
-
 pub(super) fn surface<R>(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
@@ -109,7 +96,7 @@ pub(super) fn surface<R>(
             .sense(egui::Sense::click()),
         |ui| {
             ui.style_mut().interaction.selectable_labels = false;
-            let mut frame = card_frame(ui, expanded);
+            let mut frame = crate::ui_style::card_frame(ui, expanded);
             let stroke = frame.stroke;
             if empty && !expanded {
                 frame.stroke = egui::Stroke::NONE;
@@ -119,8 +106,8 @@ pub(super) fn surface<R>(
                 contents(ui)
             });
             if empty && !expanded {
-                let rect = content.response.rect.shrink(0.5);
-                let radius = 12_f32.min(rect.height() * 0.5);
+                let rect = content.response.rect.shrink(stroke.width * 0.5);
+                let radius = f32::from(frame.corner_radius.nw).min(rect.height() * 0.5);
                 let mut path = Vec::new();
                 for (center, start) in [
                     (
@@ -248,12 +235,7 @@ pub(super) fn layer(
         });
         header_rect = row.response.rect;
         if expanded {
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                .corner_radius(9.)
-                .inner_margin(7.)
-                .show(ui, body);
+            crate::ui_style::inset_frame(ui).show(ui, body);
         }
     });
     response.response.widget_info(|| {
@@ -350,7 +332,7 @@ pub(super) fn choice_row<T: PartialEq + Clone>(
             ui.allocate_ui_with_layout(
                 egui::vec2(width.min(ui.available_width()), 32.),
                 egui::Layout::left_to_right(egui::Align::Center),
-                |ui| appearance::size_choices(ui, value, choices),
+                |ui| crate::ui_style::segmented_choices(ui, value, choices),
             );
         });
     });
@@ -404,11 +386,7 @@ pub(super) fn section(
             .response
             .rect;
         if expanded {
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(9.)
-                .inner_margin(8.)
-                .show(ui, body);
+            crate::ui_style::inset_frame(ui).show(ui, body);
         }
     });
     response.response.widget_info(|| {

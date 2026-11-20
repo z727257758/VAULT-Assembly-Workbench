@@ -659,124 +659,140 @@ impl App {
         let z = self.zh;
         let mut apply = false;
         let mut cancel = false;
-        let response = egui::Modal::new(egui::Id::new("combination-spec")).show(ctx, |ui| {
-            ui.set_max_width(440.);
-            ui.heading(if draft.target.is_some() {
-                t(z, "修改成员尺寸", "Change member size")
-            } else {
-                t(z, "添加模块：确定规格", "Add module: choose size")
-            });
-            ui.separator();
-            ui.label(draft.preset.assembly_kind.label(z));
-            if draft.target.is_none() {
-                ui.label(format!(
-                    "{}：{}",
-                    t(z, "参照对象", "Relative to"),
-                    self.members
-                        .get(draft.anchor)
-                        .map(|m| m.name.as_str())
-                        .unwrap_or("?")
-                ));
-                ui.horizontal(|ui| {
-                    for side in [Side::Left, Side::Above, Side::Right] {
-                        ui.radio_value(&mut draft.side, side, side.label(z));
-                    }
+        let response = egui::Modal::new(egui::Id::new("combination-spec"))
+            .frame(crate::ui_style::dialog_frame(&ctx.style()))
+            .show(ctx, |ui| {
+                ui.set_max_width(440.);
+                ui.heading(if draft.target.is_some() {
+                    t(z, "修改成员尺寸", "Change member size")
+                } else {
+                    t(z, "添加模块：确定规格", "Add module: choose size")
                 });
-                egui::ComboBox::from_id_salt("add-pattern")
-                    .selected_text(match draft.pattern {
-                        1 => "S＋S",
-                        2 => "S＋M",
-                        _ => t(z, "单个模块", "One module"),
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.pattern, 0, t(z, "单个模块", "One module"));
-                        ui.selectable_value(&mut draft.pattern, 1, "S＋S");
-                        ui.selectable_value(&mut draft.pattern, 2, "S＋M");
+                ui.separator();
+                ui.label(draft.preset.assembly_kind.label(z));
+                if draft.target.is_none() {
+                    ui.label(format!(
+                        "{}：{}",
+                        t(z, "参照对象", "Relative to"),
+                        self.members
+                            .get(draft.anchor)
+                            .map(|m| m.name.as_str())
+                            .unwrap_or("?")
+                    ));
+                    ui.horizontal(|ui| {
+                        for side in [Side::Left, Side::Above, Side::Right] {
+                            ui.radio_value(&mut draft.side, side, side.label(z));
+                        }
                     });
-            }
-            if draft.pattern != 0 {
-                draft.preset.selection.width = "S".into();
-            }
-            ui.horizontal(|ui| {
-                ui.label(t(z, "宽度", "Width"));
-                ui.add_enabled_ui(draft.pattern == 0, |ui| {
-                    egui::ComboBox::from_id_salt("overall-width")
-                        .selected_text(&draft.preset.selection.width)
+                    egui::ComboBox::from_id_salt("add-pattern")
+                        .selected_text(match draft.pattern {
+                            1 => "S＋S",
+                            2 => "S＋M",
+                            _ => t(z, "单个模块", "One module"),
+                        })
                         .show_ui(ui, |ui| {
-                            for w in ["S", "M", "L", "XL"] {
-                                ui.selectable_value(&mut draft.preset.selection.width, w.into(), w);
+                            ui.selectable_value(
+                                &mut draft.pattern,
+                                0,
+                                t(z, "单个模块", "One module"),
+                            );
+                            ui.selectable_value(&mut draft.pattern, 1, "S＋S");
+                            ui.selectable_value(&mut draft.pattern, 2, "S＋M");
+                        });
+                }
+                if draft.pattern != 0 {
+                    draft.preset.selection.width = "S".into();
+                }
+                ui.horizontal(|ui| {
+                    ui.label(t(z, "宽度", "Width"));
+                    ui.add_enabled_ui(draft.pattern == 0, |ui| {
+                        egui::ComboBox::from_id_salt("overall-width")
+                            .selected_text(&draft.preset.selection.width)
+                            .show_ui(ui, |ui| {
+                                for w in ["S", "M", "L", "XL"] {
+                                    ui.selectable_value(
+                                        &mut draft.preset.selection.width,
+                                        w.into(),
+                                        w,
+                                    );
+                                }
+                            });
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t(z, "深度", "Depth"));
+                    egui::ComboBox::from_id_salt("overall-depth")
+                        .selected_text(draft.preset.selection.depth.to_string())
+                        .show_ui(ui, |ui| {
+                            for d in 3..=7 {
+                                ui.selectable_value(
+                                    &mut draft.preset.selection.depth,
+                                    d,
+                                    d.to_string(),
+                                );
                             }
                         });
                 });
-            });
-            ui.horizontal(|ui| {
-                ui.label(t(z, "深度", "Depth"));
-                egui::ComboBox::from_id_salt("overall-depth")
-                    .selected_text(draft.preset.selection.depth.to_string())
-                    .show_ui(ui, |ui| {
-                        for d in 3..=7 {
-                            ui.selectable_value(
-                                &mut draft.preset.selection.depth,
-                                d,
-                                d.to_string(),
-                            );
-                        }
-                    });
-            });
-            if draft.preset.selection.width == "XL" && draft.pattern == 0 {
-                draft.preset.selection.height = "1F".into();
-            }
-            ui.horizontal(|ui| {
-                ui.label(t(z, "高度", "Height"));
-                egui::ComboBox::from_id_salt("overall-height")
-                    .selected_text(&draft.preset.selection.height)
-                    .show_ui(ui, |ui| {
-                        for h in ["1F", "2F", "4F"] {
-                            if draft.preset.selection.width != "XL"
-                                || draft.pattern != 0
-                                || h == "1F"
-                            {
-                                ui.selectable_value(
-                                    &mut draft.preset.selection.height,
-                                    h.into(),
-                                    h,
-                                );
+                if draft.preset.selection.width == "XL" && draft.pattern == 0 {
+                    draft.preset.selection.height = "1F".into();
+                }
+                ui.horizontal(|ui| {
+                    ui.label(t(z, "高度", "Height"));
+                    egui::ComboBox::from_id_salt("overall-height")
+                        .selected_text(&draft.preset.selection.height)
+                        .show_ui(ui, |ui| {
+                            for h in ["1F", "2F", "4F"] {
+                                if draft.preset.selection.width != "XL"
+                                    || draft.pattern != 0
+                                    || h == "1F"
+                                {
+                                    ui.selectable_value(
+                                        &mut draft.preset.selection.height,
+                                        h.into(),
+                                        h,
+                                    );
+                                }
                             }
-                        }
-                    });
-            });
-            ui.small(t(
-                z,
-                "堆叠：同宽同深，或 L ↔ S＋S、XL ↔ S＋M；支承顶面须齐平。",
-                "Stack: matching footprint, L ↔ S+S, or XL ↔ S+M; support tops must align.",
-            ));
-            if draft.target.is_some()
-                || !draft.preset.gridfinity.bins.is_empty()
-                || !draft.preset.divider_layout.items.is_empty()
-                || !draft.preset.sustainer_dividers.items.is_empty()
-            {
-                ui.checkbox(
-                    &mut draft.clear_inserts,
-                    t(
-                        z,
-                        "重置内部配置（保留标签和配色）",
-                        "Reset inserts (keep label and colors)",
-                    ),
-                );
+                        });
+                });
                 ui.small(t(
                     z,
-                    "默认保留内部配置；不兼容时会提示，不会自动删除。",
-                    "Inserts are preserved unless you explicitly reset them.",
+                    "堆叠：同宽同深，或 L ↔ S＋S、XL ↔ S＋M；支承顶面须齐平。",
+                    "Stack: matching footprint, L ↔ S+S, or XL ↔ S+M; support tops must align.",
                 ));
-            }
-            if !draft.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(230, 120, 100), &draft.error);
-            }
-            ui.horizontal(|ui| {
-                apply = ui.button(t(z, "确认规格", "Confirm size")).clicked();
-                cancel = ui.button(t(z, "取消", "Cancel")).clicked();
+                if draft.target.is_some()
+                    || !draft.preset.gridfinity.bins.is_empty()
+                    || !draft.preset.divider_layout.items.is_empty()
+                    || !draft.preset.sustainer_dividers.items.is_empty()
+                {
+                    ui.checkbox(
+                        &mut draft.clear_inserts,
+                        t(
+                            z,
+                            "重置内部配置（保留标签和配色）",
+                            "Reset inserts (keep label and colors)",
+                        ),
+                    );
+                    ui.small(t(
+                        z,
+                        "默认保留内部配置；不兼容时会提示，不会自动删除。",
+                        "Inserts are preserved unless you explicitly reset them.",
+                    ));
+                }
+                if !draft.error.is_empty() {
+                    ui.colored_label(ui.visuals().error_fg_color, &draft.error);
+                }
+                ui.horizontal(|ui| {
+                    apply = ui
+                        .add(crate::ui_style::primary_button(t(
+                            z,
+                            "确认规格",
+                            "Confirm size",
+                        )))
+                        .clicked();
+                    cancel = ui.button(t(z, "取消", "Cancel")).clicked();
+                });
             });
-        });
         if response.should_close() || cancel {
             return;
         }
@@ -803,7 +819,7 @@ impl App {
             if ui
                 .add_enabled(
                     !self.bom.is_empty(),
-                    egui::Button::new(t(z, "开始整体装配", "Start overall assembly")),
+                    crate::ui_style::primary_button(t(z, "开始整体装配", "Start overall assembly")),
                 )
                 .clicked()
             {

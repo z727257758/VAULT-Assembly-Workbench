@@ -6,19 +6,6 @@ pub(super) enum HeaderAction {
     Reset,
 }
 
-pub(super) fn frame(ui: &egui::Ui, open: bool) -> egui::Frame {
-    let visuals = ui.visuals();
-    egui::Frame::new()
-        .fill(visuals.panel_fill)
-        .stroke(if open {
-            egui::Stroke::new(1.25, visuals.text_color())
-        } else {
-            visuals.widgets.noninteractive.bg_stroke
-        })
-        .corner_radius(12.)
-        .inner_margin(egui::Margin::symmetric(9, 5))
-}
-
 fn button_info(response: egui::Response, label: &str) -> egui::Response {
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -181,111 +168,79 @@ fn material_picker(
     z: bool,
 ) {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 29.), egui::Sense::click());
-    let response = button_info(response, material.name());
-    let painter = ui.painter();
-    let ink = ui.visuals().text_color();
-    painter.text(
-        rect.left_center() + egui::vec2(4., 0.),
-        egui::Align2::LEFT_CENTER,
-        material.name(),
-        egui::TextStyle::Body.resolve(ui.style()),
-        ink,
-    );
-    let a = rect.right_center() - egui::vec2(8., 0.);
-    painter.line(
-        vec![
-            a + egui::vec2(-1.8, -3.5),
-            a + egui::vec2(1.8, 0.),
-            a + egui::vec2(-1.8, 3.5),
-        ],
-        egui::Stroke::new(1.3, ui.visuals().weak_text_color()),
-    );
-    egui::Popup::menu(&response).width(width).show(|ui| {
-        ui.set_min_width((width - 16.).max(100.));
-        let mut family = "";
-        for option in FilamentMaterial::ALL {
-            if family != option.family() {
-                family = option.family();
-                ui.label(RichText::new(family).small().weak());
-            }
-            let selected = *material == option;
-            let row_width = ui.available_width();
-            let (rect, row) =
-                ui.allocate_exact_size(egui::vec2(row_width, 27.), egui::Sense::click());
-            let mut row = button_info(row, option.name());
-            if option == FilamentMaterial::PetgMatte {
-                row = row.on_hover_text(t(
-                    z,
-                    "使用 PETG Basic 打印预设",
-                    "Uses the PETG Basic print profile",
-                ));
-            }
-            if row.hovered() {
-                ui.painter()
-                    .rect_filled(rect, 5., ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            let name = ui.painter().text(
-                rect.left_center() + egui::vec2(7., 0.),
-                egui::Align2::LEFT_CENTER,
-                option.name(),
-                egui::TextStyle::Body.resolve(ui.style()),
-                ink,
-            );
-            if selected {
-                let c = egui::pos2(name.right() + 10., rect.center().y);
-                ui.painter().line(
-                    vec![
-                        c + egui::vec2(-3., 0.),
-                        c + egui::vec2(-0.7, 2.5),
-                        c + egui::vec2(4., -3.),
-                    ],
-                    egui::Stroke::new(1.5, ink),
+    egui::ComboBox::from_id_salt("material")
+        .width(width)
+        .height(ui.ctx().content_rect().height() * 0.65)
+        .selected_text(material.name())
+        .show_ui(ui, |ui| {
+            let mut family = "";
+            for option in FilamentMaterial::ALL {
+                if family != option.family() {
+                    family = option.family();
+                    ui.label(RichText::new(family).small().weak());
+                }
+                let selected = *material == option;
+                let row_width = ui.available_width();
+                let (rect, row) =
+                    ui.allocate_exact_size(egui::vec2(row_width, 27.), egui::Sense::click());
+                let mut row = button_info(row, option.name());
+                if option == FilamentMaterial::PetgMatte {
+                    row = row.on_hover_text(t(
+                        z,
+                        "使用 PETG Basic 打印预设",
+                        "Uses the PETG Basic print profile",
+                    ));
+                }
+                let visuals = ui.style().interact_selectable(&row, selected);
+                let ink = visuals.fg_stroke.color;
+                if selected || row.hovered() || row.has_focus() {
+                    ui.painter().rect(
+                        rect,
+                        visuals.corner_radius,
+                        visuals.weak_bg_fill,
+                        visuals.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let name = ui.painter().text(
+                    rect.left_center() + egui::vec2(7., 0.),
+                    egui::Align2::LEFT_CENTER,
+                    option.name(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    ink,
                 );
+                if selected {
+                    let c = egui::pos2(name.right() + 10., rect.center().y);
+                    ui.painter().line(
+                        vec![
+                            c + egui::vec2(-3., 0.),
+                            c + egui::vec2(-0.7, 2.5),
+                            c + egui::vec2(4., -3.),
+                        ],
+                        egui::Stroke::new(1.5, ink),
+                    );
+                }
+                let colors = library.swatches(option);
+                let n = colors.len().min(5);
+                for i in 0..n {
+                    let [r, g, b] = colors[i * colors.len() / n];
+                    let center = egui::pos2(
+                        rect.right() - 10. - (n - 1 - i) as f32 * 9.,
+                        rect.center().y,
+                    );
+                    ui.painter().circle(
+                        center,
+                        6.,
+                        Color32::from_rgb(r, g, b),
+                        egui::Stroke::new(0.8, ui.visuals().panel_fill),
+                    );
+                }
+                if row.clicked() {
+                    *material = option;
+                    ui.close();
+                }
             }
-            let colors = library.swatches(option);
-            let n = colors.len().min(5);
-            for i in 0..n {
-                let [r, g, b] = colors[i * colors.len() / n];
-                let center = egui::pos2(
-                    rect.right() - 10. - (n - 1 - i) as f32 * 9.,
-                    rect.center().y,
-                );
-                ui.painter().circle(
-                    center,
-                    6.,
-                    Color32::from_rgb(r, g, b),
-                    egui::Stroke::new(0.8, ui.visuals().panel_fill),
-                );
-            }
-            if row.clicked() {
-                *material = option;
-                ui.close();
-            }
-        }
-    });
-}
-
-fn swatch(ui: &mut egui::Ui, size: egui::Vec2, rgb: [u8; 3], selected: bool, z: bool) -> bool {
-    let [r, g, b] = rgb;
-    let name = format!("{} · #{r:02X}{g:02X}{b:02X}", color_label(rgb, z));
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let response = button_info(response, &name).on_hover_text(&name);
-    let radius = (size.x * 0.36).clamp(5., 9.5);
-    ui.painter().circle(
-        rect.center(),
-        radius,
-        Color32::from_rgb(r, g, b),
-        ui.visuals().widgets.noninteractive.bg_stroke,
-    );
-    if selected || response.hovered() {
-        ui.painter().circle_stroke(
-            rect.center(),
-            radius + 2.,
-            egui::Stroke::new(if selected { 1.5 } else { 0.9 }, ui.visuals().text_color()),
-        );
-    }
-    response.clicked()
+        });
 }
 
 fn custom_color(ui: &mut egui::Ui, size: egui::Vec2, rgb: &mut [u8; 3], z: bool) {
@@ -326,7 +281,14 @@ fn custom_color(ui: &mut egui::Ui, size: egui::Vec2, rgb: &mut [u8; 3], z: bool)
                 draft = [color.r(), color.g(), color.b()];
             }
             ui.data_mut(|d| d.insert_temp(id, draft));
-            if ui.button(t(z, "应用颜色", "Apply color")).clicked() {
+            if ui
+                .add(crate::ui_style::primary_button(t(
+                    z,
+                    "应用颜色",
+                    "Apply color",
+                )))
+                .clicked()
+            {
                 *rgb = draft;
                 ui.close();
             }
@@ -339,41 +301,46 @@ pub(super) fn appearance_ui(
     appearance: &mut GroupAppearance,
     z: bool,
 ) {
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(8.)
-        .inner_margin(6.)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            material_picker(ui, library, &mut appearance.material, z);
-            ui.separator();
-            let mut swatches = library.swatches(appearance.material).to_vec();
-            if !swatches.contains(&appearance.rgb) {
-                swatches.push(appearance.rgb);
-            }
-            let width = ui.available_width();
-            let columns = ((width / 24.).floor() as usize).clamp(1, 10);
-            let size = egui::vec2(width / columns as f32, 26.);
-            ui.spacing_mut().item_spacing = egui::vec2(0., 1.);
-            let cells = (swatches.len() + 1).max(columns);
-            let mut colors = swatches.into_iter();
-            for start in (0..cells).step_by(columns) {
-                ui.horizontal(|ui| {
-                    for index in start..(start + columns).min(cells) {
-                        if index == columns - 1 {
-                            custom_color(ui, size, &mut appearance.rgb, z);
-                        } else if let Some(rgb) = colors.next() {
-                            if swatch(ui, size, rgb, appearance.rgb == rgb, z) {
-                                appearance.rgb = rgb;
-                            }
-                        } else {
-                            ui.allocate_space(size);
+    crate::ui_style::inset_frame(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        material_picker(ui, library, &mut appearance.material, z);
+        ui.separator();
+        let mut swatches = library.swatches(appearance.material).to_vec();
+        if !swatches.contains(&appearance.rgb) {
+            swatches.push(appearance.rgb);
+        }
+        let width = ui.available_width();
+        let size = egui::Vec2::splat(crate::ui_style::SWATCH_SIZE);
+        let columns = ((width / size.x).floor() as usize).clamp(1, 10);
+        let gap = (width - size.x * columns as f32) / columns.saturating_sub(1).max(1) as f32;
+        ui.spacing_mut().item_spacing = egui::vec2(gap.max(0.), 1.);
+        let cells = (swatches.len() + 1).max(columns);
+        let mut colors = swatches.into_iter();
+        for start in (0..cells).step_by(columns) {
+            ui.horizontal(|ui| {
+                for index in start..(start + columns).min(cells) {
+                    if index == columns - 1 {
+                        custom_color(ui, size, &mut appearance.rgb, z);
+                    } else if let Some(rgb @ [r, g, b]) = colors.next() {
+                        let name = format!("{} · #{r:02X}{g:02X}{b:02X}", color_label(rgb, z));
+                        if crate::ui_style::swatch(
+                            ui,
+                            Color32::from_rgb(r, g, b),
+                            appearance.rgb == rgb,
+                            "",
+                        )
+                        .on_hover_text(name)
+                        .clicked()
+                        {
+                            appearance.rgb = rgb;
                         }
+                    } else {
+                        ui.allocate_space(size);
                     }
-                });
-            }
-        });
+                }
+            });
+        }
+    });
 }
 
 #[cfg(test)]

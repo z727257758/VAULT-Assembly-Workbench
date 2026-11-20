@@ -81,7 +81,7 @@ impl State {
             let response = ui.add(
                 egui::TextEdit::singleline(draft)
                     .id(id)
-                    .font(egui::FontId::proportional(18.))
+                    .font(egui::TextStyle::Heading)
                     .hint_text(t(z, "项目名称", "Project name"))
                     .char_limit(80)
                     .desired_width(ui.available_width().min(330.)),
@@ -103,7 +103,7 @@ impl State {
         };
         let response = ui
             .add(
-                egui::Label::new(RichText::new(name).size(18.).strong())
+                egui::Label::new(RichText::new(name).heading().strong())
                     .truncate()
                     .sense(egui::Sense::click()),
             )
@@ -1087,7 +1087,7 @@ impl App {
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 47.],
-                                    egui::Button::selectable(current, row).wrap(),
+                                    crate::ui_style::choice_button(current, row).wrap(),
                                 )
                                 .on_hover_text(name)
                                 .clicked()
@@ -1167,9 +1167,6 @@ impl App {
 
         let z = self.zh;
         let ready = !self.busy && !self.catalog.root.as_os_str().is_empty();
-        ui.spacing_mut().interact_size.y = 26.;
-        ui.spacing_mut().item_spacing.y = 4.;
-        ui.spacing_mut().button_padding.y = 4.;
         ui.set_width(260.);
         ui.small(RichText::new(t(z, "新建项目", "New project")).weak());
         project_menu_item(
@@ -1265,7 +1262,7 @@ impl App {
                 Ok(rows) => rows,
                 Err(error) => {
                     self.tower.scroll_to_layer = None;
-                    ui.colored_label(ui.visuals().hyperlink_color, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                     ui.small(t(z, "原方案的标签、内部配置和装配位置完整保留。可新建层式项目，或选择原成员编辑。", "Original labels, inserts and placements are preserved. Start a layer project or edit an existing member."));
                     for (i, m) in self.members.iter().enumerate() {
                         if ui.button(&m.name).clicked() { action = Some(Action::Edit(i, None)); }
@@ -1759,14 +1756,13 @@ impl App {
     }
     pub(super) fn tower_footer_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("tower-summary")
-            .frame(
-                egui::Frame::new()
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin {
-                        top: 12,
-                        ..Default::default()
-                    }),
-            )
+            .frame(crate::ui_style::panel_frame(
+                ui.style(),
+                egui::Margin {
+                    top: 8,
+                    ..Default::default()
+                },
+            ))
             .show_inside(ui, |ui| {
                 ui.separator();
                 self.tower_footer(ui, ctx);
@@ -1801,7 +1797,7 @@ impl App {
     fn tower_footer(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let z = self.zh;
         if !self.tower.error.is_empty() {
-            ui.colored_label(Color32::LIGHT_RED, &self.tower.error);
+            ui.colored_label(ui.visuals().error_fg_color, &self.tower.error);
         }
         let items = self.tower_print_items();
         let files: std::collections::HashSet<_> = items.iter().map(|b| b.path.as_str()).collect();
@@ -1857,12 +1853,7 @@ impl App {
             if ui
                 .add_enabled(
                     !items.is_empty(),
-                    egui::Button::new(
-                        RichText::new(t(z, "导出整个项目…", "Export project…"))
-                            .color(Color32::WHITE),
-                    )
-                    .fill(appearance::BRAND)
-                    .min_size(egui::vec2(140., 36.)),
+                    crate::ui_style::primary_button(t(z, "导出整个项目…", "Export project…")),
                 )
                 .clicked()
             {

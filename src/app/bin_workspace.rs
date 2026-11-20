@@ -1,6 +1,7 @@
 //! The model and the plan edit one drawer layout, committed once per completed gesture.
 use super::*;
 use crate::gridfinity::{self, Layout};
+use crate::ui_style;
 
 impl App {
     pub(super) fn open_bin_editor(&mut self, ctx: &egui::Context) {
@@ -73,63 +74,61 @@ impl App {
                 .id_salt("bin-inspector")
                 .max_rect(card_rect),
         );
-        appearance::floating_frame(&card)
-            .inner_margin(if width < 250. { 9. } else { 14. })
-            .show(&mut card, |ui| {
-                ui.set_width(ui.available_width());
-                let z = self.zh;
-                ui.horizontal(|ui| {
-                    let spec = format!(
-                        "{}{} {}",
-                        self.selection.width, self.selection.depth, self.selection.height
-                    );
-                    let title = if let Some(member) = self.members.get(self.active_member) {
-                        let level = member.placement.level + 1;
-                        if z {
-                            format!("第 {level} 层 · 抽屉 {spec}")
-                        } else {
-                            format!("Layer {level} · Drawer {spec}")
-                        }
+        ui_style::floating_frame(&card).show(&mut card, |ui| {
+            ui.set_width(ui.available_width());
+            let z = self.zh;
+            ui.horizontal(|ui| {
+                let spec = format!(
+                    "{}{} {}",
+                    self.selection.width, self.selection.depth, self.selection.height
+                );
+                let title = if let Some(member) = self.members.get(self.active_member) {
+                    let level = member.placement.level + 1;
+                    if z {
+                        format!("第 {level} 层 · 抽屉 {spec}")
                     } else {
-                        format!("{} {spec}", t(z, "抽屉", "Drawer"))
-                    };
-                    ui.strong(title);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let done = ui.button(t(z, "完成", "Done"));
-                        if self.smoke {
-                            self.bin_editor_smoke.done_rect = Some(done.rect);
-                        }
-                        close = done.clicked();
-                    });
-                });
-                if let Some(drawer) = self.active_drawer {
-                    ui.weak(format!("{} {}", t(z, "子抽屉", "Drawer"), drawer + 1));
-                }
-                let opacity_control = |ui: &mut egui::Ui| {
-                    let label = ui.label(t(z, "外部零件不透明度", "Exterior part opacity"));
-                    ui.spacing_mut().slider_width = (ui.available_width() - 56.).clamp(32., 160.);
-                    if ui
-                        .add(egui::Slider::new(&mut self.bin_exterior_opacity, 20..=50).suffix("%"))
-                        .labelled_by(label.id)
-                        .changed()
-                    {
-                        ui.ctx().request_repaint();
+                        format!("Layer {level} · Drawer {spec}")
                     }
-                };
-                let inline_width = if z { 220. } else { 245. };
-                if ui.available_width() >= inline_width {
-                    ui.horizontal(opacity_control);
                 } else {
-                    ui.vertical(opacity_control);
-                }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("bin-properties")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        self.bin_inspector(ui, &mut draft, grid, &mut selected);
-                    });
+                    format!("{} {spec}", t(z, "抽屉", "Drawer"))
+                };
+                ui.strong(title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let done = ui.add(ui_style::primary_button(t(z, "完成", "Done")));
+                    if self.smoke {
+                        self.bin_editor_smoke.done_rect = Some(done.rect);
+                    }
+                    close = done.clicked();
+                });
             });
+            if let Some(drawer) = self.active_drawer {
+                ui.weak(format!("{} {}", t(z, "子抽屉", "Drawer"), drawer + 1));
+            }
+            let opacity_control = |ui: &mut egui::Ui| {
+                let label = ui.label(t(z, "外部零件不透明度", "Exterior part opacity"));
+                ui.spacing_mut().slider_width = (ui.available_width() - 56.).clamp(32., 160.);
+                if ui
+                    .add(egui::Slider::new(&mut self.bin_exterior_opacity, 20..=50).suffix("%"))
+                    .labelled_by(label.id)
+                    .changed()
+                {
+                    ui.ctx().request_repaint();
+                }
+            };
+            let inline_width = if z { 220. } else { 245. };
+            if ui.available_width() >= inline_width {
+                ui.horizontal(opacity_control);
+            } else {
+                ui.vertical(opacity_control);
+            }
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("bin-properties")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    self.bin_inspector(ui, &mut draft, grid, &mut selected);
+                });
+        });
         self.gridfinity_selected = selected;
         if draft != self.gridfinity {
             for bin in draft.bins.iter().filter(|b| b.label.active()) {
@@ -242,7 +241,7 @@ impl App {
             if ui
                 .add_enabled(
                     selected.is_some(),
-                    egui::Button::new(t(z, "删除", "Delete")),
+                    ui_style::danger_button(t(z, "删除", "Delete")),
                 )
                 .clicked()
             {
@@ -267,7 +266,7 @@ impl App {
                     } else {
                         t(z, "查看此盒", "Focus bin")
                     };
-                    if ui.small_button(label).clicked() {
+                    if ui.add(ui_style::quiet_button(label)).clicked() {
                         self.bin_view.focus_bin = (!focused).then_some(bin.id);
                     }
                 });

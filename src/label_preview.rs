@@ -209,7 +209,7 @@ impl Preview {
                 }
                 if !glyph.fits {
                     ui.colored_label(
-                        Color32::LIGHT_RED,
+                        ui.visuals().warn_fg_color,
                         "文字超出 34 × 10 mm 安全区，请调整统一字号或偏移。",
                     );
                 }
@@ -223,7 +223,7 @@ impl Preview {
                 }
             }
             Some(Err(e)) => {
-                ui.colored_label(Color32::LIGHT_RED, e);
+                ui.colored_label(ui.visuals().error_fg_color, e);
             }
             None => {
                 ui.small("正在更新实际字体轮廓…");
@@ -232,7 +232,7 @@ impl Preview {
         painter.rect_stroke(
             plate,
             2.,
-            Stroke::new(1., Color32::GRAY),
+            ui.visuals().window_stroke,
             egui::StrokeKind::Inside,
         );
         let font = match bin.label.font {
