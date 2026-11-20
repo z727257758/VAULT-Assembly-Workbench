@@ -83,6 +83,19 @@ pub(super) fn icon_button(
     response.on_hover_text(label)
 }
 
+pub(super) fn card_frame(ui: &egui::Ui, expanded: bool) -> egui::Frame {
+    let border = if expanded {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    egui::Frame::new()
+        .fill(ui.visuals().panel_fill)
+        .corner_radius(13.)
+        .inner_margin(8.)
+        .stroke(egui::Stroke::new(1., border))
+}
+
 pub(super) fn surface<R>(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
@@ -96,23 +109,11 @@ pub(super) fn surface<R>(
             .sense(egui::Sense::click()),
         |ui| {
             ui.style_mut().interaction.selectable_labels = false;
-            let stroke = egui::Stroke::new(
-                1.,
-                if expanded {
-                    ui.visuals().text_color()
-                } else {
-                    ui.visuals().widgets.noninteractive.bg_stroke.color
-                },
-            );
-            let frame = egui::Frame::new()
-                .fill(ui.visuals().panel_fill)
-                .corner_radius(13.)
-                .inner_margin(8.)
-                .stroke(if empty && !expanded {
-                    egui::Stroke::NONE
-                } else {
-                    stroke
-                });
+            let mut frame = card_frame(ui, expanded);
+            let stroke = frame.stroke;
+            if empty && !expanded {
+                frame.stroke = egui::Stroke::NONE;
+            }
             let content = frame.show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 contents(ui)

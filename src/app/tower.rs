@@ -1279,7 +1279,8 @@ impl App {
                 for group in ["footprint", "layers", "modifications"] { layers::set_group(ui, group, false); }
                 layers::set_group(ui, "colors", true);
             }
-            if self.smoke && self.smoke_stage == 4 && std::env::args().any(|arg| arg == "--smoke-build-panel") {
+            let build_panel_smoke = self.smoke && std::env::args().any(|arg| arg == "--smoke-build-panel");
+            if build_panel_smoke && self.smoke_stage == 4 {
                 layers::set_group(ui, "footprint", false);
                 layers::set_group(ui, "layers", false);
                 layers::set_group(ui, "modifications", true);
@@ -1320,7 +1321,8 @@ impl App {
             }
             ui.separator();
             let modifications = self.modification_summary();
-            if layers::group(ui, "modifications", t(z, "改装", "Modifications"), false, |ui| {
+            let show_empty_card = build_panel_smoke && self.smoke_stage == 1;
+            if layers::group(ui, "modifications", t(z, "改装", "Modifications"), show_empty_card, |ui| {
                 ui.add(egui::Label::new(RichText::new(modifications).weak()).truncate());
             }) {
                 modifications::show(self, ui, ctx, &mut action);
@@ -1616,19 +1618,24 @@ impl App {
         let has = |check: fn(&crate::catalog::exterior::Exterior) -> bool| {
             self.members.iter().any(|member| check(&member.exterior))
         };
-        [
+        let summary = [
             (has(|e| e.backbone), t(z, "背板", "Backbone")),
             (
                 has(|e| e.stationary_handle || e.pull_handle),
                 t(z, "把手", "Handles"),
             ),
             (has(|e| e.board != Board::None), t(z, "洞洞板", "Pegboard")),
-            (has(|e| e.wall_mount), t(z, "壁挂", "Wall mount")),
+            (has(|e| e.wall_mount), t(z, "挂墙", "Wall mount")),
         ]
         .into_iter()
         .filter_map(|(enabled, name)| enabled.then_some(name))
         .collect::<Vec<_>>()
-        .join(" · ")
+        .join(" · ");
+        if summary.is_empty() {
+            t(z, "无", "None").into()
+        } else {
+            summary
+        }
     }
 
     fn tower_cell(&mut self, ui: &mut egui::Ui, index: usize, action: &mut Option<Action>) {
