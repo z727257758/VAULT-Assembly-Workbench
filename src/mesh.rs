@@ -25,6 +25,29 @@ pub struct Mesh {
     pub max: Vec3,
 }
 impl Mesh {
+    pub(crate) fn volume_mm3(&self) -> Option<f64> {
+        let origin = ((self.min + self.max) * 0.5).as_dvec3();
+        let mut signed_volume = 0.;
+        let mut surface = glam::DVec3::ZERO;
+        let mut total_area = 0.;
+        for triangle in self.vertices.chunks_exact(3) {
+            let [a, b, c] =
+                std::array::from_fn(|i| Vec3::from(triangle[i].position).as_dvec3() - origin);
+            let normal = (b - a).cross(c - a);
+            signed_volume += a.dot(normal);
+            surface += normal;
+            total_area += normal.length();
+        }
+        let volume = signed_volume.abs() / 6.;
+        let extent = (self.max - self.min).as_dvec3();
+        let bounds_volume = extent.x * extent.y * extent.z;
+        (volume.is_finite()
+            && volume > 0.
+            && volume <= bounds_volume * 1.001
+            && surface.length() <= total_area * 0.001)
+            .then_some(volume)
+    }
+
     /// Expand a print-space solid into display-space triangles without recentering it.
     /// The shading callback receives the display vertices, face normal and extra vertex properties.
     pub(crate) fn from_manifold(

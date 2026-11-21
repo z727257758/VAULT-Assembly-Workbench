@@ -326,6 +326,24 @@ impl MaterialLibrary {
         }
     }
 
+    pub(crate) fn density(&self, material: FilamentMaterial) -> Option<f64> {
+        let preset = self.preset(material);
+        if let Some(density) = preset.and_then(|p| p.options.get("filament_density")) {
+            return density
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.);
+        }
+        // Densities in the bundled printer templates and filament overrides.
+        match preset.map_or(material, |p| p.base) {
+            FilamentMaterial::PlaBasic => Some(1.26),
+            FilamentMaterial::PlaMatte => Some(1.32),
+            FilamentMaterial::PetgBasic | FilamentMaterial::PetgMatte => Some(1.25),
+            FilamentMaterial::PetgHf => Some(1.28),
+            FilamentMaterial::Imported(_) => None,
+        }
+    }
+
     pub fn name(&self, material: FilamentMaterial) -> &str {
         self.preset(material)
             .map_or(material.name(), |preset| &preset.name)

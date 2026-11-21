@@ -224,6 +224,20 @@ impl App {
             _ => self.camera.fit(&self.scene, self.explosion),
         }
     }
+    pub(super) fn focus_preview_part(&mut self) {
+        let Some(index) = self.selected else { return };
+        if let Some(part) = self.scene.parts.get(index).filter(|p| p.visible) {
+            self.camera.fit(
+                &Scene {
+                    parts: vec![part.clone()],
+                    ..Default::default()
+                },
+                self.explosion,
+            );
+            self.camera.zoom = 0.85;
+        }
+    }
+
     pub(super) fn preview_camera(&self) -> &Camera {
         if self.preview_modes.special() {
             &self.preview_modes.camera

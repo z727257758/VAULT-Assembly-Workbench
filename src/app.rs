@@ -15,6 +15,7 @@ mod large_stl_smoke;
 mod layer_reorder;
 mod motion;
 mod orientation;
+mod part_details;
 mod preview_modes;
 mod print_list;
 mod recipes;
@@ -188,6 +189,7 @@ pub struct App {
     tower: tower::State,
     active_drawer: Option<usize>,
     preview_modes: preview_modes::State,
+    part_details: part_details::State,
     members: Vec<Member>,
     active_member: usize,
     combination_view: bool,
@@ -341,6 +343,7 @@ impl App {
             tower: Default::default(),
             active_drawer: None,
             preview_modes: Default::default(),
+            part_details: Default::default(),
             members: Vec::new(),
             active_member: 0,
             combination_view: !smoke,
@@ -2760,6 +2763,7 @@ impl eframe::App for App {
         };
         self.viewport(ctx);
         self.part_properties_window(ctx);
+        self.part_details_window(ctx);
         self.relations_window(ctx);
         self.export_window(ctx);
         self.combination_spec_window(ctx);

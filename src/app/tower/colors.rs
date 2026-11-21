@@ -211,6 +211,26 @@ fn assign_component(theme: &mut ColorTheme, path: &str, target: Option<Group>) {
     }
 }
 
+pub(in crate::app) fn part_group_name(theme: &ColorTheme, path: &str, zh: bool) -> String {
+    match component_group(theme, &catalog_colors::component(path), path) {
+        Group::Custom(index) => theme.groups[index].name.clone(),
+        Group::Role(role) => catalog_colors::ROLES
+            .iter()
+            .find(|(key, _, _)| *key == role)
+            .map_or(role, |(_, cn, en)| t(zh, cn, en))
+            .into(),
+        Group::Text => t(zh, TEXT_COLOR_ZH, TEXT_COLOR_EN).into(),
+    }
+}
+
+pub(in crate::app) fn part_color_label(appearance: GroupAppearance, zh: bool) -> String {
+    let [r, g, b] = appearance.rgb;
+    appearance
+        .material
+        .aliz_swatch_label(appearance.rgb, zh)
+        .unwrap_or_else(|| format!("{} #{r:02X}{g:02X}{b:02X}", color_label(appearance.rgb, zh)))
+}
+
 fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
     match [r, g, b] {
         [0x00, 0x14, 0x89] => return t(z, "深蓝色", "Reflex Blue"),
