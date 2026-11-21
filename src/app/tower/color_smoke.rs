@@ -452,17 +452,48 @@ impl App {
                 }
                 9 => {
                     control(&ui, "保存当前配色…", false)?;
-                    self.click_color_control(control(&ui, PRESET_NAME, false)?);
+                    for name in ["经典工业灰橙", "战术军绿", "未来蓝青", "奶白橙黑"]
+                    {
+                        control(&ui, name, false)?;
+                    }
+                    if !self.capture_native_smoke(ctx, &folder.join("color-presets.png"))? {
+                        return Ok(());
+                    }
+                    self.click_color_control(control(&ui, "奶白橙黑", false)?);
                 }
                 10 => {
+                    self.check_color_rows(&ui, false)?;
+                    let expected = [
+                        [0xFF, 0xFC, 0xF7],
+                        [0xFF, 0x5B, 0x00],
+                        [0x53, 0x56, 0x5A],
+                        [0x11, 0x11, 0x11],
+                        [0xA5, 0xAC, 0xAF],
+                        [0x11, 0x11, 0x11],
+                    ];
+                    if self.global_colors.palette != expected
+                        || self.global_colors.materials != [FilamentMaterial::PetgBasic; 6]
+                        || !self.global_colors.text_color_enabled()
+                    {
+                        return Err(
+                            "Choosing a built-in preset did not apply its PETG Basic palette"
+                                .into(),
+                        );
+                    }
+                    self.click_color_control(control(&ui, "配色预设", true)?);
+                }
+                11 => {
+                    self.click_color_control(control(&ui, PRESET_NAME, false)?);
+                }
+                12 => {
                     self.check_color_rows(&ui, false)?;
                     if self.global_colors != self.color_presets[PRESET_NAME] {
                         return Err("Choosing a preset did not restore the complete theme".into());
                     }
                     self.click_color_control(control(&ui, "设置", true)?);
                 }
-                11 => self.click_color_control(control(&ui, "材料", false)?),
-                12 => {
+                13 => self.click_color_control(control(&ui, "材料", false)?),
+                14 => {
                     control(&ui, "可选耗材", false)?;
                     control(&ui, "默认耗材", false)?;
                     if !self.capture_native_smoke(ctx, &folder.join("material-settings.png"))? {
@@ -470,7 +501,7 @@ impl App {
                     }
                     self.click_color_control(control(&ui, "PLA Basic", false)?);
                 }
-                13 => {
+                15 => {
                     let swatches_visible = ui
                         .iter()
                         .any(|t| t.layer != LayerId::background() && t.value.contains("添加颜色"));
@@ -486,8 +517,8 @@ impl App {
                     }
                     self.click_color_control(control(&ui, "PLA Basic", false)?);
                 }
-                14 | 18 => {
-                    if self.smoke_stage == 18
+                16 | 20 => {
+                    if self.smoke_stage == 20
                         && popup_control(&ui, "颜色", &[default_section()?.layer]).is_some()
                     {
                         return Err(
@@ -503,21 +534,35 @@ impl App {
                         "#{r:02X}{g:02X}{b:02X}  ·  {}",
                         self.material_library.name(appearance.material)
                     );
-                    match control(&ui, &label, false) {
-                        Ok(button) => self.click_color_control(button),
-                        Err(_) if self.smoke_frame < 30 => return Ok(()),
-                        Err(error) => return Err(error),
+                    let layer = default_section()?.layer;
+                    let button = ui
+                        .iter()
+                        .find(|text| text.layer == layer && text.value == "主体")
+                        .and_then(|body| {
+                            ui.iter().find(|text| {
+                                text.layer == layer
+                                    && text.value == label
+                                    && (text.center.y - body.center.y).abs() < 3.0
+                            })
+                        });
+                    match button {
+                        Some(button) => self.click_color_control(button.center),
+                        None if self.smoke_frame < 30 => return Ok(()),
+                        None => {
+                            return Err(format!("Missing default body filament control '{label}'"));
+                        }
                     }
                 }
-                15 => {
+                17 => {
                     let (selector, _) =
                         self.default_filament_card(ctx, &ui, default_section()?.layer)?;
+                    swatch(ctx, selector.layer, [0xFF, 0x5B, 0x00], selector.center.y)?;
                     if !self.capture_native_smoke(ctx, &folder.join("default-filament-card.png"))? {
                         return Ok(());
                     }
                     self.click_color_control(selector.center);
                 }
-                16 => {
+                18 => {
                     let settings = default_section()?.layer;
                     let (selector, _) = self.default_filament_card(ctx, &ui, settings)?;
                     let current = popup_control(&ui, &selector.value, &[settings, selector.layer])
@@ -539,7 +584,7 @@ impl App {
                     }
                     self.click_color_control(current.center);
                 }
-                17 => {
+                19 => {
                     let outside = default_section()?;
                     let (selector, _) = self.default_filament_card(ctx, &ui, outside.layer)?;
                     if popup_control(&ui, &selector.value, &[outside.layer, selector.layer])
@@ -549,7 +594,7 @@ impl App {
                     }
                     self.click_color_control(outside.center);
                 }
-                19 => {
+                21 => {
                     let (_, swatch) =
                         self.default_filament_card(ctx, &ui, default_section()?.layer)?;
                     self.click_color_control(swatch);

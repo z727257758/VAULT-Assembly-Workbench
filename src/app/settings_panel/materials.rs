@@ -295,10 +295,13 @@ fn swatch_editor(
         for (index, &rgb) in swatches.iter().enumerate() {
             let hidden = library.is_swatch_hidden(material, rgb);
             let response = ui_style::swatch(ui, color32(rgb), editor.selected == Some(index), "");
+            let name = material
+                .aliz_swatch_label(rgb, zh)
+                .unwrap_or_else(|| hex(rgb));
             let tooltip = if hidden {
-                format!("{} · {}", hex(rgb), t(zh, "已隐藏", "Hidden"))
+                format!("{name} · {}", t(zh, "已隐藏", "Hidden"))
             } else {
-                hex(rgb)
+                name
             };
             if hidden {
                 let center = response.rect.center();
@@ -528,7 +531,12 @@ fn default_card(
                 ui.spacing_mut().item_spacing = egui::vec2(4., 4.);
                 for rgb in swatches {
                     if ui_style::swatch(ui, color32(rgb), appearance.rgb == rgb, "")
-                        .on_hover_text(hex(rgb))
+                        .on_hover_text(
+                            appearance
+                                .material
+                                .aliz_swatch_label(rgb, zh)
+                                .unwrap_or_else(|| hex(rgb)),
+                        )
                         .clicked()
                     {
                         appearance.rgb = rgb;

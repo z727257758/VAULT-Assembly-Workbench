@@ -333,12 +333,12 @@ impl Config {
 }
 
 const DEFAULT_PALETTE: [[u8; 3]; 6] = [
-    [167, 170, 170],
-    [248, 82, 0],
-    [82, 82, 82],
+    [127, 126, 131],
+    [214, 0, 28],
+    [127, 126, 131],
     [0, 0, 0],
-    [142, 144, 137],
-    [246, 246, 243],
+    [127, 126, 131],
+    [255, 255, 255],
 ];
 
 const DEFAULT_MATERIALS: [FilamentMaterial; 6] = [FilamentMaterial::PetgBasic; 6];

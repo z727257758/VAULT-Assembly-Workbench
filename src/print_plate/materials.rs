@@ -118,10 +118,67 @@ const PLA_MATTE: [[u8; 3]; 17] = rgb([
     0xFFFFFF, 0xCDC8B9, 0xF6DA72, 0xFAA46B, 0xE8A7BB, 0xB493D3, 0x8F347E, 0xC53258, 0xBB4546,
     0xBFDF88, 0x8AB6B2, 0xA5D2E5, 0x587799, 0x685851, 0x989999, 0x525252, 0x191919,
 ]);
-const PETG_BASIC: [[u8; 3]; 12] = rgb([
-    0xFF621A, 0xE80016, 0xFBCB00, 0x13AB48, 0x087CC0, 0x082996, 0x000000, 0xFFFFFF, 0xDDD3CA,
-    0x603721, 0xA7AAAA, 0x525252,
+// Bambu Studio 02.05.00.66, BBL/filament/filaments_color_codes.json, GFG00.
+const BAMBU_PETG_BASIC: [[u8; 3]; 7] = rgb([
+    0x000000, 0xFFFFFF, 0x7F7E83, 0xFCE300, 0xD6001C, 0x001489, 0x4F2C1D,
 ]);
+// Classic solid colors, including the Ice Pink entry listed in the full color table.
+// Source: http://www.aliz3d.com/product/2 (Chinese and English color-code tables).
+const ALIZ_PETG: [(u32, &str, &str, &str); 30] = [
+    (0x7354A0, "紫罗兰", "Violet", "AEB7500"),
+    (0xFF5B00, "橙色", "Orange", "AEB2500"),
+    (0xFED100, "黄色", "Yellow", "AEB3500"),
+    (0x00A3E0, "青色", "Cyan", "AEB5500"),
+    (0xD72F8B, "品红色", "Magenta", "AEB1500"),
+    (0x111111, "黑色", "Black", "AEB8900"),
+    (0xFFFFFF, "白色", "White", "AEB8000"),
+    (0x54301A, "咖啡色", "Coffee Color", "AEB1800"),
+    (0xE2231A, "大红", "Bright Red", "AEB1501"),
+    (0xC41230, "朱砂红", "Cinnabar Red", "AEB1401"),
+    (0x001489, "克莱因蓝", "Klein Blue", "AEB6700"),
+    (0x0055B8, "蓝色", "Blue", "AEB6600"),
+    (0x8B2332, "酒红色", "Wine Red", "AEB1700"),
+    (0x5B6770, "蓝灰色", "Gray Blue", "AEB6601"),
+    (0x6C4F3D, "棕色", "Brown", "AEB1600"),
+    (0x0072CE, "湖蓝色", "Lake Blue", "AEB6500"),
+    (0xF1B2DC, "樱花粉", "Cherry Blossom Pink", "AEB1200"),
+    (0xFEECD2, "肤色", "Skin Color", "AEB3100"),
+    (0x60C659, "柠檬绿", "Lemon Green", "AEB4400"),
+    (0x2AD2C9, "薄荷绿", "Mint Green", "AEB4500"),
+    (0xA5ACAF, "浅灰色", "Light Gray", "AEB8300"),
+    (0x00843D, "绿色", "Green", "AEB4502"),
+    (0x556B2F, "橄榄绿", "Olive Green", "AEB4501"),
+    (0x3A4B30, "墨绿色", "Dark Green", "AEB4600"),
+    (0x53565A, "铁灰色", "Iron Gray", "AEB8700"),
+    (0xFFFCF7, "奶白色", "Milky White", "AEB8001"),
+    (0x213123, "军绿色", "Army Green", "AEB4700"),
+    (0xFFEDAE, "米黄色", "Beige", "AEB3200"),
+    (0x97999B, "冷灰色", "Cold Gray", "AEB8400"),
+    (0xF7C8D5, "冰粉色", "Ice Pink", "AEB1300"),
+];
+
+static PETG_BASIC: std::sync::LazyLock<Vec<[u8; 3]>> = std::sync::LazyLock::new(|| {
+    let mut swatches = BAMBU_PETG_BASIC.to_vec();
+    for (hex, _, _, _) in ALIZ_PETG {
+        let [color] = rgb([hex]);
+        if !swatches.contains(&color) {
+            swatches.push(color);
+        }
+    }
+    swatches
+});
+
+impl FilamentMaterial {
+    pub(crate) fn aliz_swatch_label(self, [r, g, b]: [u8; 3], zh: bool) -> Option<String> {
+        if self != Self::PetgBasic {
+            return None;
+        }
+        let hex = u32::from_be_bytes([0, r, g, b]);
+        let &(_, chinese, english, code) = ALIZ_PETG.iter().find(|entry| entry.0 == hex)?;
+        let name = if zh { chinese } else { english };
+        Some(format!("ALIZ {name} · {code} · #{hex:06X}"))
+    }
+}
 const PETG_MATTE: [[u8; 3]; 11] = rgb([
     0x090909, 0xFFFFFF, 0xC8C9CA, 0xEDA6B7, 0xA3A8DC, 0xB9DDE8, 0xAFDCA9, 0xB6D600, 0x8E9089,
     0x525252, 0xAA795F,
@@ -617,6 +674,28 @@ mod tests {
         let config: crate::print_plate::Config =
             toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(config.appearance(2).material, material);
+    }
+
+    #[test]
+    fn petg_basic_swatches_include_the_deduplicated_aliz_catalog() {
+        let material = FilamentMaterial::PetgBasic;
+        let library = MaterialLibrary::default();
+        let swatches = library.swatches(material);
+        assert_eq!(swatches.len(), 35);
+        assert!(swatches.starts_with(&BAMBU_PETG_BASIC));
+        for (hex, _, _, _) in ALIZ_PETG {
+            let [color] = rgb([hex]);
+            assert_eq!(
+                swatches.iter().filter(|&&swatch| swatch == color).count(),
+                1
+            );
+        }
+        assert_eq!(
+            material
+                .aliz_swatch_label([0xF7, 0xC8, 0xD5], true)
+                .as_deref(),
+            Some("ALIZ 冰粉色 · AEB1300 · #F7C8D5")
+        );
     }
 
     #[test]

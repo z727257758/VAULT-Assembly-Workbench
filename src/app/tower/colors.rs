@@ -9,6 +9,36 @@ use std::collections::BTreeSet;
 const TEXT_COLOR_ZH: &str = "字体颜色";
 const TEXT_COLOR_EN: &str = "Text color";
 
+// Body, functional parts, accessories, dividers, Gridfinity bins, then text.
+const BUILTIN_PRESETS: [(&str, &str, [u32; 6]); 4] = [
+    (
+        "经典工业灰橙",
+        "Classic industrial gray and orange",
+        [0xA5ACAF, 0xFF5B00, 0x53565A, 0x111111, 0x97999B, 0xFFFFFF],
+    ),
+    (
+        "战术军绿",
+        "Tactical army green",
+        [0x213123, 0xFFEDAE, 0x3A4B30, 0x111111, 0x556B2F, 0xFFFCF7],
+    ),
+    (
+        "未来蓝青",
+        "Futuristic blue and cyan",
+        [0x5B6770, 0x2AD2C9, 0x97999B, 0x111111, 0xA5ACAF, 0xFFFFFF],
+    ),
+    (
+        "奶白橙黑",
+        "Milky white, orange and black",
+        [0xFFFCF7, 0xFF5B00, 0x53565A, 0x111111, 0xA5ACAF, 0x111111],
+    ),
+];
+
+fn builtin_theme(colors: [u32; 6]) -> ColorTheme {
+    let mut theme = ColorTheme::default();
+    theme.palette = colors.map(|rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    theme
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum CardKey {
     Role(&'static str),
@@ -182,6 +212,11 @@ fn assign_component(theme: &mut ColorTheme, path: &str, target: Option<Group>) {
 }
 
 fn color_label([r, g, b]: [u8; 3], z: bool) -> &'static str {
+    match [r, g, b] {
+        [0x00, 0x14, 0x89] => return t(z, "深蓝色", "Reflex Blue"),
+        [0x4F, 0x2C, 0x1D] => return t(z, "深棕色", "Dark Brown"),
+        _ => {}
+    }
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     if max - min < 26 {
@@ -298,11 +333,30 @@ fn presets_ui(app: &mut App, ui: &mut egui::Ui) -> bool {
             app.tower.color_preset_name.get_or_insert_with(String::new);
             ui.close();
         }
-        if !app.color_presets.is_empty() {
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(240.0)
-                .show(ui, |ui| {
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                ui.label(t(z, "内置配色", "Built-in colors"));
+                for (zh, en, colors) in BUILTIN_PRESETS {
+                    let theme = builtin_theme(colors);
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            let clicked = ui
+                                .selectable_label(theme == app.global_colors, t(z, zh, en))
+                                .clicked();
+                            layers::palette(ui, &theme.palette, theme.palette.len());
+                            clicked
+                        })
+                        .inner;
+                    if clicked {
+                        selected = Some(theme);
+                        ui.close();
+                    }
+                }
+                if !app.color_presets.is_empty() {
+                    ui.separator();
+                    ui.label(t(z, "已保存", "Saved colors"));
                     for (name, theme) in &app.color_presets {
                         if ui
                             .selectable_label(*theme == app.global_colors, name)
@@ -312,8 +366,8 @@ fn presets_ui(app: &mut App, ui: &mut egui::Ui) -> bool {
                             ui.close();
                         }
                     }
-                });
-        }
+                }
+            });
     });
     if let Some(theme) = selected {
         match app.apply_global_theme(theme) {
@@ -815,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn default_swatches_display_the_five_reference_color_names() {
+    fn default_groups_display_petg_basic_color_names() {
         let theme = ColorTheme::default();
         let labels = groups(&theme, true)
             .into_iter()
@@ -827,13 +881,34 @@ mod tests {
         assert_eq!(
             labels,
             [
-                ("银色", "Silver"),
-                ("橙色", "Orange"),
-                ("深灰", "Dark gray"),
+                ("灰色", "Gray"),
+                ("红色", "Red"),
+                ("灰色", "Gray"),
                 ("黑色", "Black"),
                 ("灰色", "Gray")
             ]
         );
+    }
+
+    #[test]
+    fn builtin_themes_and_defaults_use_only_petg_basic_swatches() {
+        let material = crate::print_plate::FilamentMaterial::PetgBasic;
+        let library = MaterialLibrary::default();
+        let swatches = library.swatches(material);
+        let groups = catalog_colors::ROLES
+            .map(|(role, _, _)| Group::Role(role))
+            .into_iter()
+            .chain([Group::Text]);
+        let themes = BUILTIN_PRESETS.map(|(_, _, colors)| builtin_theme(colors));
+        for theme in themes.into_iter().chain([library.default_theme()]) {
+            theme.validate().unwrap();
+            for group in groups.clone() {
+                let appearance = theme.group_appearance(group);
+                assert!(swatches.contains(&appearance.rgb));
+                assert_eq!(appearance.material, material);
+            }
+            assert!(theme.text_color_enabled());
+        }
     }
 
     #[test]

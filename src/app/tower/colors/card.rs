@@ -387,7 +387,12 @@ pub(super) fn appearance_ui(
                     if index == columns - 1 {
                         custom_color(ui, size, &mut appearance.rgb, z);
                     } else if let Some(rgb @ [r, g, b]) = colors.next() {
-                        let name = format!("{} · #{r:02X}{g:02X}{b:02X}", color_label(rgb, z));
+                        let name = appearance
+                            .material
+                            .aliz_swatch_label(rgb, z)
+                            .unwrap_or_else(|| {
+                                format!("{} · #{r:02X}{g:02X}{b:02X}", color_label(rgb, z))
+                            });
                         if crate::ui_style::swatch(
                             ui,
                             Color32::from_rgb(r, g, b),
