@@ -222,7 +222,11 @@ impl App {
                 }
             }
             _ if self.interior_editor_open() => {
-                self.camera.fit(&self.interior_scene(), self.explosion);
+                let edit_pose = self.opened_drawer_divider_preview();
+                self.camera.fit(
+                    &self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene)),
+                    self.explosion,
+                );
             }
             _ => self.camera.fit(&self.scene, self.explosion),
         }

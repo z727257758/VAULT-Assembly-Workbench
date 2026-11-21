@@ -180,9 +180,11 @@ impl App {
                 housing.drawers[1].gridfinity.clone(),
             ]);
             // A partly opened target detects a close action that blindly resets it to zero.
+            housing.drawers[0].drawer_extension = 0.45;
             housing.drawers[1].drawer_extension = 0.2;
             preset.selection.height = "1F".into();
             tower::configure(&mut preset, &self.catalog, true)?;
+            preset.drawer_extension = 0.35;
             self.members = vec![
                 Member {
                     name: "S4".into(),
@@ -388,6 +390,20 @@ impl App {
         // Compare the complete displayed assembly against its solved pose, including
         // the shared shell, sibling drawer, upper module and attached accessories.
         let mut expected = self.scene.clone();
+        for other in [
+            SIBLING,
+            Target {
+                member: 1,
+                drawer: None,
+            },
+        ] {
+            let previous = AssemblyRules::mechanism(&self.scene, other)?;
+            let shown = AssemblyRules::mechanism(drawn, other)?;
+            if previous.value <= previous.min || shown.value != shown.min || shown.latch != 0. {
+                return Err("An unselected drawer was not closed in the editing view".into());
+            }
+            AssemblyRules::set_slider(&mut expected, &previous.child, previous.min)?;
+        }
         AssemblyRules::set_slider(&mut expected, &motion.child, motion.max)?;
         if drawn.parts.len() != expected.parts.len() {
             return Err("The editor omitted parts of the surrounding assembly".into());

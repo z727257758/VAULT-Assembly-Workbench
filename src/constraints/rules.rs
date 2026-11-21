@@ -270,6 +270,55 @@ impl AssemblyRules {
     }
 
     fn solve_sample(scene: &mut Scene, m: &Mechanism, sample: MotionSample) -> Result<(), String> {
+        Self::set_motion_sample(scene, m, sample)?;
+        solve(scene)
+    }
+
+    /// Build an editing pose without changing the assembly or saved motion goals.
+    pub(crate) fn interior_preview(source: &Scene, target: &Mechanism) -> Result<Scene, String> {
+        let mut scene = source.clone();
+        for relation in &source.relations {
+            if relation.child == target.child
+                || ![Self::DRAWER_SLIDE, crate::sustainer::LID]
+                    .contains(&Self::label(&relation.label))
+            {
+                continue;
+            }
+            let mechanism = Self::mechanism_for_joint(source, &relation.child)?;
+            if mechanism.value != mechanism.min || mechanism.latch != 0. || mechanism.slide != 0. {
+                Self::set_motion_sample(
+                    &mut scene,
+                    &mechanism,
+                    MotionSample {
+                        value: mechanism.min,
+                        latch: 0.,
+                        slide: 0.,
+                    },
+                )?;
+            }
+        }
+        Self::set_motion_sample(
+            &mut scene,
+            target,
+            MotionSample {
+                value: target.max,
+                latch: if target.has_latch() && target.max > target.min + 0.001 {
+                    1.
+                } else {
+                    0.
+                },
+                slide: target.slide.max(target.slide_distance),
+            },
+        )?;
+        solve(&mut scene)?;
+        Ok(scene)
+    }
+
+    fn set_motion_sample(
+        scene: &mut Scene,
+        m: &Mechanism,
+        sample: MotionSample,
+    ) -> Result<(), String> {
         Self::validate_motion_value(m, sample.value, sample.slide)?;
         if !sample.latch.is_finite() || !(0. ..=1.).contains(&sample.latch) {
             return Err("Invalid motion sample".into());
@@ -317,7 +366,7 @@ impl AssemblyRules {
             };
             *value = latch.released * sample.latch;
         }
-        solve(scene)
+        Ok(())
     }
 
     pub fn close_drawers(scene: &mut Scene) -> Result<(), String> {

@@ -230,6 +230,7 @@ pub struct App {
     divider_layout: crate::dividers::Layout,
     divider_editor: crate::divider_editor::Editor,
     divider_view: Option<DividerView>,
+    drawer_divider_preview: Option<workspace::OpenInterior>,
     layout_cache: BTreeMap<String, crate::dividers::Layout>,
     scene: Scene,
     renderer: Renderer,
@@ -391,6 +392,7 @@ impl App {
             divider_model: Default::default(),
             sustainer_layout_cache: Default::default(),
             divider_view: None,
+            drawer_divider_preview: None,
             layout_cache: Default::default(),
             scene: Scene::default(),
             renderer,
@@ -1670,8 +1672,8 @@ impl App {
         )
         .into();
     }
-    fn interior_scene(&self) -> Scene {
-        let mut scene = self.scene.clone();
+    fn interior_scene(&self, source: &Scene) -> Scene {
+        let mut scene = source.clone();
         for p in &mut scene.parts {
             p.visible = crate::dividers::interior_part(&p.pose.path)
                 && (self.scene_key != "combination"
@@ -1685,6 +1687,22 @@ impl App {
     }
     fn interior_editor_open(&self) -> bool {
         self.divider_editor.open
+    }
+    fn opened_drawer_divider_preview(&mut self) -> Option<std::sync::Arc<Scene>> {
+        if !self.interior_editor_open() || self.scene_key != "combination" {
+            self.drawer_divider_preview = None;
+            return None;
+        }
+        workspace::OpenInterior::get(
+            &mut self.drawer_divider_preview,
+            &self.scene,
+            crate::scene::Target {
+                member: self.active_member,
+                drawer: self.active_drawer,
+            },
+            crate::constraints::MotionKind::Drawer,
+        )
+        .ok()
     }
     fn divider_view(&mut self, ctx: &egui::Context) {
         if self.scene_key == "combination" {
@@ -1718,7 +1736,7 @@ impl App {
                 self.explosion = 0.;
                 self.dimensions = false;
                 self.camera = Camera::default();
-                self.camera.fit(&self.interior_scene(), 0.);
+                self.camera.fit(&self.interior_scene(&self.scene), 0.);
                 self.camera.yaw = 0.6;
                 self.camera.pitch = 0.9;
                 self.divider_view.as_mut().unwrap().shown_key = self.scene_key.clone();
@@ -2139,6 +2157,7 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let edit_pose = self.opened_drawer_divider_preview();
                     let member_offsets = self.layer_reorder_offsets(ctx, 0., self.explosion);
                     let reordering =
                         self.pending_layer_reorder.is_some() || !member_offsets.is_empty();
@@ -2172,7 +2191,8 @@ impl App {
                     {
                         let (o, d) = self.camera.ray(p, rect);
                         self.last_hit = if self.interior_editor_open() {
-                            self.interior_scene().pick(o, d, self.explosion)
+                            self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene))
+                                .pick(o, d, self.explosion)
                         } else {
                             self.scene.pick(o, d, self.explosion)
                         };
@@ -2196,7 +2216,7 @@ impl App {
                     } else if !spatial_input && !reordering && response.double_clicked() {
                         self.camera.fit(
                             &if self.interior_editor_open() {
-                                self.interior_scene()
+                                self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene))
                             } else {
                                 self.scene.clone()
                             },
@@ -2210,7 +2230,7 @@ impl App {
                     let id = self.renderer.render(
                         0,
                         [(size.x * dpi) as u32, (size.y * dpi) as u32],
-                        &self.scene,
+                        edit_pose.as_deref().unwrap_or(&self.scene),
                         &self.camera,
                         ViewOptions {
                             explosion: self.explosion,

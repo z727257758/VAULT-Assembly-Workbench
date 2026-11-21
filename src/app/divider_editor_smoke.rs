@@ -50,6 +50,7 @@ impl App {
             p.sustainer_dividers.specification = dividers::spec(&p.selection, p.sustainer_options);
             let mut layers = Vec::new();
             for level in [0, 1] {
+                p.sustainer_angle = if level == BOX.member as u32 { 0. } else { 70. };
                 p.sustainer_dividers.items = if level != BOX.member as u32 {
                     vec![slot(1, 2)]
                 } else {
@@ -127,6 +128,18 @@ impl App {
             || qty as usize != count
             || *layout != self.members[BOX.member].preset.sustainer_dividers
             || self.members[1].preset.sustainer_dividers.items != [slot(1, 2)]
+            || self.members[1].preset.sustainer_angle != 70.
+            || (AssemblyRules::mechanism(
+                &self.scene,
+                Target {
+                    member: 1,
+                    drawer: None,
+                },
+            )?
+            .value
+                - 70.)
+                .abs()
+                > 0.01
             || self.sustainer_angle != 0.
             || AssemblyRules::mechanism(&self.scene, BOX)?.value.abs() > 0.01
         {
@@ -158,17 +171,26 @@ impl App {
             .as_ref()
             .ok_or("Missing divider editor render")?;
         let lid = AssemblyRules::mechanism(display, BOX)?;
+        let other = Target {
+            member: 1,
+            drawer: None,
+        };
+        let closed = AssemblyRules::mechanism(display, other)?;
         if display.parts.len() != self.scene.parts.len()
             || !lid.supports_upper
             || lid.slide <= 0.
             || lid.value < 70.
+            || closed.value != closed.min
+            || closed.latch != 0.
+            || closed.slide != 0.
             || self.scene.member_bounds != display.member_bounds
         {
             return Err("Divider editor did not open the lower case in the full assembly".into());
         }
+        let mut expected = self.scene.clone();
+        AssemblyRules::set_lid_angle_for(&mut expected, &closed.child, closed.min)?;
         let mut other_visible = false;
-        for ((source, shown), material) in
-            self.scene.parts.iter().zip(&display.parts).zip(materials)
+        for ((source, shown), material) in expected.parts.iter().zip(&display.parts).zip(materials)
         {
             if shown.visible {
                 let opacity = match material {

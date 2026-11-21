@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_edit_drawer_preserves_its_housing_and_other_drawer() {
+    fn opening_the_edit_drawer_closes_its_sibling_in_the_display_copy() {
         use crate::constraints::{self, Joint, Relation};
         let size = Vec3::new(140., 160., 40.);
         let mesh = Arc::new(Mesh {
@@ -200,6 +200,7 @@ mod tests {
             constraints::add(&mut source, joint).unwrap();
         }
         let other_id = PartId::of(&source.parts[1]);
+        let closed_sibling = source.parts[1].pose.matrix(0.);
         AssemblyRules::set_slider(&mut source, &other_id, 20.).unwrap();
         let mut cache = None;
         let opened =
@@ -208,14 +209,26 @@ mod tests {
             &opened,
             &workspace::OpenInterior::get(&mut cache, &source, target, MotionKind::Drawer).unwrap()
         ));
-        for i in [0, 1] {
-            assert!(
-                opened.parts[i]
-                    .pose
-                    .matrix(0.)
-                    .abs_diff_eq(source.parts[i].pose.matrix(0.), 0.001)
-            );
-        }
+        assert!(
+            opened.parts[0]
+                .pose
+                .matrix(0.)
+                .abs_diff_eq(source.parts[0].pose.matrix(0.), 0.001)
+        );
+        assert!(
+            opened.parts[1]
+                .pose
+                .matrix(0.)
+                .abs_diff_eq(closed_sibling, 0.001)
+        );
+        assert_eq!(
+            AssemblyRules::mechanism(&source, sibling).unwrap().value,
+            20.
+        );
+        assert_eq!(
+            AssemblyRules::mechanism(&opened, sibling).unwrap().value,
+            0.
+        );
         assert_eq!(AssemblyRules::mechanism(&source, target).unwrap().value, 0.);
         assert_eq!(
             AssemblyRules::mechanism(&opened, target).unwrap().value,

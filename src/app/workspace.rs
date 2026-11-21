@@ -24,19 +24,7 @@ impl OpenInterior {
             }
             .into());
         }
-        let mut scene = source.clone();
-        match kind {
-            MotionKind::Drawer => AssemblyRules::set_slider(&mut scene, &joint.child, joint.max)?,
-            MotionKind::Lid => {
-                let plan = AssemblyRules::plan_motion(source, &joint.child, joint.max)?;
-                AssemblyRules::apply_motion_sample(
-                    &mut scene,
-                    &joint.child,
-                    plan.sample(plan.duration),
-                )?;
-            }
-        }
-        Ok(Arc::new(scene))
+        AssemblyRules::interior_preview(source, &joint).map(Arc::new)
     }
 
     pub(super) fn get(
