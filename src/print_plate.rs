@@ -9,6 +9,8 @@ pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 // The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
 const MAX_PROJECT_SLOTS: u32 = 32;
 pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
+const TEXT_ROLE: &str = "text";
+const DEFAULT_TEXT_SLOT: u32 = 6;
 fn generated_color_type(path: &str) -> Option<(&'static str, u32)> {
     let file = path
         .strip_prefix(crate::gridfinity::PREFIX)?
@@ -192,7 +194,7 @@ impl Config {
                     .get(&crate::catalog::colors::component(path))
                     .copied()
             })
-            .or_else(|| self.role_filaments.get("text").copied())
+            .or_else(|| self.role_filaments.get(TEXT_ROLE).copied())
             .unwrap_or_else(|| self.slot(path))
             .clamp(1, self.slot_count())
     }
@@ -371,7 +373,21 @@ pub struct ColorGroup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PaletteGroup {
     Role(&'static str),
+    Text,
     Custom(usize),
+}
+
+impl PaletteGroup {
+    fn default_slot(self) -> Option<usize> {
+        match self {
+            Self::Role(role) => crate::catalog::colors::ROLES
+                .iter()
+                .position(|(key, _, _)| *key == role)
+                .map(|index| index + 1),
+            Self::Text => Some(DEFAULT_TEXT_SLOT as usize),
+            Self::Custom(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +440,7 @@ pub struct ColorTheme {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_filaments: Vec<GroupAppearance>,
     pub filament: u32,
+    #[serde(default = "default_role_slots")]
     pub roles: std::collections::BTreeMap<String, u32>,
     pub role_overrides: std::collections::BTreeMap<String, String>,
     pub component_text: std::collections::BTreeMap<String, u32>,
@@ -432,13 +449,15 @@ pub struct ColorTheme {
 }
 impl Default for ColorTheme {
     fn default() -> Self {
+        let mut roles = default_role_slots();
+        roles.insert(TEXT_ROLE.into(), DEFAULT_TEXT_SLOT);
         Self {
             grouping_version: 1,
             palette: DEFAULT_PALETTE,
             materials: DEFAULT_MATERIALS,
             extra_filaments: Vec::new(),
             filament: 1,
-            roles: default_role_slots(),
+            roles,
             role_overrides: Default::default(),
             component_text: Default::default(),
             groups: Vec::new(),
@@ -446,10 +465,17 @@ impl Default for ColorTheme {
     }
 }
 impl ColorTheme {
+    pub fn legacy_default() -> Self {
+        Self {
+            roles: default_role_slots(),
+            ..Self::default()
+        }
+    }
+
     pub fn load<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let theme = Self::deserialize(de)?;
         if theme.grouping_version == 0 {
-            return Ok(Self::default());
+            return Ok(Self::legacy_default());
         }
         theme.validate().map_err(serde::de::Error::custom)?;
         Ok(theme)
@@ -463,14 +489,37 @@ impl ColorTheme {
     pub fn appearance(&self, slot: u32) -> GroupAppearance {
         slot_appearance(&self.palette, &self.materials, &self.extra_filaments, slot)
     }
+    pub fn text_color_enabled(&self) -> bool {
+        self.roles.contains_key(TEXT_ROLE)
+    }
+    pub fn set_text_color_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if !enabled {
+            self.roles.remove(TEXT_ROLE);
+        } else if !self.text_color_enabled() {
+            self.set_group_appearance(PaletteGroup::Text, Self::default_text_appearance())?;
+        }
+        Ok(())
+    }
+    fn default_text_appearance() -> GroupAppearance {
+        slot_appearance(&DEFAULT_PALETTE, &DEFAULT_MATERIALS, &[], DEFAULT_TEXT_SLOT)
+    }
     fn palette_group_slot(&self, group: PaletteGroup) -> u32 {
         match group {
             PaletteGroup::Role(role) => self.role_slot(role),
+            PaletteGroup::Text => self
+                .roles
+                .get(TEXT_ROLE)
+                .copied()
+                .unwrap_or(DEFAULT_TEXT_SLOT),
             PaletteGroup::Custom(i) => self.groups[i].slot,
         }
     }
     pub fn group_appearance(&self, group: PaletteGroup) -> GroupAppearance {
-        self.appearance(self.palette_group_slot(group))
+        if group == PaletteGroup::Text && !self.text_color_enabled() {
+            Self::default_text_appearance()
+        } else {
+            self.appearance(self.palette_group_slot(group))
+        }
     }
 
     /// Detach a shared slot when an edit would recolor another group or lettering.
@@ -482,13 +531,18 @@ impl ColorTheme {
         self.check_group(group)?;
         let old_slot = self.palette_group_slot(group);
         let previous = self.appearance(old_slot);
-        if previous == appearance {
+        if previous == appearance && (group != PaletteGroup::Text || self.text_color_enabled()) {
             return Ok(());
         }
         let mut protected = std::collections::BTreeSet::from([self.filament]);
         protected.extend(self.component_text.values().copied());
+        let edited_role = match group {
+            PaletteGroup::Role(role) => Some(role),
+            PaletteGroup::Text => Some(TEXT_ROLE),
+            PaletteGroup::Custom(_) => None,
+        };
         for (role, slot) in &self.roles {
-            if !matches!(group, PaletteGroup::Role(key) if key == role) {
+            if edited_role != Some(role.as_str()) {
                 protected.insert(*slot);
             }
         }
@@ -523,6 +577,9 @@ impl ColorTheme {
             PaletteGroup::Role(role) => {
                 self.roles.insert(role.to_owned(), slot);
             }
+            PaletteGroup::Text => {
+                self.roles.insert(TEXT_ROLE.into(), slot);
+            }
             PaletteGroup::Custom(i) => {
                 self.groups[i].initial_appearance.get_or_insert(previous);
                 self.groups[i].slot = slot;
@@ -546,6 +603,7 @@ impl ColorTheme {
             PaletteGroup::Role(role) => crate::catalog::colors::ROLES
                 .iter()
                 .any(|(id, _, _)| *id == role),
+            PaletteGroup::Text => true,
             PaletteGroup::Custom(i) => i < self.groups.len(),
         };
         exists
@@ -561,6 +619,8 @@ impl ColorTheme {
                 &[],
                 default_role_slots()[role],
             ),
+            PaletteGroup::Text if !self.text_color_enabled() => return Ok(()),
+            PaletteGroup::Text => Self::default_text_appearance(),
             PaletteGroup::Custom(i) => self.groups[i]
                 .initial_appearance
                 .unwrap_or_else(|| self.group_appearance(group)),
@@ -598,7 +658,7 @@ impl ColorTheme {
                 .iter()
                 .any(|(key, slot)| key.is_empty() || !(1..=self.slot_count()).contains(slot))
             || self.roles.iter().any(|(key, slot)| {
-                !(1..=self.slot_count()).contains(slot) || (key != "text" && !valid_role(key))
+                !(1..=self.slot_count()).contains(slot) || (key != TEXT_ROLE && !valid_role(key))
             })
         {
             return Err("无效的整体配色 / Invalid overall colors".into());
@@ -2203,6 +2263,76 @@ mod tests {
 #[cfg(test)]
 mod overall_color_tests {
     use super::*;
+
+    #[test]
+    fn project_text_color_preserves_old_defaults_and_label_overrides() {
+        #[derive(Deserialize)]
+        struct Saved {
+            #[serde(deserialize_with = "ColorTheme::load")]
+            colors: ColorTheme,
+        }
+        let mut config = Config::default();
+        ColorTheme::default().apply(&mut config);
+        assert_eq!(config.slot(crate::label::PATH), 3);
+        assert_eq!(config.text_slot(crate::label::PATH), DEFAULT_TEXT_SLOT);
+
+        let mut colors = toml::from_str::<Saved>(
+            "[colors]\ngrouping_version = 1\n[colors.roles]\nbody = 1\nfunctional = 2\naccessory = 6\ndivider = 4\ngridfinity = 5\n[colors.component_text]\nexisting = 3\n",
+        )
+        .unwrap()
+        .colors;
+        colors.palette[5] = [20, 40, 60];
+        assert!(!colors.text_color_enabled());
+        colors.apply(&mut config);
+        assert_eq!(
+            config.text_slot(crate::label::PATH),
+            config.slot(crate::label::PATH)
+        );
+
+        let original_body = colors.group_appearance(PaletteGroup::Role("accessory"));
+        colors.set_text_color_enabled(true).unwrap();
+        assert_eq!(colors.roles[TEXT_ROLE], 7);
+        let new = GroupAppearance {
+            rgb: [227, 190, 60],
+            material: FilamentMaterial::PetgHf,
+        };
+        colors
+            .set_group_appearance(PaletteGroup::Text, new)
+            .unwrap();
+        colors
+            .component_text
+            .insert(crate::catalog::colors::component(crate::label::PATH), 2);
+        let mut colors: ColorTheme = toml::from_str(&toml::to_string(&colors).unwrap()).unwrap();
+        assert_eq!(
+            colors.group_appearance(PaletteGroup::Role("accessory")),
+            original_body
+        );
+        colors.apply(&mut config);
+        for path in [
+            crate::label::SUSTAINER_PATH,
+            "generated/gridfinity/Gridfinity-9.stl",
+            "generated/gridfinity/Cullenect-9.stl",
+        ] {
+            assert_eq!(config.appearance(config.text_slot(path)), new);
+        }
+        assert_eq!(config.text_slot(crate::label::PATH), 2);
+        config.set_text_slot(crate::label::PATH, 4);
+        assert_eq!(config.text_slot(crate::label::PATH), 4);
+        colors.reset_group_appearance(PaletteGroup::Text).unwrap();
+        assert_eq!(
+            colors.group_appearance(PaletteGroup::Text),
+            ColorTheme::default_text_appearance()
+        );
+        colors.set_text_color_enabled(false).unwrap();
+        colors.trim_unused_slots();
+        colors.validate().unwrap();
+        colors.apply(&mut config);
+        assert_eq!(
+            config.text_slot(crate::label::SUSTAINER_PATH),
+            config.slot(crate::label::SUSTAINER_PATH)
+        );
+        assert_eq!(config.text_slot(crate::label::PATH), 2);
+    }
 
     #[test]
     fn card_edits_detach_shared_slots_and_restore_custom_groups_after_reopening() {

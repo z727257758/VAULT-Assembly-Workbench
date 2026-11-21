@@ -79,6 +79,60 @@ impl Default for Config {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StyleSettings {
+    pub font: Font,
+    pub style: Style,
+    pub size: f32,
+    pub depth: f32,
+    pub offset: [f32; 2],
+}
+
+impl Default for StyleSettings {
+    fn default() -> Self {
+        Self::from_config(&Config::default())
+    }
+}
+
+impl StyleSettings {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            font: config.font,
+            style: config.style,
+            size: config.size,
+            depth: config.depth,
+            offset: config.offset,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), String> {
+        Config {
+            enabled: true,
+            font: self.font,
+            style: self.style,
+            size: self.size,
+            depth: self.depth,
+            offset: self.offset,
+            ..Default::default()
+        }
+        .validate()
+    }
+
+    pub fn apply(self, label: &mut Config) {
+        label.font = self.font;
+        label.style = self.style;
+        label.size = if label.active() {
+            self.size.max(label.min_size())
+        } else {
+            self.size
+        };
+        label.depth = self.depth;
+        label.offset = self.offset;
+    }
+}
+
 impl Config {
     pub fn with_font(&self, font: Option<Font>) -> Self {
         let mut config = self.clone();

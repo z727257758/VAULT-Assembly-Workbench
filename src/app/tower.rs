@@ -16,7 +16,7 @@ pub(super) struct State {
     reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
     color_edit: Option<colors::Edit>,
-    open_color: Option<String>,
+    open_color: Option<colors::CardKey>,
     reveal_colors: bool,
     color_smoke_input: std::collections::VecDeque<Vec<egui::Event>>,
     error: String,
@@ -562,6 +562,7 @@ impl App {
         let candidate = CombinationPreset {
             project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
+            label_style: self.project_label_style,
             preset: next[0].preset.clone(),
             members: next.clone(),
             active_member: 0,
@@ -639,6 +640,10 @@ impl App {
             self.tower.error = e;
             return;
         }
+        let colors = self.material_library.default_theme();
+        let config = p.print_config.get_or_insert_with(Default::default);
+        colors.apply(config);
+        config.follow_global_colors = true;
         let member = Member {
             name: "第 01 层 · S3 抽屉".into(),
             placement: Default::default(),
@@ -650,7 +655,8 @@ impl App {
             name: name.clone(),
             saved: CombinationPreset {
                 project_name: name,
-                colors: self.global_colors.clone(),
+                colors,
+                label_style: Some(Default::default()),
                 preset: p,
                 members: vec![member],
                 active_member: 0,
@@ -670,7 +676,11 @@ impl App {
             .get(index)
             .ok_or("Unknown combination preset")?;
         // Finish and validate the complete candidate before changing the session.
-        let saved = recipe.build(&self.catalog, &self.global_colors, self.zh)?;
+        let saved = recipe.build(
+            &self.catalog,
+            &self.material_library.default_theme(),
+            self.zh,
+        )?;
         self.tower_capture();
         let project = Project {
             name: saved.project_name.clone(),
@@ -1100,6 +1110,17 @@ impl App {
                         }
                     });
                 ui.separator();
+                if ui
+                    .add_enabled(
+                        !self.members.is_empty(),
+                        egui::Button::new(t(z, "项目标签样式…", "Project label style…")),
+                    )
+                    .clicked()
+                {
+                    self.project_label_draft = None;
+                    self.settings_page = Some(settings_panel::Page::Labels);
+                    ui.close();
+                }
                 ui.menu_button(t(z, "＋ 新建", "＋ New"), |ui| {
                     self.new_project_menu(ui, &mut action)
                 });
@@ -2292,6 +2313,16 @@ impl App {
             if !build_panel_smoke && self.smoke_stage == 2 && !self.label_open {
                 return Err("Subdrawer label editor did not open".into());
             }
+            if self.smoke_stage == 5 && workspace_smoke {
+                let body = crate::print_plate::PaletteGroup::Role("body");
+                let defaults = self.material_library.default_appearance(body).unwrap();
+                if self.global_colors.group_appearance(body) != defaults
+                    || self.export_options.plate.appearance(1) != defaults
+                    || self.tower.projects[0].saved.colors.group_appearance(body) == defaults
+                {
+                    return Err("New projects must use material defaults while saved projects keep their colors".into());
+                }
+            }
             if [3, 13, 16].contains(&self.smoke_stage) && self.inline_edit.open {
                 return Err("Inline editor did not close when leaving configuration".into());
             }
@@ -2465,6 +2496,12 @@ impl App {
             }
             4 => {
                 self.preview_modes.mode = super::preview_modes::Mode::Assembly;
+                if workspace_smoke {
+                    let body = crate::print_plate::PaletteGroup::Role("body");
+                    let mut defaults = self.global_colors.group_appearance(body);
+                    defaults.rgb[0] = 255 - defaults.rgb[0];
+                    self.material_library.set_default_appearance(body, defaults);
+                }
                 self.tower_new(ctx);
                 Ok(())
             }
@@ -2776,6 +2813,7 @@ mod tests {
             &toml::to_string(&CombinationPreset {
                 project_name: "Top test".into(),
                 colors: Default::default(),
+                label_style: None,
                 preset: resized[0].preset.clone(),
                 members: resized.clone(),
                 active_member: 0,
@@ -2989,6 +3027,7 @@ mod tests {
             saved: CombinationPreset {
                 project_name: "工作台".into(),
                 colors: Default::default(),
+                label_style: None,
                 preset: member.preset.clone(),
                 members: vec![member],
                 active_member: 0,
@@ -3018,6 +3057,7 @@ mod tests {
             saved: CombinationPreset {
                 project_name: name.into(),
                 colors: Default::default(),
+                label_style: None,
                 preset: m.preset.clone(),
                 members: vec![m],
                 active_member: 0,

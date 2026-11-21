@@ -59,6 +59,7 @@ fn project(members: Vec<Member>) -> CombinationPreset {
     CombinationPreset {
         project_name: crate::app::tower::default_name(),
         colors: Default::default(),
+        label_style: None,
         preset: members[0].preset.clone(),
         members,
         active_member: 0,

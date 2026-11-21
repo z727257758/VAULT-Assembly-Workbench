@@ -133,7 +133,9 @@ impl App {
             vec![(self.active_member, self.current_print_member())]
         };
         for (_, member) in &mut members {
-            member.preset.apply_label_font(self.label_font);
+            member
+                .preset
+                .apply_label_settings(self.project_label_style, self.label_font);
         }
         PrintRequest {
             root: self.catalog.root.clone(),

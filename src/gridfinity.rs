@@ -217,6 +217,26 @@ impl Layout {
             }
         }
     }
+    pub fn apply_label_style(&mut self, mut style: crate::label::StyleSettings) {
+        for bin in self.bins.iter().filter(|b| b.label.active()) {
+            style.size = style.size.max(bin.label.min_size());
+        }
+        self.shared.font = style.font;
+        self.shared.style = style.style;
+        self.shared.size = style.size;
+        self.shared.depth = if self.shared.tab && self.shared.detachable_label {
+            style.depth.min(0.4)
+        } else {
+            style.depth
+        };
+        self.shared.offset = style.offset;
+        for bin in &mut self.bins {
+            style.apply(&mut bin.label);
+            if bin.detachable() {
+                bin.label.depth = bin.label.depth.min(0.4);
+            }
+        }
+    }
     /// Legacy presets use the lowest ID's styling and the smallest depth as the
     /// default for new bins. Each saved footprint remains in its original cells.
     pub fn adopt_shared(&mut self) {
@@ -1076,6 +1096,43 @@ pub fn apply_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_label_style_keeps_bin_text_and_caps_detachable_depth() {
+        use crate::label::{Font, Style, StyleSettings};
+
+        let selection = Selection::default();
+        let mut layout = Layout::default();
+        layout.shared.detachable_label = true;
+        layout.add(&selection, None).unwrap();
+        layout.add(&selection, None).unwrap();
+        for (bin, text) in layout.bins.iter_mut().zip(["A1", "标签"]) {
+            bin.label.enabled = true;
+            bin.label.text = text.into();
+        }
+        let style = StyleSettings {
+            font: Font::ArialBold,
+            style: Style::Engraved,
+            size: 4.,
+            depth: 0.6,
+            offset: [1., -1.],
+        };
+        style.validate().unwrap();
+        layout.apply_label_style(style);
+        layout.validate(&selection).unwrap();
+        assert_eq!(layout.shared.depth, 0.4);
+        assert_eq!(layout.shared.size, 5.);
+        for (bin, text) in layout.bins.iter().zip(["A1", "标签"]) {
+            assert!(bin.label.enabled && bin.detachable());
+            assert_eq!(bin.label.text, text);
+            assert_eq!(bin.label.font, style.font);
+            assert_eq!(bin.label.style, style.style);
+            assert_eq!(bin.label.offset, style.offset);
+            assert_eq!(bin.label.size, 5.);
+            assert_eq!(bin.label.depth, 0.4);
+        }
+    }
+
     #[test]
     fn shared_parameters_update_all_and_new_bins_without_copying_text() {
         let selection = Selection::default();

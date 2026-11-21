@@ -31,6 +31,7 @@ impl App {
         let saved = CombinationPreset {
             project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
+            label_style: self.project_label_style,
             preset: self.member_snapshot(),
             members: next,
             active_member: self.active_member,

@@ -15,12 +15,14 @@ pub(super) struct Snapshot {
     members: Vec<Member>,
     active: usize,
     colors: ColorTheme,
+    label_style: Option<crate::label::StyleSettings>,
     gap: f32,
 }
 impl Snapshot {
     fn same_content(&self, other: &Self) -> bool {
         // Selection changes alone are not edits.
         self.colors == other.colors
+            && self.label_style == other.label_style
             && self.gap == other.gap
             && serde_json::to_vec(&self.members).ok() == serde_json::to_vec(&other.members).ok()
     }
@@ -188,6 +190,7 @@ impl App {
             members: self.members.clone(),
             active: self.active_member,
             colors: self.global_colors.clone(),
+            label_style: self.project_label_style,
             gap: self.combination_gap,
         }
     }
@@ -210,6 +213,8 @@ impl App {
         self.tower.clear_reorder();
         self.members = state.members;
         self.global_colors = state.colors;
+        self.project_label_style = state.label_style;
+        self.project_label_draft = None;
         self.combination_gap = state.gap;
         self.restore_member(state.active.min(self.members.len().saturating_sub(1)));
         self.combination_view = true;
@@ -238,6 +243,39 @@ impl App {
             self.record_workflow();
             self.global_colors = theme;
             self.sync_global_colors();
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_project_label_style(
+        &mut self,
+        style: crate::label::StyleSettings,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        style.validate()?;
+        if self.members.is_empty() || self.export_rx.is_some() {
+            return Err(t(
+                self.zh,
+                "当前项目暂不可修改标签样式",
+                "Project label style is unavailable right now",
+            )
+            .into());
+        }
+        if self.project_label_style == Some(style) {
+            return Ok(());
+        }
+        self.finish_member_edit();
+        self.workflow_history.push(self.workflow_snapshot());
+        self.project_label_style = Some(style);
+        if self.inline_edit.open {
+            self.member_edit_baseline = Some(self.workflow_snapshot());
+        }
+        if self.combination_view || self.scene.assembly {
+            self.assembly(ctx);
+        } else if let Some(part) = self.scene.parts.first()
+            && crate::label::is_label(&part.pose.path)
+        {
+            self.single(part.pose.path.clone(), ctx);
         }
         Ok(())
     }
@@ -395,8 +433,16 @@ pub(super) fn material_picker(
         .selected_text(format!("{} · {}", i + 1, library.name(*material)))
         .truncate()
         .show_ui(ui, |ui| {
+            let mut choices = library.visible_choices().peekable();
+            if choices.peek().is_none() {
+                ui.small(t(
+                    z,
+                    "请在材料设置中启用耗材。",
+                    "Enable a filament in Materials settings.",
+                ));
+            }
             let mut imported = false;
-            for option in library.choices() {
+            for option in choices {
                 if !imported && library.preset(option).is_some() {
                     imported = true;
                     ui.separator();
@@ -453,6 +499,7 @@ mod tests {
             ],
             active: 1,
             colors: ColorTheme::default(),
+            label_style: None,
             gap: 0.,
         }
     }
@@ -507,6 +554,7 @@ mod tests {
         let project = CombinationPreset {
             project_name: super::tower::default_name(),
             colors: state.colors,
+            label_style: state.label_style,
             preset: state.members[0].preset.clone(),
             members: state.members,
             active_member: 1,

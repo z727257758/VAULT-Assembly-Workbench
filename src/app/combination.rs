@@ -28,8 +28,13 @@ pub(super) struct Member {
 pub(super) struct CombinationPreset {
     #[serde(default = "super::tower::default_name")]
     pub project_name: String,
-    #[serde(default, deserialize_with = "crate::print_plate::ColorTheme::load")]
+    #[serde(
+        default = "crate::print_plate::ColorTheme::legacy_default",
+        deserialize_with = "crate::print_plate::ColorTheme::load"
+    )]
     pub colors: crate::print_plate::ColorTheme,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_style: Option<crate::label::StyleSettings>,
     #[serde(flatten)]
     pub preset: Preset,
     #[serde(default)]
@@ -124,12 +129,21 @@ impl Preset {
         }
     }
 
-    pub(super) fn apply_label_font(&mut self, font: Option<crate::label::Font>) {
-        if let Some(font) = font {
+    pub(super) fn apply_label_settings(
+        &mut self,
+        style: Option<crate::label::StyleSettings>,
+        legacy_font: Option<crate::label::Font>,
+    ) {
+        if let Some(style) = style {
+            style.apply(&mut self.label);
+            self.gridfinity.apply_label_style(style);
+        } else if let Some(font) = legacy_font {
             self.label.font = font;
             self.gridfinity.apply_label_font(Some(font));
+        }
+        if style.is_some() || legacy_font.is_some() {
             for drawer in &mut self.drawers {
-                drawer.apply_label_font(Some(font));
+                drawer.apply_label_settings(style, legacy_font);
             }
         }
     }
@@ -214,6 +228,9 @@ impl CombinationPreset {
 
     pub fn validate(&self, catalog: &Catalog) -> Result<(), String> {
         self.colors.validate()?;
+        if let Some(style) = self.label_style {
+            style.validate()?;
+        }
         if self.members.len() > 64
             || !self.combination_gap.is_finite()
             || !(0. ..=100.).contains(&self.combination_gap)
@@ -253,6 +270,7 @@ impl App {
         CombinationPreset {
             project_name: self.tower.name.clone(),
             colors: self.global_colors.clone(),
+            label_style: self.project_label_style,
             preset,
             members: self.members.clone(),
             active_member: self.active_member,
@@ -274,6 +292,8 @@ impl App {
             saved.active_member
         };
         self.global_colors = saved.colors;
+        self.project_label_style = saved.label_style;
+        self.project_label_draft = None;
         self.combination_gap = saved.combination_gap;
         self.restore_member(self.active_member);
         self.sync_global_colors();
@@ -1148,9 +1168,13 @@ impl App {
     pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
         self.commit_member();
         let mut saved = self.project_snapshot(self.member_snapshot());
-        saved.preset.apply_label_font(self.label_font);
+        saved
+            .preset
+            .apply_label_settings(saved.label_style, self.label_font);
         for member in &mut saved.members {
-            member.preset.apply_label_font(self.label_font);
+            member
+                .preset
+                .apply_label_settings(saved.label_style, self.label_font);
         }
         if let Err(e) = saved.validate(&self.catalog) {
             self.status = e;
@@ -1889,6 +1913,7 @@ mod tests {
         let mut imported = CombinationPreset {
             project_name: "Legacy".into(),
             colors: Default::default(),
+            label_style: None,
             preset: members[0].preset.clone(),
             members,
             active_member: 0,
@@ -2010,35 +2035,59 @@ mod tests {
         assert!(validate_layout(&members[..2], 0.).is_err());
     }
     #[test]
-    fn shared_label_font_applies_to_nested_drawers_and_gridfinity_copies() {
-        use crate::label::Font;
+    fn project_label_style_roundtrips_and_applies_to_nested_drawers_and_gridfinity() {
+        use crate::label::{Font, Style, StyleSettings};
 
         let mut saved = preset();
         let mut child = preset();
+        child.label.enabled = true;
         child.label.text = "Drawer A".into();
         child
             .gridfinity
             .bins
             .push(crate::gridfinity::Bin::default());
         child.gridfinity.bins[0].label.text = "电阻".into();
+        child.gridfinity.bins[0].label.enabled = true;
         saved.drawers.push(child);
 
-        let mut effective = saved.clone();
-        effective.apply_label_font(Some(Font::ArialBold));
+        let style = StyleSettings {
+            font: Font::ArialBold,
+            style: Style::Engraved,
+            size: 4.5,
+            depth: 0.3,
+            offset: [1., 0.],
+        };
+        let project = CombinationPreset {
+            project_name: "Label style".into(),
+            colors: Default::default(),
+            label_style: Some(style),
+            preset: saved.clone(),
+            members: vec![],
+            active_member: 0,
+            combination_gap: 0.,
+        };
+        let loaded: CombinationPreset =
+            toml::from_str(&toml::to_string(&project).unwrap()).unwrap();
+        assert_eq!(loaded.label_style, Some(style));
+        let mut effective = loaded.preset;
+        effective.apply_label_settings(loaded.label_style, Some(Font::Chinese));
         let leaf = &effective.drawers[0];
         assert_eq!(effective.label.font, Font::ArialBold);
-        assert_eq!(leaf.label.font, Font::ArialBold);
+        assert_eq!(StyleSettings::from_config(&leaf.label), style);
         assert_eq!(leaf.gridfinity.shared.font, Font::ArialBold);
         assert_eq!(leaf.gridfinity.bins[0].label.font, Font::ArialBold);
+        assert_eq!(leaf.gridfinity.bins[0].label.style, Style::Engraved);
+        assert_eq!(leaf.gridfinity.bins[0].label.size, 5.);
         assert_eq!(leaf.label.text, "Drawer A");
         assert_eq!(leaf.gridfinity.bins[0].label.text, "电阻");
 
-        saved.apply_label_font(None);
         assert_eq!(saved.drawers[0].label.font, Font::ChineseBold);
+        saved.apply_label_settings(None, Some(Font::Chinese));
         assert_eq!(
             saved.drawers[0].gridfinity.bins[0].label.font,
-            Font::ChineseBold
+            Font::Chinese
         );
+        assert_eq!(saved.drawers[0].label.style, Style::Raised);
     }
 
     #[test]
@@ -2046,6 +2095,7 @@ mod tests {
         let old = toml::to_string(&preset()).unwrap();
         let legacy: CombinationPreset = toml::from_str(&old).unwrap();
         assert!(legacy.members.is_empty());
+        assert!(legacy.label_style.is_none());
         let mut a = preset();
         a.label.text = "A".into();
         a.print_config
@@ -2063,6 +2113,7 @@ mod tests {
         let project = CombinationPreset {
             project_name: super::tower::default_name(),
             colors: Default::default(),
+            label_style: None,
             preset: a.clone(),
             members: vec![
                 Member {
@@ -2142,6 +2193,7 @@ mod tests {
         let saved = CombinationPreset {
             project_name: super::tower::default_name(),
             colors: Default::default(),
+            label_style: None,
             preset: p.clone(),
             members: vec![
                 Member {

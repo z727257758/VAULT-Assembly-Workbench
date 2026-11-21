@@ -534,17 +534,12 @@ impl App {
                 .changed()
             {
                 self.label.enabled = !self.label.text.trim().is_empty();
-                if let Err(error) = self.label.validate() {
+                if let Err(error) = self.validate_label_edit() {
                     self.label = label;
                     self.status = error;
                 } else {
                     self.assembly(ctx);
                 }
-            }
-        });
-        option_row(ui, t(z, "标签样式", "Label style"), |ui| {
-            if ui.button(t(z, "编辑…", "Edit…")).clicked() {
-                self.label_open = true;
             }
         });
         if self.assembly_kind == AssemblyKind::Drawer

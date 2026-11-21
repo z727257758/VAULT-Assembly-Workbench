@@ -804,8 +804,7 @@ endsolid t";
             center: true,
             ..Default::default()
         };
-        c.set_part_slot(&item.path, 3);
-        c.set_text_slot(&item.path, 1);
+        crate::print_plate::ColorTheme::default().apply(&mut c);
         let inputs = vec![(item, PathBuf::new())];
         let mut original_resources = None;
         for down in [false, true] {
@@ -854,6 +853,7 @@ endsolid t";
                     Some((&layout, &Default::default())),
                 )
                 .unwrap();
+                assert_eq!(plan.materials, [vec![3, 6]]);
                 let origins: Vec<_> = plan
                     .resources
                     .iter()

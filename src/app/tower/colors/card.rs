@@ -28,6 +28,7 @@ pub(super) fn header(
     row: &Row,
     appearance: GroupAppearance,
     material_name: &str,
+    follows_base: bool,
     open: bool,
     z: bool,
 ) -> Option<HeaderAction> {
@@ -38,14 +39,29 @@ pub(super) fn header(
     let weak = ui.visuals().weak_text_color();
     let painter = ui.painter();
     let text = |s: String, font| painter.layout_no_wrap(s, font, weak);
-    let count = text(
-        format!("{} {}", row.count, t(z, "件", "pcs")),
+    let count = (row.group != Group::Text).then(|| {
+        text(
+            format!("{} {}", row.count, t(z, "件", "pcs")),
+            small.clone(),
+        )
+    });
+    let count_width = count.as_ref().map_or(0., |count| count.size().x + 8.);
+    let color = text(
+        if follows_base {
+            t(z, "跟随标牌底色", "Use label body color")
+        } else {
+            color_label(rgb, z)
+        }
+        .into(),
         small.clone(),
     );
-    let color = text(color_label(rgb, z).into(), small.clone());
     let width = ui.available_width();
     let mut layout = egui::text::LayoutJob::simple(
-        material_name.to_owned(),
+        if follows_base {
+            String::new()
+        } else {
+            material_name.to_owned()
+        },
         small,
         weak,
         (width - color.size().x - 62.).max(1.),
@@ -53,8 +69,13 @@ pub(super) fn header(
     layout.wrap.max_rows = 1;
     layout.wrap.break_anywhere = true;
     let material = painter.layout_job(layout);
-    let meta_width = color.size().x + 6. + material.size().x;
-    let label_space = width - 31. - count.size().x - 8. - meta_width - 28.;
+    let meta_width = color.size().x
+        + if follows_base {
+            0.
+        } else {
+            6. + material.size().x
+        };
+    let label_space = width - 31. - count_width - meta_width - 28.;
     let stacked = !open && label_space < if z { 55. } else { 82. };
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(width, if stacked { 42. } else { 32. }),
@@ -85,14 +106,18 @@ pub(super) fn header(
     painter.circle(
         egui::pos2(rect.left() + 13., center.y),
         9.2,
-        Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+        if follows_base {
+            Color32::TRANSPARENT
+        } else {
+            Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+        },
         ui.visuals().widgets.noninteractive.bg_stroke,
     );
     let name_y = if stacked { center.y - 8. } else { center.y };
     let name_width = if open {
-        reset_rect.left() - left - count.size().x - 8.
+        reset_rect.left() - left - count_width
     } else if stacked {
-        rect.right() - left - count.size().x - 30.
+        rect.right() - left - count_width - 22.
     } else {
         label_space
     };
@@ -102,11 +127,13 @@ pub(super) fn header(
     let name = painter.layout_job(layout);
     let count_x = left + name.size().x + 7.;
     painter.galley(egui::pos2(left, name_y - name.size().y * 0.5), name, ink);
-    painter.galley(
-        egui::pos2(count_x, name_y - count.size().y * 0.5),
-        count,
-        weak,
-    );
+    if let Some(count) = count {
+        painter.galley(
+            egui::pos2(count_x, name_y - count.size().y * 0.5),
+            count,
+            weak,
+        );
+    }
     let arrow = egui::pos2(rect.right() - 12., center.y);
     if !open {
         let x = if stacked {
@@ -117,11 +144,13 @@ pub(super) fn header(
         let y = if stacked { center.y + 9. } else { center.y };
         let material_x = x + color.size().x + 6.;
         painter.galley(egui::pos2(x, y - color.size().y * 0.5), color, weak);
-        painter.galley(
-            egui::pos2(material_x, y - material.size().y * 0.5),
-            material,
-            weak,
-        );
+        if !follows_base {
+            painter.galley(
+                egui::pos2(material_x, y - material.size().y * 0.5),
+                material,
+                weak,
+            );
+        }
     }
     chevron(&painter, arrow, open, weak);
     if open {
@@ -183,8 +212,16 @@ fn material_picker(
         .selected_text(library.name(*material))
         .truncate()
         .show_ui(ui, |ui| {
+            let mut choices = library.visible_choices().peekable();
+            if choices.peek().is_none() {
+                ui.small(t(
+                    z,
+                    "请在材料设置中启用耗材。",
+                    "Enable a filament in Materials settings.",
+                ));
+            }
             let mut section = "";
-            for option in library.choices() {
+            for option in choices {
                 let name = library.name(option);
                 let imported = library.preset(option).is_some();
                 let group = if imported {
@@ -221,7 +258,7 @@ fn material_picker(
                         egui::StrokeKind::Inside,
                     );
                 }
-                let colors = library.swatches(option);
+                let colors: Vec<_> = library.visible_swatches(option).collect();
                 let n = colors.len().min(5);
                 let mut layout = egui::text::LayoutJob::simple(
                     name.to_owned(),
@@ -332,7 +369,8 @@ pub(super) fn appearance_ui(
         ui.set_width(ui.available_width());
         material_picker(ui, library, &mut appearance.material, z);
         ui.separator();
-        let mut swatches = library.swatches(appearance.material).to_vec();
+        let mut swatches: Vec<_> = library.visible_swatches(appearance.material).collect();
+        // The open card still shows the project's assigned color.
         if !swatches.contains(&appearance.rgb) {
             swatches.push(appearance.rgb);
         }

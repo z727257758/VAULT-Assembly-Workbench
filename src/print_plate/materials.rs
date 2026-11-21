@@ -1,3 +1,4 @@
+use super::{ColorTheme, DEFAULT_MATERIALS, DEFAULT_PALETTE, GroupAppearance, PaletteGroup};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -160,6 +161,12 @@ impl BambuPreset {
 pub struct MaterialLibrary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     presets: Vec<BambuPreset>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    hidden_materials: BTreeSet<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    hidden_swatches: BTreeMap<String, BTreeSet<[u8; 3]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_appearances: Option<[GroupAppearance; 6]>,
     #[serde(flatten)]
     swatches: BTreeMap<String, Vec<[u8; 3]>>,
 }
@@ -169,6 +176,87 @@ impl MaterialLibrary {
         FilamentMaterial::ALL
             .into_iter()
             .chain(self.presets.iter().map(BambuPreset::material))
+    }
+
+    pub fn visible_choices(&self) -> impl Iterator<Item = FilamentMaterial> + '_ {
+        self.choices().filter(|material| !self.is_hidden(*material))
+    }
+
+    pub fn is_hidden(&self, material: FilamentMaterial) -> bool {
+        self.hidden_materials
+            .contains(material.swatch_key().as_ref())
+    }
+
+    pub fn set_hidden(&mut self, material: FilamentMaterial, hidden: bool) {
+        let key = material.swatch_key();
+        if hidden {
+            self.hidden_materials.insert(key.into_owned());
+        } else {
+            self.hidden_materials.remove(key.as_ref());
+        }
+    }
+
+    pub fn is_swatch_hidden(&self, material: FilamentMaterial, rgb: [u8; 3]) -> bool {
+        self.hidden_swatches
+            .get(material.swatch_key().as_ref())
+            .is_some_and(|colors| colors.contains(&rgb))
+    }
+
+    pub fn set_swatch_hidden(&mut self, material: FilamentMaterial, rgb: [u8; 3], hidden: bool) {
+        let key = material.swatch_key();
+        if hidden && self.swatches(material).contains(&rgb) {
+            self.hidden_swatches
+                .entry(key.into_owned())
+                .or_default()
+                .insert(rgb);
+        } else if let Some(colors) = self.hidden_swatches.get_mut(key.as_ref()) {
+            colors.remove(&rgb);
+            if colors.is_empty() {
+                self.hidden_swatches.remove(key.as_ref());
+            }
+        }
+    }
+
+    pub fn visible_swatches(
+        &self,
+        material: FilamentMaterial,
+    ) -> impl Iterator<Item = [u8; 3]> + '_ {
+        let key = material.swatch_key();
+        let hidden = self.hidden_materials.contains(key.as_ref());
+        let hidden_swatches = self.hidden_swatches.get(key.as_ref());
+        self.swatches(material).iter().copied().filter(move |rgb| {
+            !hidden && hidden_swatches.is_none_or(|colors| !colors.contains(rgb))
+        })
+    }
+
+    pub fn default_appearance(&self, group: PaletteGroup) -> Option<GroupAppearance> {
+        let index = group.default_slot()? - 1;
+        Some(
+            self.default_appearances
+                .map_or_else(|| factory_appearance(index), |defaults| defaults[index]),
+        )
+    }
+
+    pub fn set_default_appearance(&mut self, group: PaletteGroup, appearance: GroupAppearance) {
+        if let Some(slot) = group.default_slot() {
+            let factory = std::array::from_fn(factory_appearance);
+            let mut defaults = self.default_appearances.unwrap_or(factory);
+            defaults[slot - 1] = appearance;
+            self.default_appearances = (defaults != factory).then_some(defaults);
+        }
+    }
+
+    pub fn reset_default_appearances(&mut self) {
+        self.default_appearances = None;
+    }
+
+    pub fn default_theme(&self) -> ColorTheme {
+        let mut theme = ColorTheme::default();
+        if let Some(defaults) = self.default_appearances {
+            theme.palette = defaults.map(|default| default.rgb);
+            theme.materials = defaults.map(|default| default.material);
+        }
+        theme
     }
 
     pub fn preset(&self, material: FilamentMaterial) -> Option<&BambuPreset> {
@@ -284,7 +372,16 @@ impl MaterialLibrary {
     }
 
     pub fn restore(&mut self, material: FilamentMaterial) {
-        self.swatches.remove(material.swatch_key().as_ref());
+        let key = material.swatch_key();
+        self.swatches.remove(key.as_ref());
+        self.hidden_swatches.remove(key.as_ref());
+    }
+}
+
+fn factory_appearance(index: usize) -> GroupAppearance {
+    GroupAppearance {
+        rgb: DEFAULT_PALETTE[index],
+        material: DEFAULT_MATERIALS[index],
     }
 }
 
@@ -418,6 +515,81 @@ pub(super) fn extend_project_slots(project: &mut Value, count: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_visibility_and_new_project_defaults_roundtrip_without_recoloring_saved_slots() {
+        let mut library: MaterialLibrary =
+            toml::from_str("PlaBasic = [[1, 2, 3], [4, 5, 6]]").unwrap();
+        let original = library.default_theme();
+        let body = PaletteGroup::Role("body");
+        let text = PaletteGroup::Text;
+        let new_body = GroupAppearance {
+            rgb: [4, 5, 6],
+            material: FilamentMaterial::PlaBasic,
+        };
+        let new_text = GroupAppearance {
+            rgb: [235, 207, 128],
+            material: FilamentMaterial::PlaMatte,
+        };
+        library.set_default_appearance(body, new_body);
+        library.set_default_appearance(text, new_text);
+        library.set_swatch_hidden(FilamentMaterial::PlaBasic, [1, 2, 3], true);
+        library.set_hidden(FilamentMaterial::PlaMatte, true);
+
+        let mut restored: MaterialLibrary =
+            toml::from_str(&toml::to_string(&library).unwrap()).unwrap();
+        assert_eq!(restored, library);
+        assert_eq!(
+            restored.swatches(FilamentMaterial::PlaBasic),
+            &[[1, 2, 3], [4, 5, 6]]
+        );
+        assert_eq!(
+            restored
+                .visible_swatches(FilamentMaterial::PlaBasic)
+                .collect::<Vec<_>>(),
+            [[4, 5, 6]]
+        );
+        assert_eq!(
+            restored
+                .visible_swatches(FilamentMaterial::PlaMatte)
+                .count(),
+            0
+        );
+        assert!(
+            !restored
+                .visible_choices()
+                .any(|material| material == FilamentMaterial::PlaMatte)
+        );
+        assert_eq!(original.group_appearance(body), factory_appearance(0));
+        let theme = restored.default_theme();
+        assert_eq!(theme.role_slot("body"), 1);
+        assert_eq!(theme.slot_count(), 6);
+        assert_eq!(theme.group_appearance(body), new_body);
+        assert_eq!(theme.group_appearance(text), new_text);
+        assert_eq!(
+            theme.group_appearance(PaletteGroup::Role("functional")),
+            original.group_appearance(PaletteGroup::Role("functional"))
+        );
+
+        restored.set_hidden(FilamentMaterial::PlaBasic, true);
+        assert_eq!(
+            restored
+                .visible_swatches(FilamentMaterial::PlaBasic)
+                .count(),
+            0
+        );
+        restored.set_hidden(FilamentMaterial::PlaBasic, false);
+        assert!(restored.is_swatch_hidden(FilamentMaterial::PlaBasic, [1, 2, 3]));
+        restored.set_swatch_hidden(FilamentMaterial::PlaBasic, [1, 2, 3], false);
+        assert_eq!(
+            restored
+                .visible_swatches(FilamentMaterial::PlaBasic)
+                .count(),
+            2
+        );
+        restored.reset_default_appearances();
+        assert_eq!(restored.default_theme(), original);
+    }
 
     #[test]
     fn imported_slot_and_legacy_swatches_roundtrip() {

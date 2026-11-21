@@ -161,48 +161,13 @@ impl Editor {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut settings.scoop, "取物圆弧");
                 ui.checkbox(&mut settings.tab, "标签台");
-                if settings.tab
-                    && ui
-                        .checkbox(&mut settings.detachable_label, "Cullenect 可拆标牌")
-                        .changed()
-                    && settings.detachable_label
-                {
-                    settings.depth = 0.2;
+                if settings.tab {
+                    ui.checkbox(&mut settings.detachable_label, "Cullenect 可拆标牌");
                 }
             });
-            if settings.tab {
-                ui.horizontal_wrapped(|ui| {
-                    ui.radio_value(&mut settings.style, crate::label::Style::Raised, "凸字");
-                    ui.radio_value(&mut settings.style, crate::label::Style::Engraved, "凹字");
-                    ui.radio_value(&mut settings.style, crate::label::Style::Flat, "平面分色");
-                });
-                let minimum = layout
-                    .bins
-                    .iter()
-                    .filter(|b| b.label.active())
-                    .map(|b| b.label.min_size())
-                    .fold(4., f32::max);
-                ui.add(egui::Slider::new(&mut settings.size, minimum..=12.).text("统一字号 mm"));
-                ui.add(
-                    egui::Slider::new(
-                        &mut settings.depth,
-                        0.2..=if settings.detachable_label { 0.4 } else { 0.8 },
-                    )
-                    .text(if settings.style == crate::label::Style::Flat {
-                        "颜色层厚 mm"
-                    } else {
-                        "统一字高 / 刻深 mm"
-                    }),
-                );
-                if settings.style == crate::label::Style::Flat {
-                    ui.small("文字与底板齐平；选择不同的文字耗材槽，导出 3MF 保留分色。");
-                }
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("文字偏移 X / Y mm");
-                    for offset in &mut settings.offset {
-                        ui.add(egui::DragValue::new(offset).speed(0.1).range(-10. ..=10.));
-                    }
-                });
+            if settings.tab && settings.detachable_label && !(before.tab && before.detachable_label)
+            {
+                settings.depth = 0.2;
             }
         });
         if settings != before {
@@ -785,9 +750,13 @@ mod tests {
         let mut time = 0.;
         layout.add(&Selection::default(), None).unwrap();
         layout.add(&Selection::default(), None).unwrap();
+        layout.apply_label_style(crate::label::StyleSettings {
+            style: crate::label::Style::Engraved,
+            ..Default::default()
+        });
         layout.bins[0].label.text = "one".into();
         layout.bins[1].label.text = "two".into();
-        for text in ["取物圆弧", "凹字"] {
+        for text in ["取物圆弧", "Cullenect 可拆标牌"] {
             let out = frame(&ctx, &mut editor, &mut layout, &mut time, vec![]);
             let pos = out
                 .shapes
@@ -830,10 +799,9 @@ mod tests {
             );
         }
         assert!(
-            layout
-                .bins
-                .iter()
-                .all(|b| !b.scoop && b.label.style == crate::label::Style::Engraved)
+            layout.bins.iter().all(|b| !b.scoop
+                && b.detachable()
+                && b.label.style == crate::label::Style::Engraved)
         );
         assert_eq!(layout.bins[0].label.text, "one");
         assert_eq!(layout.bins[1].label.text, "two");

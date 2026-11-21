@@ -1,5 +1,7 @@
+mod materials;
+
 use super::*;
-use crate::print_plate::{BambuPreset, FilamentMaterial, MaterialLibrary, Printer};
+use crate::print_plate::{BambuPreset, Printer};
 use crate::ui_style;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,7 +21,7 @@ impl Page {
         match self {
             Self::Appearance => t(zh, "外观与语言", "Appearance & language"),
             Self::View => t(zh, "3D 视图", "3D view"),
-            Self::Labels => t(zh, "标签", "Labels"),
+            Self::Labels => t(zh, "项目标签", "Project labels"),
             Self::Library => t(zh, "模型库", "Model library"),
             Self::Printer => t(zh, "打印机", "Printer"),
             Self::Materials => t(zh, "材料", "Materials"),
@@ -33,238 +35,6 @@ impl Page {
 pub(super) struct MaterialImport {
     pending: Option<Receiver<Result<Vec<BambuPreset>, String>>>,
     feedback: Option<Result<usize, String>>,
-}
-
-#[derive(Clone)]
-struct MaterialEditor {
-    material: FilamentMaterial,
-    selected: Option<usize>,
-    color: [u8; 3],
-}
-
-impl MaterialEditor {
-    fn first(material: FilamentMaterial, library: &MaterialLibrary) -> Self {
-        let swatch = library.swatches(material).first().copied();
-        Self {
-            material,
-            selected: swatch.map(|_| 0),
-            color: swatch.unwrap_or([255; 3]),
-        }
-    }
-}
-
-fn material_settings_ui(
-    ui: &mut egui::Ui,
-    library: &mut MaterialLibrary,
-    import: &MaterialImport,
-    printer: Printer,
-    zh: bool,
-) -> bool {
-    let pick_files = ui
-        .horizontal_wrapped(|ui| {
-            if import.pending.is_some() {
-                ui.spinner();
-            }
-            ui.add_enabled(
-                import.pending.is_none(),
-                egui::Button::new(t(
-                    zh,
-                    "导入 Bambu Studio 预设…",
-                    "Import Bambu Studio presets…",
-                )),
-            )
-            .clicked()
-        })
-        .inner;
-    match &import.feedback {
-        Some(Ok(count)) => {
-            ui.small(if zh {
-                format!("已导入 {count} 项耗材预设，可在颜色组的材料列表中使用。")
-            } else {
-                format!("Imported {count} filament presets. Select them in the color group’s material list.")
-            });
-        }
-        Some(Err(error)) => {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        None => {}
-    }
-    ui.add_space(8.);
-    let id = ui.id().with("material-editor");
-    let mut editor = ui
-        .data_mut(|data| data.get_temp::<MaterialEditor>(id))
-        .unwrap_or_else(|| MaterialEditor::first(FilamentMaterial::PlaBasic, library));
-    let mut material = editor.material;
-    egui::ComboBox::from_id_salt("settings-material")
-        .selected_text(library.name(material))
-        .width(270.)
-        .truncate()
-        .show_ui(ui, |ui| {
-            ui.small(RichText::new("Bambu Lab").weak());
-            for option in FilamentMaterial::ALL {
-                ui.selectable_value(&mut material, option, library.name(option));
-            }
-            let mut imported = library
-                .choices()
-                .filter(|option| matches!(option, FilamentMaterial::Imported(_)))
-                .peekable();
-            if imported.peek().is_some() {
-                ui.separator();
-                ui.small(RichText::new(t(zh, "已导入", "Imported")).weak());
-                for option in imported {
-                    ui.selectable_value(&mut material, option, library.name(option));
-                }
-            }
-        });
-    if material != editor.material
-        || editor
-            .selected
-            .is_some_and(|i| i >= library.swatches(material).len())
-    {
-        editor = MaterialEditor::first(material, library);
-    }
-    ui.small(format!(
-        "{} · {}",
-        t(zh, "3MF 耗材预设", "3MF filament profile"),
-        library.profile_name(material, printer)
-    ));
-    if let Some(preset) = library.preset(material) {
-        ui.small(format!(
-            "{} · {}",
-            t(zh, "继承预设", "Base preset"),
-            preset
-                .parent
-                .as_deref()
-                .unwrap_or_else(|| preset.base.profile_name(printer))
-        ));
-        if !preset.printers.is_empty() {
-            let names = preset
-                .printers
-                .iter()
-                .map(|printer| printer.name())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            ui.small(format!(
-                "{} · {names}",
-                t(zh, "适用机型", "Compatible printers")
-            ));
-            if !preset.printers.contains(&printer) {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    t(
-                        zh,
-                        "此预设不适用于当前机型。",
-                        "This preset is unavailable for the current printer.",
-                    ),
-                );
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            for (key, title, unit) in [
-                ("nozzle_temperature", t(zh, "喷嘴", "Nozzle"), " °C"),
-                (
-                    "textured_plate_temp",
-                    t(zh, "纹理 PEI", "Textured PEI"),
-                    " °C",
-                ),
-                ("filament_flow_ratio", t(zh, "流量比", "Flow ratio"), ""),
-                (
-                    "filament_max_volumetric_speed",
-                    t(zh, "最大体积流量", "Max flow"),
-                    " mm³/s",
-                ),
-            ] {
-                if let Some(value) = preset.options.get(key) {
-                    ui.small(format!("{title} {value}{unit}"));
-                }
-            }
-        });
-    }
-    if material == FilamentMaterial::PetgMatte {
-        ui.small(t(
-            zh,
-            "PETG Matte 使用独立色板，导出采用 PETG Basic 的打印参数。",
-            "PETG Matte has its own swatches and uses the PETG Basic print profile.",
-        ));
-    }
-    ui.add_space(12.);
-    ui.strong(t(zh, "常用颜色", "Color swatches"));
-    let swatches = library.swatches(material);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(4., 5.);
-        for (index, &color) in swatches.iter().enumerate() {
-            let [r, g, b] = color;
-            if ui_style::swatch(
-                ui,
-                Color32::from_rgb(r, g, b),
-                editor.selected == Some(index),
-                "",
-            )
-            .on_hover_text(format!("#{r:02X}{g:02X}{b:02X}"))
-            .clicked()
-            {
-                editor.selected = Some(index);
-                editor.color = color;
-            }
-        }
-    });
-    ui.add_space(8.);
-    ui.horizontal_wrapped(|ui| {
-        if ui.button(t(zh, "添加颜色", "Add color")).clicked() {
-            editor.selected = None;
-            editor.color = [62, 124, 149];
-        }
-        if ui
-            .add_enabled(
-                editor.selected.is_some(),
-                ui_style::danger_button(t(zh, "移除颜色", "Remove color")),
-            )
-            .clicked()
-            && let Some(index) = editor.selected
-        {
-            library.swatches_mut(material).remove(index);
-            editor = MaterialEditor::first(material, library);
-        }
-        if ui
-            .button(t(zh, "恢复默认色板", "Restore swatches"))
-            .clicked()
-        {
-            library.restore(material);
-            editor = MaterialEditor::first(material, library);
-        }
-    });
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(if editor.selected.is_some() {
-            t(zh, "选中颜色", "Selected color")
-        } else {
-            t(zh, "新颜色", "New color")
-        });
-        ui.color_edit_button_srgb(&mut editor.color);
-        let [r, g, b] = editor.color;
-        ui.monospace(format!("#{r:02X}{g:02X}{b:02X}"));
-        let swatches = library.swatches(material);
-        let available = !swatches.contains(&editor.color);
-        let label = if editor.selected.is_some() {
-            t(zh, "保存颜色", "Save color")
-        } else {
-            t(zh, "加入色板", "Add to swatches")
-        };
-        if ui
-            .add_enabled(available, egui::Button::new(label))
-            .clicked()
-        {
-            let colors = library.swatches_mut(material);
-            if let Some(index) = editor.selected {
-                colors[index] = editor.color;
-            } else {
-                colors.push(editor.color);
-                editor.selected = Some(colors.len() - 1);
-            }
-        }
-    });
-    ui.data_mut(|data| data.insert_temp(id, editor));
-    pick_files
 }
 
 impl App {
@@ -316,20 +86,22 @@ impl App {
     pub(super) fn settings_panel(&mut self, ctx: &egui::Context) {
         self.poll_material_import();
         let Some(mut page) = self.settings_page else {
+            self.project_label_draft = None;
             return;
         };
         let zh = self.zh;
         let previous_theme = self.appearance;
-        let previous_font = self.label_font;
         let previous_export = self.export_options.clone();
         let previous_materials = self.material_library.clone();
         let mut done = false;
         let mut library = false;
         let mut import_materials = false;
         let mut apply_project_printer = false;
+        let mut apply_project_labels = None;
         let size = ctx.content_rect().size();
         let width = (size.x - 48.).clamp(680., 820.);
-        let height = (size.y - 180.).clamp(300., 480.);
+        let max_height = if page == Page::Materials { 640. } else { 480. };
+        let height = (size.y - 180.).clamp(300., max_height);
         let nav_width = 172.;
         let modal = egui::Modal::new(egui::Id::new("workspace-settings"))
             .frame(ui_style::dialog_frame(&ctx.style()))
@@ -403,7 +175,7 @@ impl App {
                                         ui.checkbox(&mut self.ghost, t(zh, "外壳透明", "Ghost shell"));
                                         ui.checkbox(&mut self.export_options.plate.preview_colors, t(zh, "打印颜色预览", "Print colors"));
                                     }
-                                    Page::Labels => self.label_font_ui(ui),
+                                    Page::Labels => apply_project_labels = self.project_label_style_ui(ui),
                                     Page::Library => {
                                         if self.last_model_root.as_os_str().is_empty() {
                                             ui.label(t(zh, "尚未选择模型库", "No model library selected"));
@@ -419,7 +191,7 @@ impl App {
                                         ).inner;
                                     }
                                     Page::Materials => {
-                                        import_materials = material_settings_ui(
+                                        import_materials = materials::show(
                                             ui,
                                             &mut self.material_library,
                                             &self.material_import,
@@ -457,17 +229,18 @@ impl App {
                 });
             });
         self.settings_page = (!(done || modal.should_close())).then_some(page);
+        if self.settings_page != Some(Page::Labels) {
+            self.project_label_draft = None;
+        }
         if import_materials {
             self.start_material_import(ctx);
         }
 
         let plate_changed = self.export_options.plate != previous_export.plate;
-        let font_changed = self.label_font != previous_font;
         let theme_changed = self.appearance != previous_theme;
         let language_changed = self.zh != zh;
         if plate_changed
             || apply_project_printer
-            || font_changed
             || theme_changed
             || language_changed
             || self.material_library != previous_materials
@@ -476,7 +249,6 @@ impl App {
             if let Err(error) = self.save_settings() {
                 self.export_options = previous_export;
                 self.material_library = previous_materials;
-                self.label_font = previous_font;
                 self.appearance = previous_theme;
                 self.zh = zh;
                 self.status = error;
@@ -510,19 +282,21 @@ impl App {
                 {
                     member.preset.set_printer(printer);
                 }
-                if font_changed && self.tab == 0 && !self.catalog.root.as_os_str().is_empty() {
-                    if self.scene.assembly || self.combination_view {
-                        self.assembly(ctx);
-                    } else if let Some(part) = self.scene.parts.first()
-                        && crate::label::is_label(&part.pose.path)
-                    {
-                        self.single(part.pose.path.clone(), ctx);
-                    }
-                }
             }
         }
         if library {
             self.choose_library(ctx);
+        }
+        if let Some(style) = apply_project_labels {
+            let result = self.apply_project_label_style(style, ctx);
+            let error = egui::Id::new("project-label-style-error");
+            ctx.data_mut(|data| {
+                data.remove::<String>(error);
+                if let Err(message) = result {
+                    data.insert_temp(error, message);
+                }
+            });
+            ctx.request_repaint();
         }
     }
 
@@ -587,22 +361,116 @@ impl App {
         .clicked()
     }
 
-    fn label_font_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::label::Font;
+    fn project_label_style_ui(&mut self, ui: &mut egui::Ui) -> Option<crate::label::StyleSettings> {
+        use crate::label::{Font, Style, StyleSettings};
+
         let zh = self.zh;
-        ui.strong(t(zh, "标签字体", "Label font"));
-        for (font, name) in [
-            (None, t(zh, "沿用方案字体", "Use saved fonts")),
-            (Some(Font::Chinese), t(zh, "微软雅黑", "Microsoft YaHei")),
+        let current = self.project_label_style;
+        let mut draft = self
+            .project_label_draft
+            .or(current)
+            .unwrap_or_else(|| StyleSettings::from_config(&self.label_for_project()));
+        let previous = draft;
+        let error = egui::Id::new("project-label-style-error");
+        let fonts = [
+            (Font::Chinese, t(zh, "微软雅黑", "Microsoft YaHei")),
             (
-                Some(Font::ChineseBold),
+                Font::ChineseBold,
                 t(zh, "微软雅黑粗体", "Microsoft YaHei Bold"),
             ),
-            (Some(Font::Arial), "Arial"),
-            (Some(Font::ArialBold), "Arial Bold"),
-        ] {
-            ui.radio_value(&mut self.label_font, font, name);
+            (Font::Arial, "Arial"),
+            (Font::ArialBold, "Arial Bold"),
+        ];
+        ui.label(t(
+            zh,
+            "统一当前项目的抽屉、箱子和 Gridfinity 标签样式。各标签保留自己的文字。",
+            "Set the style for drawer, box, and Gridfinity labels in this project. Each label keeps its text.",
+        ));
+        if self.members.is_empty() {
+            ui.small(t(
+                zh,
+                "请先打开或新建项目。",
+                "Open or create a project first.",
+            ));
+        } else if current.is_none() {
+            ui.small(t(
+                zh,
+                "现有标签继续使用已保存的样式，直到应用统一设置。",
+                "Existing labels use their saved styles until you apply the project settings.",
+            ));
         }
+        ui.add_space(6.);
+        let apply = ui.add_enabled_ui(!self.members.is_empty() && self.export_rx.is_none(), |ui| {
+            egui::Grid::new("project-label-properties")
+                .num_columns(2)
+                .spacing([12., 8.])
+                .show(ui, |ui| {
+                    ui.label(t(zh, "字体", "Font"));
+                    let font_name = fonts.iter().find(|(font, _)| *font == draft.font)
+                        .map_or("", |(_, name)| *name);
+                    egui::ComboBox::from_id_salt("project-label-font")
+                        .selected_text(font_name)
+                        .show_ui(ui, |ui| {
+                            for (font, name) in fonts {
+                                ui.selectable_value(&mut draft.font, font, name);
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(t(zh, "表现形式", "Lettering style"));
+                    ui.horizontal_wrapped(|ui| {
+                        for (style, name) in [
+                            (Style::Raised, t(zh, "凸字", "Raised")),
+                            (Style::Engraved, t(zh, "凹字", "Engraved")),
+                            (Style::Flat, t(zh, "平面分色", "Flat color")),
+                        ] {
+                            ui.selectable_value(&mut draft.style, style, name);
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(t(zh, "字号", "Font size"));
+                    ui.add(egui::DragValue::new(&mut draft.size).range(4. ..=12.).speed(0.1).suffix(" mm"));
+                    ui.end_row();
+
+                    ui.label(if draft.style == Style::Flat {
+                        t(zh, "颜色层厚", "Color depth")
+                    } else {
+                        t(zh, "字高 / 刻深", "Relief / depth")
+                    });
+                    ui.add(egui::DragValue::new(&mut draft.depth).range(0.2..=0.8).speed(0.01).suffix(" mm"));
+                    ui.end_row();
+
+                    for (offset, name) in draft.offset.iter_mut().zip([
+                        t(zh, "水平偏移", "Horizontal offset"),
+                        t(zh, "垂直偏移", "Vertical offset"),
+                    ]) {
+                        ui.label(name);
+                        ui.add(egui::DragValue::new(offset).range(-10. ..=10.).speed(0.1).suffix(" mm"));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(6.);
+            ui.small(t(
+                zh,
+                "英文和数字的最小字号为 4 mm，其他文字为 5 mm。Gridfinity 可拆标牌的字高、刻深或颜色层厚上限为 0.4 mm。",
+                "The minimum font size is 4 mm for ASCII and 5 mm for other text. Detachable Gridfinity labels cap relief, engraving, and color depth at 0.4 mm.",
+            ));
+            if self.project_label_draft.is_none() || draft != previous {
+                ui.data_mut(|data| data.remove::<String>(error));
+            }
+            let apply = ui.add_enabled(
+                current != Some(draft),
+                ui_style::primary_button(t(zh, "应用到项目", "Apply to project")),
+            ).clicked();
+            if let Some(message) = ui.data(|data| data.get_temp::<String>(error)) {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            apply
+        }).inner;
+        self.project_label_draft =
+            (!self.members.is_empty() && current != Some(draft)).then_some(draft);
+        apply.then_some(draft)
     }
 
     pub(super) fn settings_smoke(&mut self, ctx: &egui::Context) {
@@ -635,7 +503,8 @@ impl App {
             1 => (Page::Appearance, "appearance-light.png"),
             2 => (Page::Print, "print-dark-compact.png"),
             3 => (Page::Printer, "printer-a1-mini.png"),
-            _ => (Page::Materials, "materials-dark-compact.png"),
+            4 => (Page::Materials, "materials-dark-compact.png"),
+            _ => (Page::Labels, "project-labels-dark-compact.png"),
         };
         assert!(self.settings_page == Some(page));
         let folder = self.home.join("output/settings-ui");
@@ -668,6 +537,10 @@ impl App {
         } else if self.smoke_stage == 3 {
             self.settings_page = Some(Page::Materials);
             self.smoke_stage = 4;
+            self.smoke_frame = 0;
+        } else if self.smoke_stage == 4 {
+            self.settings_page = Some(Page::Labels);
+            self.smoke_stage = 5;
             self.smoke_frame = 0;
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

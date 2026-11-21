@@ -68,24 +68,29 @@ fn card_material_button(texts: &[Text], current: &str) -> Result<Pos2, String> {
         .ok_or_else(|| format!("Expanded accessory card has no {current} material button"))
 }
 
-fn swatch(ctx: &egui::Context, rgb: [u8; 3], below: f32) -> Result<Pos2, String> {
+fn popup_control<'a>(texts: &'a [Text], title: &str, excluded: &[LayerId]) -> Option<&'a Text> {
+    texts.iter().find(|text| {
+        text.layer.order == egui::Order::Foreground
+            && !excluded.contains(&text.layer)
+            && text.value == title
+    })
+}
+
+fn swatch(ctx: &egui::Context, layer: LayerId, rgb: [u8; 3], below: f32) -> Result<Pos2, String> {
     let fill = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
     ctx.graphics(|graphics| {
-        graphics
-            .get(LayerId::background())?
-            .all_entries()
-            .find_map(|entry| {
-                if let egui::Shape::Circle(c) = &entry.shape
-                    && c.fill == fill
-                    && c.radius >= 6.
-                    && c.center.y > below
-                    && entry.clip_rect.contains(c.center)
-                {
-                    Some(c.center)
-                } else {
-                    None
-                }
-            })
+        graphics.get(layer)?.all_entries().find_map(|entry| {
+            if let egui::Shape::Circle(c) = &entry.shape
+                && c.fill == fill
+                && c.radius >= 6.
+                && c.center.y > below
+                && entry.clip_rect.contains(c.center)
+            {
+                Some(c.center)
+            } else {
+                None
+            }
+        })
     })
     .ok_or_else(|| format!("No visible color swatch matching {rgb:?}"))
 }
@@ -304,6 +309,29 @@ impl App {
             .ok_or_else(|| format!("No configured swatches for {}", MATERIAL.name()))
     }
 
+    fn default_filament_card<'a>(
+        &self,
+        ctx: &egui::Context,
+        texts: &'a [Text],
+        settings: LayerId,
+    ) -> Result<(&'a Text, Pos2), String> {
+        let appearance = self
+            .material_library
+            .default_appearance(PaletteGroup::Role("body"))
+            .ok_or("Missing default body appearance")?;
+        let colors = popup_control(texts, "颜色", &[settings])
+            .ok_or("The default filament card has no color section")?;
+        let name = self.material_library.name(appearance.material);
+        let selector = texts
+            .iter()
+            .find(|text| {
+                text.layer == colors.layer && text.value == name && text.center.y < colors.center.y
+            })
+            .ok_or("The default filament card has no material selector above the colors")?;
+        let swatch = swatch(ctx, colors.layer, appearance.rgb, colors.center.y)?;
+        Ok((selector, swatch))
+    }
+
     pub(super) fn color_groups_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(16));
         let folder = self.home.join("output/color-groups-ui");
@@ -338,6 +366,11 @@ impl App {
                 return Ok(());
             }
             let ui = painted(ctx);
+            let default_section = || {
+                ui.iter()
+                    .find(|text| text.value == "默认耗材")
+                    .ok_or("Missing default filament section")
+            };
             match self.smoke_stage {
                 0 => {
                     self.check_color_rows(&ui, false)?;
@@ -395,7 +428,12 @@ impl App {
                         );
                     }
                     let button = card_material_button(&ui, MATERIAL.name())?;
-                    self.click_color_control(swatch(ctx, self.color_smoke_swatch()?, button.y)?);
+                    self.click_color_control(swatch(
+                        ctx,
+                        LayerId::background(),
+                        self.color_smoke_swatch()?,
+                        button.y,
+                    )?);
                 }
                 7 => {
                     self.check_saved_colors(&folder)?;
@@ -409,17 +447,105 @@ impl App {
                     self.click_color_control(control(&ui, "设置", true)?);
                 }
                 9 => self.click_color_control(control(&ui, "材料", false)?),
-                _ => {
-                    if !ui
-                        .iter()
-                        .any(|t| t.layer != LayerId::background() && t.value.contains("添加颜色"))
-                    {
-                        return Err("Material settings did not open with swatch editing".into());
-                    }
+                10 => {
+                    control(&ui, "可选耗材", false)?;
+                    control(&ui, "默认耗材", false)?;
                     if !self.capture_native_smoke(ctx, &folder.join("material-settings.png"))? {
                         return Ok(());
                     }
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: inline cards matched the BOM, selected a different material from the dropdown and changed color from its swatches. Regrouping and edits persisted for both members in the preview, the exported filament settings and the saved project. Other groups retained their colors and materials. Material settings opened from the toolbar.").map_err(|e| e.to_string())?;
+                    self.click_color_control(control(&ui, "PLA Basic", false)?);
+                }
+                11 => {
+                    let swatches_visible = ui
+                        .iter()
+                        .any(|t| t.layer != LayerId::background() && t.value.contains("添加颜色"));
+                    // The swatches below the header enter the scroll area's clip rect as it opens.
+                    if !swatches_visible && self.smoke_frame < 30 {
+                        return Ok(());
+                    }
+                    if !self.capture_native_smoke(ctx, &folder.join("material-swatches.png"))? {
+                        return Ok(());
+                    }
+                    if !swatches_visible {
+                        return Err("Expanding a material did not open its swatch editor".into());
+                    }
+                    self.click_color_control(control(&ui, "PLA Basic", false)?);
+                }
+                12 | 16 => {
+                    if self.smoke_stage == 16
+                        && popup_control(&ui, "颜色", &[default_section()?.layer]).is_some()
+                    {
+                        return Err(
+                            "Clicking outside did not close the default filament card".into()
+                        );
+                    }
+                    let appearance = self
+                        .material_library
+                        .default_appearance(PaletteGroup::Role("body"))
+                        .unwrap();
+                    let [r, g, b] = appearance.rgb;
+                    let label = format!(
+                        "#{r:02X}{g:02X}{b:02X}  ·  {}",
+                        self.material_library.name(appearance.material)
+                    );
+                    match control(&ui, &label, false) {
+                        Ok(button) => self.click_color_control(button),
+                        Err(_) if self.smoke_frame < 30 => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+                13 => {
+                    let (selector, _) =
+                        self.default_filament_card(ctx, &ui, default_section()?.layer)?;
+                    if !self.capture_native_smoke(ctx, &folder.join("default-filament-card.png"))? {
+                        return Ok(());
+                    }
+                    self.click_color_control(selector.center);
+                }
+                14 => {
+                    let settings = default_section()?.layer;
+                    let (selector, _) = self.default_filament_card(ctx, &ui, settings)?;
+                    let current = popup_control(&ui, &selector.value, &[settings, selector.layer])
+                        .ok_or("The default material selector did not open a second-level menu")?;
+                    for material in FilamentMaterial::ALL {
+                        if !ui.iter().any(|text| {
+                            text.layer == current.layer && text.value == material.name()
+                        }) {
+                            return Err(format!(
+                                "The default material dropdown is missing {}",
+                                material.name()
+                            ));
+                        }
+                    }
+                    if !self
+                        .capture_native_smoke(ctx, &folder.join("default-filament-submenu.png"))?
+                    {
+                        return Ok(());
+                    }
+                    self.click_color_control(current.center);
+                }
+                15 => {
+                    let outside = default_section()?;
+                    let (selector, _) = self.default_filament_card(ctx, &ui, outside.layer)?;
+                    if popup_control(&ui, &selector.value, &[outside.layer, selector.layer])
+                        .is_some()
+                    {
+                        return Err("Choosing a default material did not close its dropdown".into());
+                    }
+                    self.click_color_control(outside.center);
+                }
+                17 => {
+                    let (_, swatch) =
+                        self.default_filament_card(ctx, &ui, default_section()?.layer)?;
+                    self.click_color_control(swatch);
+                }
+                _ => {
+                    if popup_control(&ui, "颜色", &[default_section()?.layer]).is_some() {
+                        return Err(
+                            "Choosing a swatch did not close the default filament card".into()
+                        );
+                    }
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: inline cards matched the BOM, selected a different material from the dropdown and changed color from its swatches. Regrouping and edits persisted for both members in the preview, the exported filament settings and the saved project. Other groups retained their colors and materials. Materials showed both sections and expanded its swatch editor. The default filament card showed color swatches below its selector, opened a separate material dropdown, and stayed open after a material selection. The card closed on an outside click and on swatch selection.").map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return Ok(());

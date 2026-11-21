@@ -49,7 +49,12 @@ impl App {
             ui.ctx().request_repaint();
             return;
         };
-        let mut draft = self.gridfinity.clone();
+        let style = self.project_label_style;
+        let mut before = self.gridfinity.clone();
+        if let Some(style) = style {
+            before.apply_label_style(style);
+        }
+        let mut draft = before.clone();
         let mut selected = self.gridfinity_selected;
         let mut close = false;
         let (model_rect, card_rect) = workspace::model_and_plan_rects(ui.max_rect());
@@ -121,7 +126,10 @@ impl App {
                 });
         });
         self.gridfinity_selected = selected;
-        if draft != self.gridfinity {
+        if draft != before {
+            if let Some(style) = style {
+                draft.apply_label_style(style);
+            }
             for bin in draft.bins.iter().filter(|b| b.label.active()) {
                 draft.shared.size = draft.shared.size.max(bin.label.min_size());
             }
@@ -153,6 +161,9 @@ impl App {
         selected: &mut Option<u32>,
     ) {
         let z = self.zh;
+        let legacy_font = self
+            .label_font
+            .filter(|_| self.project_label_style.is_none());
         let occupied: u32 = layout.bins.iter().map(|b| b.span[0] * b.span[1]).sum();
         let free = (grid[0] * grid[1]).saturating_sub(occupied);
         ui.horizontal(|ui| {
@@ -301,7 +312,11 @@ impl App {
                             .char_limit(48)
                             .hint_text(t(z, "最多两行", "Up to two lines")),
                     );
-                    crate::label::stroke_check_ui(ui, &bin.label.with_font(self.label_font));
+                    let mut effective = bin.label.with_font(legacy_font);
+                    if self.project_label_style.is_some() {
+                        effective.size = effective.size.max(effective.min_size());
+                    }
+                    crate::label::stroke_check_ui(ui, &effective);
                 }
             }
         }
@@ -315,7 +330,7 @@ impl App {
                     layout,
                     *selected,
                     &self.export_options.plate,
-                    self.label_font,
+                    legacy_font,
                 );
             });
         }

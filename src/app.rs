@@ -185,6 +185,8 @@ pub struct App {
     appearance: appearance::Appearance,
     label_font: Option<crate::label::Font>,
     settings_page: Option<settings_panel::Page>,
+    project_label_style: Option<crate::label::StyleSettings>,
+    project_label_draft: Option<crate::label::StyleSettings>,
     material_import: settings_panel::MaterialImport,
     tower: tower::State,
     active_drawer: Option<usize>,
@@ -329,6 +331,14 @@ impl App {
             appearance,
             label_font: settings.as_ref().and_then(|s| s.label_font),
             settings_page: None,
+            project_label_style: (!smoke).then_some(crate::label::StyleSettings {
+                font: settings
+                    .as_ref()
+                    .and_then(|s| s.label_font)
+                    .unwrap_or_default(),
+                ..Default::default()
+            }),
+            project_label_draft: None,
             material_import: Default::default(),
             tower: Default::default(),
             active_drawer: None,
@@ -532,7 +542,9 @@ impl App {
                         .iter()
                         .cloned()
                         .map(|mut member| {
-                            member.preset.apply_label_font(self.label_font);
+                            member
+                                .preset
+                                .apply_label_settings(self.project_label_style, self.label_font);
                             member
                         })
                         .collect()
@@ -548,12 +560,12 @@ impl App {
                     Default::default()
                 },
                 gridfinity: if self.assembly_kind == AssemblyKind::Drawer {
-                    self.gridfinity_with_label_font()
+                    self.gridfinity_for_project()
                 } else {
                     Default::default()
                 },
                 home: self.home.clone(),
-                label: self.label.with_font(self.label_font),
+                label: self.label_for_project(),
                 items,
                 root,
                 title,
@@ -893,9 +905,32 @@ impl App {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    fn gridfinity_with_label_font(&self) -> crate::gridfinity::Layout {
+    fn label_for_project(&self) -> crate::label::Config {
+        let mut label = self.label.clone();
+        if let Some(style) = self.project_label_style {
+            style.apply(&mut label);
+        } else if let Some(font) = self.label_font {
+            label.font = font;
+        }
+        label
+    }
+
+    fn validate_label_edit(&mut self) -> Result<(), String> {
+        let label = self.label_for_project();
+        label.validate()?;
+        if self.project_label_style.is_some() {
+            self.label = label;
+        }
+        Ok(())
+    }
+
+    fn gridfinity_for_project(&self) -> crate::gridfinity::Layout {
         let mut layout = self.gridfinity.clone();
-        layout.apply_label_font(self.label_font);
+        if let Some(style) = self.project_label_style {
+            layout.apply_label_style(style);
+        } else {
+            layout.apply_label_font(self.label_font);
+        }
         layout
     }
     fn write_state(&self, name: &str, text: String) -> Result<(), String> {
@@ -1022,6 +1057,7 @@ impl App {
                     }
                     if !self.smoke {
                         self.explosion = 0.;
+                        self.global_colors = self.material_library.default_theme();
                         self.global_colors.apply(&mut self.export_options.plate);
                         self.export_options.plate.follow_global_colors = true;
                         self.ensure_members();
@@ -2460,37 +2496,22 @@ impl App {
                 ui.add_enabled_ui(self.label.enabled,|ui|{
                     ui.add(egui::TextEdit::multiline(&mut self.label.text).desired_rows(2).char_limit(48));
                     ui.small(if is_box {t(z,"最多两行；文字居中，安全区域 32 × 12 mm。","Up to two centered lines within a 32 × 12 mm safe area.")} else {t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area.")});
-                    ui.horizontal(|ui|{
-                        ui.radio_value(&mut self.label.style,crate::label::Style::Raised,t(z,"凸字","Raised"));
-                        ui.radio_value(&mut self.label.style,crate::label::Style::Engraved,t(z,"凹字","Engraved"));
-                        ui.radio_value(&mut self.label.style,crate::label::Style::Flat,t(z,"平面分色","Flat color"));
-                    });
-                    crate::label::stroke_check_label_ui(ui, &self.label.with_font(self.label_font), path);
-                    let minimum = self.label.min_size();
-                    ui.add(egui::Slider::new(&mut self.label.size,minimum..=12.).text(t(z,"字号 mm","Size mm")));
-                    ui.small(t(z,"0.4 mm 喷嘴经验建议：优先粗体；英文/数字最低 4 mm，中文及其他文字最低 5 mm。字号为 em 尺寸，非实际字高；复杂汉字需放大并检查切片。笔画检查结果见下方。","Guidance for a 0.4 mm nozzle: prefer bold; minimum em size 4 mm for ASCII, 5 mm for other scripts. Actual glyph height varies. Enlarge complex glyphs and inspect sliced paths. See the stroke geometry estimate below."));
-                    ui.add(egui::Slider::new(&mut self.label.depth,0.2..=0.8).text(if self.label.style == crate::label::Style::Flat { t(z,"颜色层厚 mm","Color depth mm") } else { t(z,"字高 / 刻深 mm","Relief / depth mm") }));
-                    ui.horizontal(|ui|{
-                        ui.label(t(z,"水平偏移 mm","Horizontal mm"));ui.add(egui::DragValue::new(&mut self.label.offset[0]).speed(0.1).range(-10. ..=10.));
-                        ui.label(t(z,"垂直偏移 mm","Vertical mm"));ui.add(egui::DragValue::new(&mut self.label.offset[1]).speed(0.1).range(-10. ..=10.));
-                    });
+                    crate::label::stroke_check_label_ui(ui, &self.label_for_project(), path);
                 });
                 ui.horizontal(|ui|{
                     if ui.button(t(z,"特写标签","Focus label")).clicked(){preview=true;}
-                    if ui.button(t(z,"恢复空白标签","Restore blank label")).clicked(){self.label=Default::default();}
+                    if ui.button(t(z,"恢复空白标签","Restore blank label")).clicked(){
+                        self.label.enabled = false;
+                        self.label.text.clear();
+                    }
                 });
-                if self.label.style == crate::label::Style::Flat {
-                    ui.small(t(z,"文字与表面齐平；请为文字选择不同的耗材槽，并导出 3MF。STL 仅保留平面外形，不保存颜色。","Flush text needs a separate text filament slot and 3MF export. STL keeps the flat shape without colors."));
-                } else {
-                    ui.small(t(z,"停止输入后自动更新；文字会写入导出的 STL / 3MF，原文件不变。","Updates after typing; exported STL / 3MF includes the lettering. Source stays unchanged."));
-                }
-                ui.small(t(z,"选中标签后，可在右侧属性设置独立文字颜色；3MF 保留同盘多色。","Select the label to set text color in Properties; 3MF keeps both materials together."));
-                if let Err(e)=self.label.validate(){ui.colored_label(ui.visuals().error_fg_color,e);}
+                if let Err(e)=self.label_for_project().validate(){ui.colored_label(ui.visuals().error_fg_color,e);}
                 if self.failed_preview.is_some() && !self.busy && !self.preview.has_pending(){ui.colored_label(ui.visuals().error_fg_color,&self.status);}
             });
         self.label_open = open;
         if before != self.label {
-            if let Err(e) = self.label.validate() {
+            if let Err(e) = self.validate_label_edit() {
+                self.label = before;
                 self.status = e;
                 return;
             }
@@ -2728,9 +2749,9 @@ impl App {
         let root = self.catalog.root.clone();
         let mut options = self.export_options.clone();
         options.material_library = std::sync::Arc::new(self.material_library.clone());
-        let label = self.label.with_font(self.label_font);
+        let label = self.label_for_project();
         let gf = if self.assembly_kind == AssemblyKind::Drawer {
-            self.gridfinity_with_label_font()
+            self.gridfinity_for_project()
         } else {
             Default::default()
         };

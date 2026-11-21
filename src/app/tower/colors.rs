@@ -6,6 +6,16 @@ use crate::print_plate::{
 mod card;
 use std::collections::BTreeSet;
 
+const TEXT_COLOR_ZH: &str = "字体颜色";
+const TEXT_COLOR_EN: &str = "Text color";
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum CardKey {
+    Role(&'static str),
+    Text,
+    Custom(String),
+}
+
 pub(super) struct Edit {
     original: Option<String>,
     name: String,
@@ -44,7 +54,13 @@ impl Edit {
 
     fn name_available(&self, theme: &ColorTheme) -> bool {
         let name = self.name.trim().to_lowercase();
+        let original_name = self
+            .original
+            .as_ref()
+            .map(|name| name.trim().to_lowercase());
+        let text_name = name == TEXT_COLOR_ZH || name.eq_ignore_ascii_case(TEXT_COLOR_EN);
         !name.is_empty()
+            && (!text_name || original_name.as_ref() == Some(&name))
             && !catalog_colors::ROLES
                 .iter()
                 .any(|(_, cn, en)| name == cn.to_lowercase() || name == en.to_lowercase())
@@ -78,6 +94,16 @@ struct Row {
     group: Group,
     name: String,
     count: u32,
+}
+
+impl Row {
+    fn card_key(&self) -> CardKey {
+        match self.group {
+            Group::Role(role) => CardKey::Role(role),
+            Group::Text => CardKey::Text,
+            Group::Custom(_) => CardKey::Custom(self.name.clone()),
+        }
+    }
 }
 
 fn groups(theme: &ColorTheme, z: bool) -> Vec<Row> {
@@ -120,10 +146,21 @@ fn group_rows(theme: &ColorTheme, items: &BTreeMap<String, Item>, z: bool) -> Ve
             row.count += item.count;
         }
     }
+    rows.insert(
+        catalog_colors::ROLES.len(),
+        Row {
+            group: Group::Text,
+            name: t(z, TEXT_COLOR_ZH, TEXT_COLOR_EN).into(),
+            count: 0,
+        },
+    );
     rows
 }
 
 fn assign_component(theme: &mut ColorTheme, path: &str, target: Option<Group>) {
+    if target == Some(Group::Text) {
+        return;
+    }
     let key = catalog_colors::component(path);
     for (index, group) in theme.groups.iter_mut().enumerate() {
         if target == Some(Group::Custom(index)) {
@@ -140,7 +177,7 @@ fn assign_component(theme: &mut ColorTheme, path: &str, target: Option<Group>) {
         Some(Group::Role(_)) | None => {
             theme.role_overrides.remove(&key);
         }
-        Some(Group::Custom(_)) => {}
+        Some(Group::Custom(_) | Group::Text) => {}
     }
 }
 
@@ -278,21 +315,38 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut save = false;
     let mut cancel = false;
     for row in rows {
-        let open = app.tower.open_color.as_ref() == Some(&row.name);
+        let card_key = row.card_key();
+        let open = app.tower.open_color.as_ref() == Some(&card_key);
         let result = ui
-            .push_id(("group-card", &row.name), |ui| {
+            .push_id(("group-card", &card_key), |ui| {
                 crate::ui_style::card_frame(ui, open)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let appearance = draft.group_appearance(row.group);
                         let material_name = app.material_library.name(appearance.material);
-                        match card::header(ui, &row, appearance, material_name, open, z) {
+                        let follows_base = row.group == Group::Text && !draft.text_color_enabled();
+                        match card::header(
+                            ui,
+                            &row,
+                            appearance,
+                            material_name,
+                            follows_base,
+                            open,
+                            z,
+                        ) {
                             Some(card::HeaderAction::Toggle) => {
-                                app.tower.open_color = (!open).then(|| row.name.clone());
+                                app.tower.open_color = (!open).then(|| card_key.clone());
                                 edit = None;
                             }
                             Some(card::HeaderAction::Reset) if !busy => {
-                                if let Err(error) = draft.reset_group_appearance(row.group) {
+                                let reset = match app.material_library.default_appearance(row.group)
+                                {
+                                    Some(default) if !follows_base => {
+                                        draft.set_group_appearance(row.group, default)
+                                    }
+                                    _ => draft.reset_group_appearance(row.group),
+                                };
+                                if let Err(error) = reset {
                                     app.tower.error = error;
                                 }
                             }
@@ -300,12 +354,41 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                         if open {
                             ui.add_enabled_ui(!busy, |ui| {
-                                let mut next = appearance;
-                                card::appearance_ui(ui, &app.material_library, &mut next, z);
-                                if next != appearance
-                                    && let Err(error) = draft.set_group_appearance(row.group, next)
-                                {
-                                    app.tower.error = error;
+                                if row.group == Group::Text {
+                                    let mut enabled = draft.text_color_enabled();
+                                    if ui
+                                        .checkbox(
+                                            &mut enabled,
+                                            t(z, "使用独立字体颜色", "Use a separate text color"),
+                                        )
+                                        .changed()
+                                    {
+                                        let result = match app
+                                            .material_library
+                                            .default_appearance(row.group)
+                                        {
+                                            Some(default) if enabled => {
+                                                draft.set_group_appearance(row.group, default)
+                                            }
+                                            _ => draft.set_text_color_enabled(enabled),
+                                        };
+                                        if let Err(error) = result {
+                                            app.tower.error = error;
+                                        }
+                                    }
+                                }
+                                if row.group != Group::Text || draft.text_color_enabled() {
+                                    let current = draft.group_appearance(row.group);
+                                    let mut next = current;
+                                    card::appearance_ui(ui, &app.material_library, &mut next, z);
+                                    if next != current
+                                        && let Err(error) =
+                                            draft.set_group_appearance(row.group, next)
+                                    {
+                                        app.tower.error = error;
+                                    }
+                                } else {
+                                    ui.small(t(z, "跟随标牌底色", "Use label body color"));
                                 }
                                 if let Group::Custom(index) = row.group {
                                     if let Some(current) = edit.as_mut().filter(|current| {
@@ -385,8 +468,8 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         match app.apply_global_theme(draft) {
             Ok(()) => {
                 if save && let Some(current) = &edit {
-                    app.tower.open_color =
-                        (!current.keys.is_empty()).then(|| current.name.trim().to_owned());
+                    app.tower.open_color = (!current.keys.is_empty())
+                        .then(|| CardKey::Custom(current.name.trim().to_owned()));
                     edit = None;
                 }
                 ui.ctx().request_repaint();
@@ -472,10 +555,10 @@ fn text_color_menu(
         if ui
             .selectable_label(
                 selected.is_none(),
-                if theme.roles.contains_key("text") {
-                    t(z, "跟随项目文字颜色", "Use project text color")
+                if theme.text_color_enabled() {
+                    t(z, "跟随字体颜色分组", "Use text color group")
                 } else {
-                    t(z, "跟随分组颜色", "Use group color")
+                    t(z, "跟随标牌底色", "Use label body color")
                 },
             )
             .clicked()
@@ -667,11 +750,14 @@ mod tests {
     }
 
     #[test]
-    fn five_role_rows_count_copies_once_including_empty_roles() {
+    fn role_rows_count_copies_once_and_keep_text_separate() {
         let mut theme = ColorTheme::default();
         let items = fixture();
         let rows = group_rows(&theme, &items, true);
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(row(&rows, TEXT_COLOR_ZH).group, Group::Text);
+        assert_eq!(row(&rows, TEXT_COLOR_ZH).count, 0);
+        assert_eq!(groups(&theme, true).len(), 5);
         assert_eq!(row(&rows, "功能件").count, 6);
         assert_eq!(row(&rows, "分隔板").count, 0);
         assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
@@ -679,7 +765,7 @@ mod tests {
 
         new_custom(&mut theme, "活动件", &[SLIDE], 5);
         let rows = group_rows(&theme, &items, true);
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(row(&rows, "功能件").count, 2);
         assert_eq!(theme.role_slot("functional"), 4);
         assert_eq!(row(&rows, "活动件").count, 4);

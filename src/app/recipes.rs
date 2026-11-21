@@ -279,6 +279,7 @@ impl Recipe {
         let project = CombinationPreset {
             project_name: self.name(zh).into(),
             colors: colors.clone(),
+            label_style: Some(Default::default()),
             preset,
             members,
             active_member: 0,
@@ -411,8 +412,16 @@ mod tests {
     #[test]
     fn new_projects_keep_independent_drawer_contents_and_follow_the_supplied_palette() {
         let catalog = catalog();
-        let mut colors = crate::print_plate::ColorTheme::default();
-        colors.palette[0] = [12, 34, 56];
+        use crate::print_plate::{
+            FilamentMaterial, GroupAppearance, MaterialLibrary, PaletteGroup,
+        };
+        let mut materials = MaterialLibrary::default();
+        let body = GroupAppearance {
+            rgb: [12, 34, 56],
+            material: FilamentMaterial::PlaMatte,
+        };
+        materials.set_default_appearance(PaletteGroup::Role("body"), body);
+        let colors = materials.default_theme();
         let mut first = RECIPES[0].build(&catalog, &colors, true).unwrap();
         let other = RECIPES[0].build(&catalog, &colors, true).unwrap();
         first.members[0].preset.drawers[0].label.text = "ONLY THIS DRAWER".into();
@@ -421,7 +430,7 @@ mod tests {
         for member in &first.members {
             for p in std::iter::once(&member.preset).chain(member.preset.drawers.iter()) {
                 let config = p.print_config.as_ref().unwrap();
-                assert_eq!(config.palette[0], [12, 34, 56]);
+                assert_eq!(config.appearance(1), body);
                 assert!(config.follow_global_colors);
                 assert!(p.gridfinity.bins.is_empty() && p.divider_layout.items.is_empty());
             }
