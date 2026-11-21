@@ -186,7 +186,6 @@ pub struct App {
     label_font: Option<crate::label::Font>,
     settings_page: Option<settings_panel::Page>,
     project_label_style: Option<crate::label::StyleSettings>,
-    project_label_draft: Option<crate::label::StyleSettings>,
     material_import: settings_panel::MaterialImport,
     tower: tower::State,
     active_drawer: Option<usize>,
@@ -338,7 +337,6 @@ impl App {
                     .unwrap_or_default(),
                 ..Default::default()
             }),
-            project_label_draft: None,
             material_import: Default::default(),
             tower: Default::default(),
             active_drawer: None,
@@ -1060,9 +1058,10 @@ impl App {
                         self.global_colors = self.material_library.default_theme();
                         self.global_colors.apply(&mut self.export_options.plate);
                         self.export_options.plate.follow_global_colors = true;
-                        self.ensure_members();
+                        self.tower_catalog_ready();
                     }
-                    if self.catalog.stl_count() > 0
+                    if self.smoke
+                        && self.catalog.stl_count() > 0
                         && self
                             .catalog
                             .resolve("01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl")
@@ -2366,6 +2365,10 @@ impl App {
     fn save_preset(&mut self) {
         self.commit_member();
         let saved = self.project_snapshot(self.member_snapshot());
+        self.save_project_file(&saved);
+    }
+
+    fn save_project_file(&mut self, saved: &CombinationPreset) {
         if let Err(e) = saved.validate(&self.catalog) {
             self.status = e;
             return;
@@ -2384,7 +2387,7 @@ impl App {
         {
             let result = self
                 .check_destination(&path)
-                .and_then(|_| toml::to_string_pretty(&saved).map_err(|e| e.to_string()))
+                .and_then(|_| toml::to_string_pretty(saved).map_err(|e| e.to_string()))
                 .and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()));
             self.status = match result {
                 Ok(_) => t(self.zh, "方案已保存", "Preset saved").into(),
@@ -2886,6 +2889,7 @@ impl eframe::App for App {
             }
         }
         self.settings_panel(ctx);
+        self.project_settings_panel(ctx);
         self.pump_preview(ctx);
         if self.busy || self.preview.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));

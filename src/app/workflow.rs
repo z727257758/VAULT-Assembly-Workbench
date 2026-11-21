@@ -214,7 +214,6 @@ impl App {
         self.members = state.members;
         self.global_colors = state.colors;
         self.project_label_style = state.label_style;
-        self.project_label_draft = None;
         self.combination_gap = state.gap;
         self.restore_member(state.active.min(self.members.len().saturating_sub(1)));
         self.combination_view = true;

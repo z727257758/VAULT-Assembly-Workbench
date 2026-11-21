@@ -8,7 +8,6 @@ use crate::ui_style;
 pub(super) enum Page {
     Appearance,
     View,
-    Labels,
     Library,
     Printer,
     Materials,
@@ -21,7 +20,6 @@ impl Page {
         match self {
             Self::Appearance => t(zh, "外观与语言", "Appearance & language"),
             Self::View => t(zh, "3D 视图", "3D view"),
-            Self::Labels => t(zh, "项目标签", "Project labels"),
             Self::Library => t(zh, "模型库", "Model library"),
             Self::Printer => t(zh, "打印机", "Printer"),
             Self::Materials => t(zh, "材料", "Materials"),
@@ -86,7 +84,6 @@ impl App {
     pub(super) fn settings_panel(&mut self, ctx: &egui::Context) {
         self.poll_material_import();
         let Some(mut page) = self.settings_page else {
-            self.project_label_draft = None;
             return;
         };
         let zh = self.zh;
@@ -97,7 +94,6 @@ impl App {
         let mut library = false;
         let mut import_materials = false;
         let mut apply_project_printer = false;
-        let mut apply_project_labels = None;
         let size = ctx.content_rect().size();
         let width = (size.x - 48.).clamp(680., 820.);
         let max_height = if page == Page::Materials { 640. } else { 480. };
@@ -119,16 +115,16 @@ impl App {
                             for (group, pages) in [
                                 (
                                     t(zh, "工作区", "Workspace"),
-                                    [Page::Appearance, Page::View, Page::Labels, Page::Library],
+                                    &[Page::Appearance, Page::View, Page::Library][..],
                                 ),
                                 (
                                     t(zh, "打印", "Printing"),
-                                    [Page::Printer, Page::Materials, Page::Print, Page::Export],
+                                    &[Page::Printer, Page::Materials, Page::Print, Page::Export][..],
                                 ),
                             ] {
                                 ui.add_space(4.);
                                 ui.label(RichText::new(group).small().weak());
-                                for target in pages {
+                                for &target in pages {
                                     if ui
                                         .add_sized(
                                             [nav_width, ui.spacing().interact_size.y],
@@ -175,7 +171,6 @@ impl App {
                                         ui.checkbox(&mut self.ghost, t(zh, "外壳透明", "Ghost shell"));
                                         ui.checkbox(&mut self.export_options.plate.preview_colors, t(zh, "打印颜色预览", "Print colors"));
                                     }
-                                    Page::Labels => apply_project_labels = self.project_label_style_ui(ui),
                                     Page::Library => {
                                         if self.last_model_root.as_os_str().is_empty() {
                                             ui.label(t(zh, "尚未选择模型库", "No model library selected"));
@@ -229,9 +224,6 @@ impl App {
                 });
             });
         self.settings_page = (!(done || modal.should_close())).then_some(page);
-        if self.settings_page != Some(Page::Labels) {
-            self.project_label_draft = None;
-        }
         if import_materials {
             self.start_material_import(ctx);
         }
@@ -286,17 +278,6 @@ impl App {
         }
         if library {
             self.choose_library(ctx);
-        }
-        if let Some(style) = apply_project_labels {
-            let result = self.apply_project_label_style(style, ctx);
-            let error = egui::Id::new("project-label-style-error");
-            ctx.data_mut(|data| {
-                data.remove::<String>(error);
-                if let Err(message) = result {
-                    data.insert_temp(error, message);
-                }
-            });
-            ctx.request_repaint();
         }
     }
 
@@ -361,118 +342,6 @@ impl App {
         .clicked()
     }
 
-    fn project_label_style_ui(&mut self, ui: &mut egui::Ui) -> Option<crate::label::StyleSettings> {
-        use crate::label::{Font, Style, StyleSettings};
-
-        let zh = self.zh;
-        let current = self.project_label_style;
-        let mut draft = self
-            .project_label_draft
-            .or(current)
-            .unwrap_or_else(|| StyleSettings::from_config(&self.label_for_project()));
-        let previous = draft;
-        let error = egui::Id::new("project-label-style-error");
-        let fonts = [
-            (Font::Chinese, t(zh, "微软雅黑", "Microsoft YaHei")),
-            (
-                Font::ChineseBold,
-                t(zh, "微软雅黑粗体", "Microsoft YaHei Bold"),
-            ),
-            (Font::Arial, "Arial"),
-            (Font::ArialBold, "Arial Bold"),
-        ];
-        ui.label(t(
-            zh,
-            "统一当前项目的抽屉、箱子和 Gridfinity 标签样式。各标签保留自己的文字。",
-            "Set the style for drawer, box, and Gridfinity labels in this project. Each label keeps its text.",
-        ));
-        if self.members.is_empty() {
-            ui.small(t(
-                zh,
-                "请先打开或新建项目。",
-                "Open or create a project first.",
-            ));
-        } else if current.is_none() {
-            ui.small(t(
-                zh,
-                "现有标签继续使用已保存的样式，直到应用统一设置。",
-                "Existing labels use their saved styles until you apply the project settings.",
-            ));
-        }
-        ui.add_space(6.);
-        let apply = ui.add_enabled_ui(!self.members.is_empty() && self.export_rx.is_none(), |ui| {
-            egui::Grid::new("project-label-properties")
-                .num_columns(2)
-                .spacing([12., 8.])
-                .show(ui, |ui| {
-                    ui.label(t(zh, "字体", "Font"));
-                    let font_name = fonts.iter().find(|(font, _)| *font == draft.font)
-                        .map_or("", |(_, name)| *name);
-                    egui::ComboBox::from_id_salt("project-label-font")
-                        .selected_text(font_name)
-                        .show_ui(ui, |ui| {
-                            for (font, name) in fonts {
-                                ui.selectable_value(&mut draft.font, font, name);
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label(t(zh, "表现形式", "Lettering style"));
-                    ui.horizontal_wrapped(|ui| {
-                        for (style, name) in [
-                            (Style::Raised, t(zh, "凸字", "Raised")),
-                            (Style::Engraved, t(zh, "凹字", "Engraved")),
-                            (Style::Flat, t(zh, "平面分色", "Flat color")),
-                        ] {
-                            ui.selectable_value(&mut draft.style, style, name);
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.label(t(zh, "字号", "Font size"));
-                    ui.add(egui::DragValue::new(&mut draft.size).range(4. ..=12.).speed(0.1).suffix(" mm"));
-                    ui.end_row();
-
-                    ui.label(if draft.style == Style::Flat {
-                        t(zh, "颜色层厚", "Color depth")
-                    } else {
-                        t(zh, "字高 / 刻深", "Relief / depth")
-                    });
-                    ui.add(egui::DragValue::new(&mut draft.depth).range(0.2..=0.8).speed(0.01).suffix(" mm"));
-                    ui.end_row();
-
-                    for (offset, name) in draft.offset.iter_mut().zip([
-                        t(zh, "水平偏移", "Horizontal offset"),
-                        t(zh, "垂直偏移", "Vertical offset"),
-                    ]) {
-                        ui.label(name);
-                        ui.add(egui::DragValue::new(offset).range(-10. ..=10.).speed(0.1).suffix(" mm"));
-                        ui.end_row();
-                    }
-                });
-            ui.add_space(6.);
-            ui.small(t(
-                zh,
-                "英文和数字的最小字号为 4 mm，其他文字为 5 mm。Gridfinity 可拆标牌的字高、刻深或颜色层厚上限为 0.4 mm。",
-                "The minimum font size is 4 mm for ASCII and 5 mm for other text. Detachable Gridfinity labels cap relief, engraving, and color depth at 0.4 mm.",
-            ));
-            if self.project_label_draft.is_none() || draft != previous {
-                ui.data_mut(|data| data.remove::<String>(error));
-            }
-            let apply = ui.add_enabled(
-                current != Some(draft),
-                ui_style::primary_button(t(zh, "应用到项目", "Apply to project")),
-            ).clicked();
-            if let Some(message) = ui.data(|data| data.get_temp::<String>(error)) {
-                ui.colored_label(ui.visuals().error_fg_color, message);
-            }
-            apply
-        }).inner;
-        self.project_label_draft =
-            (!self.members.is_empty() && current != Some(draft)).then_some(draft);
-        apply.then_some(draft)
-    }
-
     pub(super) fn settings_smoke(&mut self, ctx: &egui::Context) {
         assert!(
             self.smoke_start.elapsed() < Duration::from_secs(45),
@@ -503,8 +372,7 @@ impl App {
             1 => (Page::Appearance, "appearance-light.png"),
             2 => (Page::Print, "print-dark-compact.png"),
             3 => (Page::Printer, "printer-a1-mini.png"),
-            4 => (Page::Materials, "materials-dark-compact.png"),
-            _ => (Page::Labels, "project-labels-dark-compact.png"),
+            _ => (Page::Materials, "materials-dark-compact.png"),
         };
         assert!(self.settings_page == Some(page));
         let folder = self.home.join("output/settings-ui");
@@ -537,10 +405,6 @@ impl App {
         } else if self.smoke_stage == 3 {
             self.settings_page = Some(Page::Materials);
             self.smoke_stage = 4;
-            self.smoke_frame = 0;
-        } else if self.smoke_stage == 4 {
-            self.settings_page = Some(Page::Labels);
-            self.smoke_stage = 5;
             self.smoke_frame = 0;
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

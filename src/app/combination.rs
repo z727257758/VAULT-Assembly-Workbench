@@ -294,7 +294,6 @@ impl App {
         };
         self.global_colors = saved.colors;
         self.project_label_style = saved.label_style;
-        self.project_label_draft = None;
         self.combination_gap = saved.combination_gap;
         self.restore_member(self.active_member);
         self.sync_global_colors();

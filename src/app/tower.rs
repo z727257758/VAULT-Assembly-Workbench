@@ -3,6 +3,7 @@ mod color_smoke;
 pub(super) mod colors;
 mod layers;
 mod modifications;
+mod project_settings;
 mod roofs;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,8 +33,10 @@ pub(super) struct State {
     projects: Vec<Project>,
     current: usize,
     loaded: bool,
+    empty_saved: bool,
     pending_restore: bool,
-    read: Option<Receiver<Result<Projects, String>>>,
+    read: Option<Receiver<Result<Option<Projects>, String>>>,
+    project_settings: Option<project_settings::Editor>,
     write: Option<Receiver<Result<(), String>>>,
     key: Vec<u8>,
     saved_key: Vec<u8>,
@@ -61,8 +64,10 @@ impl Default for State {
             projects: vec![],
             current: 0,
             loaded: false,
+            empty_saved: false,
             pending_restore: false,
             read: None,
+            project_settings: None,
             write: None,
             key: vec![],
             saved_key: vec![],
@@ -324,6 +329,14 @@ fn project_menu_item(
 struct Projects {
     current: usize,
     items: Vec<Project>,
+}
+
+fn read_projects(path: &Path) -> Result<Option<Projects>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).map(Some).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub(super) struct PrintJob {
@@ -613,6 +626,11 @@ impl App {
         project
             .saved
             .prepare_restore(&self.catalog, &self.export_options.plate)?;
+        self.tower_restore_project(project, ctx);
+        Ok(())
+    }
+
+    fn tower_restore_project(&mut self, project: Project, ctx: &egui::Context) {
         self.tower.clear_reorder();
         self.tower.name = project.name;
         self.tower.rename_draft = None;
@@ -629,7 +647,6 @@ impl App {
         self.tower.scroll_to_top = true;
         self.preview_modes.mode = super::preview_modes::Mode::Assembly;
         self.assembly(ctx);
-        Ok(())
     }
     pub(super) fn tower_capture(&mut self) {
         if self.members.is_empty() {
@@ -720,6 +737,7 @@ impl App {
 
     fn tower_add_project(&mut self, project: Project, ctx: &egui::Context) -> Result<(), String> {
         self.tower_apply_project(project.clone(), ctx)?;
+        self.tower.empty_saved = false;
         self.tower.current = self.tower.projects.len();
         self.tower.projects.push(project);
         Ok(())
@@ -734,15 +752,15 @@ impl App {
         self.tower.read = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = match std::fs::read_to_string(path) {
-                Ok(text) => toml::from_str(&text).map_err(|e| e.to_string()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Projects::default()),
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(result);
+            let _ = tx.send(read_projects(&path));
             ctx.request_repaint();
         });
     }
+    pub(super) fn tower_catalog_ready(&mut self) {
+        self.tower.pending_restore = !self.tower.projects.is_empty();
+        self.scene = Scene::default();
+    }
+
     pub(super) fn tower_tick(&mut self, ctx: &egui::Context) {
         if self.smoke {
             return;
@@ -751,20 +769,34 @@ impl App {
             self.tower.read = None;
             self.tower.loaded = true;
             match result {
-                Ok(saved) => {
+                Ok(Some(saved)) => {
                     self.tower.current = saved.current.min(saved.items.len().saturating_sub(1));
                     self.tower.projects = saved.items;
                     self.tower.pending_restore = !self.tower.projects.is_empty();
+                    self.tower.empty_saved = self.tower.projects.is_empty();
                 }
+                Ok(None) => {}
                 Err(e) => {
                     self.tower.error = format!("本地项目读取失败：{e}");
                     self.tower.loaded = false;
                 }
             }
         }
-        if !self.tower.loaded || self.catalog.root.as_os_str().is_empty() || self.members.is_empty()
-        {
+        if !self.tower.loaded || self.catalog.root.as_os_str().is_empty() {
             return;
+        }
+        if self.members.is_empty() {
+            if !self.tower.empty_saved
+                && self
+                    .catalog
+                    .resolve("01. DRAWERS/01. S Families/S3/Modules/S3 Module 1F.stl")
+                    .is_some()
+            {
+                self.ensure_members();
+                self.assembly(ctx);
+            } else {
+                return;
+            }
         }
         if self.tower.pending_restore {
             if self.busy || self.preview.has_pending() {
@@ -1143,15 +1175,10 @@ impl App {
                         }
                     });
                 ui.separator();
-                if ui
-                    .add_enabled(
-                        !self.members.is_empty(),
-                        egui::Button::new(t(z, "项目标签样式…", "Project label style…")),
-                    )
-                    .clicked()
-                {
-                    self.project_label_draft = None;
-                    self.settings_page = Some(settings_panel::Page::Labels);
+                if ui.button(t(z, "项目设置…", "Project settings…")).clicked() {
+                    self.tower.finish_rename();
+                    self.tower_capture();
+                    self.tower.project_settings = Some(project_settings::Editor::new(&self.tower));
                     ui.close();
                 }
                 ui.menu_button(t(z, "＋ 新建", "＋ New"), |ui| {
@@ -1169,7 +1196,10 @@ impl App {
             let create = ui.menu_button(t(z, "＋ 新建", "＋ New"), |ui| {
                 self.new_project_menu(ui, &mut action)
             });
-            if self.smoke && std::env::args().any(|a| a == "--smoke-project-menu") {
+            if self.smoke
+                && self.smoke_stage < 2
+                && std::env::args().any(|a| a == "--smoke-project-menu")
+            {
                 let button = if self.smoke_stage == 0 {
                     create.response
                 } else {
@@ -1307,8 +1337,15 @@ impl App {
         scroll.show(ui, |ui| {
             if self.members.is_empty() {
                 ui.add_space(16.);
-                ui.strong(t(z, "开始你的第一个项目", "Start your first project"));
-                ui.label(RichText::new(t(z, "先关联本地模型库，再选择尺寸并添加抽屉层。", "Link a local model library, choose a size and add layers.")).weak());
+                ui.strong(t(z, "暂无打开的项目", "No project open"));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(!self.catalog.root.as_os_str().is_empty(), egui::Button::new(t(z, "新建项目", "New project"))).clicked() {
+                        self.tower_new(ctx);
+                    }
+                    if ui.button(t(z, "打开文件…", "Open file…")).clicked() {
+                        self.load_preset(ctx);
+                    }
+                });
                 return;
             }
             if self.tower.print_list { self.tower_print_list(ui, ctx); return; }
@@ -2091,6 +2128,7 @@ fn base_name(value: crate::catalog::exterior::Base, z: bool) -> &'static str {
 
 impl App {
     pub(super) fn tower_imported_project(&mut self, name: String) {
+        self.tower.empty_saved = false;
         self.tower.rename_draft = None;
         self.tower.current = self.tower.projects.len();
         self.tower.name = name;
@@ -2327,7 +2365,8 @@ impl App {
                     return Err("The 3D preview did not interpolate both layers into place".into());
                 }
             }
-            if !build_panel_smoke && [2, 12, 15].contains(&self.smoke_stage) {
+            if !build_panel_smoke && !project_menu_smoke && [2, 12, 15].contains(&self.smoke_stage)
+            {
                 if !self.combination_view
                     || self.scene_key != "combination"
                     || !self.inline_edit.open
@@ -2353,7 +2392,11 @@ impl App {
                     return Err("Subdrawer editing changed its sibling label".into());
                 }
             }
-            if !build_panel_smoke && self.smoke_stage == 2 && !self.label_open {
+            if !build_panel_smoke
+                && !project_menu_smoke
+                && self.smoke_stage == 2
+                && !self.label_open
+            {
                 return Err("Subdrawer label editor did not open".into());
             }
             if self.smoke_stage == 5 && workspace_smoke {
@@ -2503,12 +2546,61 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
+            } else if project_menu_smoke && self.smoke_stage == 1 {
+                egui::Popup::close_all(ctx);
+                self.tower.project_settings = Some(project_settings::Editor::new(&self.tower));
+                self.smoke_stage = 2;
             } else {
                 if build_panel_smoke {
                     let _ = std::fs::write(
                         folder.join("selection-result.txt"),
                         "PASS: preview selection and 3D layer reorder; inline backbone loaded; expanded modification and color cards captured.",
                     );
+                }
+                if project_menu_smoke {
+                    let result = (|| -> Result<(), String> {
+                        if self.tower.project_settings.is_none() || self.tower.projects.len() != 1 {
+                            return Err("Project settings fixture is unavailable".into());
+                        }
+                        let scratch = tempfile::tempdir_in(&folder).map_err(|e| e.to_string())?;
+                        let home = std::mem::replace(&mut self.home, scratch.path().to_owned());
+                        let deleted = self.delete_local_project(0, ctx);
+                        self.home = home;
+                        deleted?;
+                        let saved = read_projects(&scratch.path().join("state/projects.toml"))?
+                            .ok_or("Missing project index after deletion")?;
+                        if !saved.items.is_empty()
+                            || !self.tower.projects.is_empty()
+                            || !self.members.is_empty()
+                            || !self.scene.parts.is_empty()
+                        {
+                            return Err("Deleting the final project did not persist and clear the workspace".into());
+                        }
+                        let (tx, rx) = mpsc::channel();
+                        tx.send(Ok(Some(saved))).map_err(|e| e.to_string())?;
+                        self.tower = State {
+                            read: Some(rx),
+                            ..Default::default()
+                        };
+                        self.smoke = false;
+                        self.tower_tick(ctx);
+                        self.smoke = true;
+                        if !self.tower.loaded || !self.tower.empty_saved || !self.members.is_empty()
+                        {
+                            return Err(
+                                "Reloading an empty project index recreated a project".into()
+                            );
+                        }
+                        Ok(())
+                    })();
+                    let (filename, message) = match result {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
+                            ("project-settings-result.txt", "PASS: project settings rendered and final project deletion persisted an empty workspace that stayed empty after reloading.".into())
+                        }
+                        Err(error) => ("smoke-error.txt", error),
+                    };
+                    let _ = std::fs::write(folder.join(filename), message);
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -3132,6 +3224,18 @@ mod tests {
                 .unwrap();
         assert_eq!(restored.current, 0);
         assert_eq!(restored.items.len(), 2);
+        let mut after = restored.clone();
+        after.current = 1;
+        assert!(!after.remove(0).unwrap());
+        assert_eq!(after.current, 0);
+        assert_eq!(after.items[0].name, "SECOND");
+        assert!(after.remove(0).unwrap());
+        persist_projects(dir.path(), toml::to_string(&after).unwrap().as_bytes()).unwrap();
+        let empty: Projects =
+            toml::from_str(&std::fs::read_to_string(dir.path().join("projects.toml")).unwrap())
+                .unwrap();
+        assert_eq!(empty.current, 0);
+        assert!(empty.items.is_empty());
     }
     #[test]
     #[ignore = "requires read-only VAULT_MODEL_ROOT"]
