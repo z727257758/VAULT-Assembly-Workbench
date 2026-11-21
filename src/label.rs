@@ -12,6 +12,14 @@ use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 pub const PATH: &str = "01. DRAWERS/07. Universal/Label.stl";
 pub const SUSTAINER_PATH: &str = "02. SUSTAINERS/05. Universal/Label for Sustainers.stl";
+pub fn sustainer_path(selection: &crate::catalog::Selection) -> &'static str {
+    if selection.width == "S" && matches!(selection.height.as_str(), "2F" | "4F") {
+        PATH
+    } else {
+        SUSTAINER_PATH
+    }
+}
+
 const LEGACY_PLACEHOLDER: &str = "VAULT";
 
 pub fn is_label(path: &str) -> bool {

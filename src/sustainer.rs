@@ -1096,7 +1096,10 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
                 display::installed_pin_display(&scene.parts[i].mesh, cap_frame, &cap)?;
         }
     }
-    for i in indices(scene, "/Label for Sustainers.stl") {
+    for i in (0..scene.parts.len())
+        .filter(|&i| crate::label::is_label(&scene.parts[i].pose.path))
+        .collect::<Vec<_>>()
+    {
         let pp = display::plane_patch(
             &scene.parts[facade].mesh,
             scene.parts[facade].pose.matrix(0.),
@@ -1111,7 +1114,7 @@ pub fn apply(scene: &mut Scene) -> Result<(), String> {
             fm,
             2,
             -1.,
-            -1.015,
+            -scene.parts[i].source_size.z * 0.5,
             wide_window(),
             0.03,
         )?;
@@ -1933,7 +1936,7 @@ pub(crate) fn layout_explosion(scene: &mut Scene) -> Result<(), String> {
         .parts
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.pose.path.ends_with("/Label for Sustainers.stl"))
+        .filter(|(_, p)| crate::label::is_label(&p.pose.path))
     {
         let side = if (Vec3::from(part.pose.position)
             - Vec3::from(scene.parts[facade].pose.position))
@@ -2148,6 +2151,8 @@ mod tests {
         let catalog = Catalog::scan(root.into()).unwrap();
         for (width, depth, height, body, split_roof) in [
             ("S", 3, "1F", SustainerBody::Flat, false),
+            ("S", 6, "2F", SustainerBody::Flat, false),
+            ("S", 6, "4F", SustainerBody::Flat, true),
             ("M", 4, "2F", SustainerBody::Flat, false),
             ("L", 6, "4F", SustainerBody::Dividers, true),
             ("XL", 7, "1F", SustainerBody::Sealed, true),
@@ -2277,7 +2282,7 @@ mod tests {
                 for label in scene
                     .parts
                     .iter()
-                    .filter(|p| p.pose.path.ends_with("/Label for Sustainers.stl"))
+                    .filter(|p| crate::label::is_label(&p.pose.path))
                 {
                     let side = if (Vec3::from(label.pose.position)
                         - Vec3::from(panel.pose.position))

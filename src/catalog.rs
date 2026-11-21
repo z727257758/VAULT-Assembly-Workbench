@@ -406,7 +406,7 @@ impl Catalog {
             if small { 1 } else { 2 },
             "Stacking latches",
         )?;
-        add(format!("{universal}/Label for Sustainers.stl"), 1, "Label")?;
+        add(crate::label::sustainer_path(s).into(), 1, "Label")?;
         Ok(bom)
     }
     pub fn scan(root: PathBuf) -> Result<Self, String> {
@@ -712,8 +712,21 @@ mod tests {
                             let bom = c.sustainer_bom(&s, options).unwrap();
                             configurations += 1;
                             assert!(bom.iter().all(|b| (b.path.starts_with("02. SUSTAINERS/")
-                                || b.path == crate::sustainer::STACKING_LATCH)
+                                || b.path == crate::sustainer::STACKING_LATCH
+                                || b.path == crate::label::PATH)
                                 && c.root.join(&b.path).is_file()));
+                            let label = if width == "S" && matches!(height, "2F" | "4F") {
+                                crate::label::PATH
+                            } else {
+                                crate::label::SUSTAINER_PATH
+                            };
+                            assert_eq!(
+                                bom.iter()
+                                    .filter(|b| b.group == "Label")
+                                    .map(|b| b.path.as_str())
+                                    .collect::<Vec<_>>(),
+                                [label]
+                            );
                             assert_eq!(
                                 bom.iter()
                                     .find(|b| b.path == crate::sustainer::STACKING_LATCH)

@@ -92,6 +92,24 @@ impl Preset {
         let config = self
             .print_config
             .get_or_insert_with(|| Self::legacy_print_config(fallback));
+        if self.assembly_kind == AssemblyKind::Sustainer
+            && crate::label::sustainer_path(&self.selection) == crate::label::PATH
+        {
+            let mut replaced_label = false;
+            for item in &mut self.bom {
+                if item.path == crate::label::SUSTAINER_PATH {
+                    item.path = crate::label::PATH.into();
+                    replaced_label = true;
+                }
+            }
+            if replaced_label {
+                for slots in [&mut config.part_filaments, &mut config.text_filaments] {
+                    if let Some(slot) = slots.remove(crate::label::SUSTAINER_PATH) {
+                        slots.entry(crate::label::PATH.into()).or_insert(slot);
+                    }
+                }
+            }
+        }
         for drawer in &mut self.drawers {
             drawer.migrate_print_settings(config);
         }
@@ -1397,8 +1415,8 @@ impl App {
                 [136, 109, 173],
                 [235, 235, 232],
             ];
-            config.set_part_slot(p.assembly_kind.label_path(), i + 2);
-            config.set_text_slot(p.assembly_kind.label_path(), 6);
+            config.set_part_slot(p.assembly_kind.label_path(&p.selection), i + 2);
+            config.set_text_slot(p.assembly_kind.label_path(&p.selection), 6);
             self.members.push(Member {
                 exterior: Default::default(),
                 name: format!("成员 {}", i + 1),

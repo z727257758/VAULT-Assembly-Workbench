@@ -59,10 +59,10 @@ impl AssemblyKind {
         }
     }
 
-    fn label_path(self) -> &'static str {
+    fn label_path(self, selection: &Selection) -> &'static str {
         match self {
             Self::Drawer => crate::label::PATH,
-            Self::Sustainer => crate::label::SUSTAINER_PATH,
+            Self::Sustainer => crate::label::sustainer_path(selection),
         }
     }
     fn label(self, zh: bool) -> &'static str {
@@ -2418,8 +2418,8 @@ impl App {
         }
         let z = self.zh;
         let mut open = true;
-        let path = self.assembly_kind.label_path();
-        let is_box = self.assembly_kind == AssemblyKind::Sustainer;
+        let path = self.assembly_kind.label_path(&self.selection);
+        let narrow_label = path == crate::label::SUSTAINER_PATH;
         if self.label.has_legacy_placeholder() {
             self.label.text.clear();
         }
@@ -2429,7 +2429,7 @@ impl App {
         let mut preview = false;
         egui::Window::new(t(z,"编辑标签文字","Edit label text")).id(egui::Id::new("label-editor"))
             .open(&mut open).resizable(false).default_width(440.).show(ctx,|ui|{
-                ui.label(if is_box {t(z,"基于盒子原始标签，保留外形与安装结构。","Based on the original Sustainer label, preserving its shape and mounting features.")} else {t(z,"基于 Label.stl，保留原标签外形与安装结构。","Based on Label.stl, preserving its shape and mounting features.")});
+                ui.label(if narrow_label {t(z,"基于盒子原始标签，保留外形与安装结构。","Based on the original Sustainer label, preserving its shape and mounting features.")} else {t(z,"基于 Label.stl，保留原标签外形与安装结构。","Based on Label.stl, preserving its shape and mounting features.")});
                 if ui.checkbox(&mut lettering,t(z,"启用标签文字","Enable lettering")).changed(){
                     self.label.enabled = lettering;
                     self.label.blank = !lettering;
@@ -2438,7 +2438,7 @@ impl App {
                     if ui.add(egui::TextEdit::multiline(&mut self.label.text).hint_text(&default_text).desired_rows(2).char_limit(48)).changed(){
                         self.label.enabled = !self.label.text.trim().is_empty();
                     }
-                    ui.small(if is_box {t(z,"最多两行；文字居中，安全区域 32 × 12 mm。","Up to two centered lines within a 32 × 12 mm safe area.")} else {t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area.")});
+                    ui.small(if narrow_label {t(z,"最多两行；文字居中，安全区域 32 × 12 mm。","Up to two centered lines within a 32 × 12 mm safe area.")} else {t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area.")});
                     crate::label::stroke_check_label_ui(ui, &self.label_for_project(), path);
                 });
                 ui.horizontal(|ui|{
@@ -3124,6 +3124,7 @@ impl eframe::App for App {
                                 self.sustainer_angle = 0.;
                                 self.selection = Selection {
                                     width: if self.smoke_stage == 55 { "S" } else { "XL" }.into(),
+                                    height: if self.smoke_stage == 55 { "2F" } else { "1F" }.into(),
                                     ..Default::default()
                                 };
                                 self.bom = self
@@ -3157,6 +3158,20 @@ impl eframe::App for App {
                             54 => {
                                 self.label_open = false;
                                 self.sustainer_angle = 0.;
+                                self.sustainer_options = Default::default();
+                                self.selection = Selection {
+                                    depth: 6,
+                                    height: "2F".into(),
+                                    ..Default::default()
+                                };
+                                self.label.text = "S6-2F".into();
+                                let path = self.assembly_kind.label_path(&self.selection);
+                                self.export_options.plate.set_part_slot(path, 3);
+                                self.export_options.plate.set_text_slot(path, 2);
+                                self.bom = self
+                                    .catalog
+                                    .sustainer_bom(&self.selection, self.sustainer_options)
+                                    .unwrap();
                                 self.assembly(ctx);
                             }
                             46 | 48..=50 => {
