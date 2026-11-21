@@ -1,5 +1,70 @@
 use super::*;
+use crate::constraints::{AssemblyRules, MotionKind};
+use crate::scene::Target;
 use crate::ui_style;
+use std::sync::Arc;
+
+/// Cache an opened display copy while the loaded assembly and its poses match.
+pub(super) struct OpenInterior {
+    target: Target,
+    source: usize,
+    poses: Vec<(usize, [f32; 3], [f32; 3], bool)>,
+    scene: Result<Arc<Scene>, String>,
+}
+
+impl OpenInterior {
+    fn solve(source: &Scene, target: Target, kind: MotionKind) -> Result<Arc<Scene>, String> {
+        let joint = AssemblyRules::mechanism(source, target)?;
+        if joint.kind != kind || joint.max <= joint.min {
+            return Err(match kind {
+                MotionKind::Drawer => {
+                    "抽屉没有可用的滑动行程 / Drawer has no available slide travel"
+                }
+                MotionKind::Lid => "箱盖没有可用的开合行程 / Lid has no available travel",
+            }
+            .into());
+        }
+        let mut scene = source.clone();
+        match kind {
+            MotionKind::Drawer => AssemblyRules::set_slider(&mut scene, &joint.child, joint.max)?,
+            MotionKind::Lid => {
+                let plan = AssemblyRules::plan_motion(source, &joint.child, joint.max)?;
+                AssemblyRules::apply_motion_sample(
+                    &mut scene,
+                    &joint.child,
+                    plan.sample(plan.duration),
+                )?;
+            }
+        }
+        Ok(Arc::new(scene))
+    }
+
+    pub(super) fn get(
+        cache: &mut Option<Self>,
+        source: &Scene,
+        target: Target,
+        kind: MotionKind,
+    ) -> Result<Arc<Scene>, String> {
+        let key = source.parts.as_ptr() as usize;
+        let poses = || {
+            source
+                .parts
+                .iter()
+                .map(|p| (p.mesh_key(), p.pose.position, p.pose.rotation, p.visible))
+        };
+        if cache.as_ref().is_none_or(|old| {
+            old.target != target || old.source != key || !poses().eq(old.poses.iter().copied())
+        }) {
+            *cache = Some(Self {
+                target,
+                source: key,
+                poses: poses().collect(),
+                scene: Self::solve(source, target, kind),
+            });
+        }
+        cache.as_ref().unwrap().scene.clone()
+    }
+}
 
 pub(super) fn model_and_plan_rects(stage: egui::Rect) -> (egui::Rect, egui::Rect) {
     let margin = (stage.width() * 0.016).clamp(6., 14.);
@@ -22,6 +87,27 @@ pub(super) fn model_and_plan_rects(stage: egui::Rect) -> (egui::Rect, egui::Rect
 }
 
 impl App {
+    pub(super) fn interior_opacity_ui(&mut self, ui: &mut egui::Ui) {
+        let z = self.zh;
+        let opacity_control = |ui: &mut egui::Ui| {
+            let label = ui.label(t(z, "外部零件不透明度", "Exterior part opacity"));
+            ui.spacing_mut().slider_width = (ui.available_width() - 56.).clamp(32., 160.);
+            if ui
+                .add(egui::Slider::new(&mut self.interior_exterior_opacity, 20..=50).suffix("%"))
+                .labelled_by(label.id)
+                .changed()
+            {
+                ui.ctx().request_repaint();
+            }
+        };
+        let inline_width = if z { 220. } else { 245. };
+        if ui.available_width() >= inline_width {
+            ui.horizontal(opacity_control);
+        } else {
+            ui.vertical(opacity_control);
+        }
+    }
+
     pub(super) fn choose_library(&mut self, ctx: &egui::Context) {
         if self.busy {
             return;

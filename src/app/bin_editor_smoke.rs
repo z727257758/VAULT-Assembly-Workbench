@@ -722,7 +722,7 @@ impl App {
             };
             match stage {
                 0 => {
-                    self.bin_exterior_opacity = 20;
+                    self.interior_exterior_opacity = 20;
                     let from = self
                         .bin_view
                         .project_cell([0.5, 0.5])
@@ -741,7 +741,7 @@ impl App {
                     self.editor_smoke_pointer.release(to);
                 }
                 2 => {
-                    self.bin_exterior_opacity = 50;
+                    self.interior_exterior_opacity = 50;
                     self.editor_smoke_pointer.drag(
                         plan_point(1.5, 0.5),
                         plan_point(1.5, 1.5),
@@ -754,7 +754,7 @@ impl App {
                     false,
                 ),
                 4 => {
-                    self.bin_exterior_opacity = 30;
+                    self.interior_exterior_opacity = 30;
                     self.editor_smoke_pointer.release(plan_point(2.5, 2.5));
                 }
                 5 | 8 => {

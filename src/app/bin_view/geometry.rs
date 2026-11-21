@@ -96,6 +96,7 @@ pub(super) fn camera_for(part: &Part, plate: Mat4, rect: egui::Rect, show_housin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraints::AssemblyRules;
     use glam::Quat;
 
     #[test]
@@ -201,10 +202,11 @@ mod tests {
         let other_id = PartId::of(&source.parts[1]);
         AssemblyRules::set_slider(&mut source, &other_id, 20.).unwrap();
         let mut cache = None;
-        let opened = OpenDrawer::get(&mut cache, &source, target).unwrap();
+        let opened =
+            workspace::OpenInterior::get(&mut cache, &source, target, MotionKind::Drawer).unwrap();
         assert!(Arc::ptr_eq(
             &opened,
-            &OpenDrawer::get(&mut cache, &source, target).unwrap()
+            &workspace::OpenInterior::get(&mut cache, &source, target, MotionKind::Drawer).unwrap()
         ));
         for i in [0, 1] {
             assert!(

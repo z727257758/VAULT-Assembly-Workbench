@@ -1,12 +1,13 @@
-//! A case-local editing view. Slot guides share the coordinates measured on the preview worker.
+//! Edit case slots in the opened assembly preview using measured housing coordinates.
 use super::*;
 use crate::{
+    constraints::MotionKind,
     render::MaterialOverride,
     scene::{Part, Target},
     sustainer_dividers::{self as dividers, Axis, Geometry, Layout, Placement},
 };
 use egui::{Pos2, Rect, Stroke};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 struct Slot {
     placement: Placement,
@@ -44,6 +45,7 @@ impl Slot {
 
 #[derive(Default)]
 pub(super) struct State {
+    opened: Option<workspace::OpenInterior>,
     slots: Vec<Slot>,
     shown: Option<Layout>,
     yaw: f32,
@@ -97,7 +99,7 @@ impl State {
         let mut camera = Camera {
             center: (lo + hi) * 0.5,
             radius: ((hi - lo).length() * 0.5).max(1.),
-            yaw: self.yaw,
+            yaw: 0.12 + self.yaw,
             pitch: (1.23 + self.pitch_offset).clamp(0.48, 1.54),
             ..Default::default()
         };
@@ -122,8 +124,7 @@ fn corners(lo: Vec3, hi: Vec3) -> [Vec3; 8] {
     })
 }
 
-fn bounds(part: &Part) -> (Vec3, Vec3) {
-    let matrix = part.pose.matrix(0.);
+fn bounds(part: &Part, matrix: Mat4) -> (Vec3, Vec3) {
     corners(part.mesh.min, part.mesh.max)
         .into_iter()
         .map(|p| matrix.transform_point3(p))
@@ -173,7 +174,10 @@ impl App {
             },
             drawer: None,
         };
-        let housing = self.scene.parts.iter().find(|p| {
+        let opened =
+            workspace::OpenInterior::get(&mut state.opened, &self.scene, target, MotionKind::Lid);
+        let source_scene = opened.as_deref().unwrap_or(&self.scene);
+        let housing = source_scene.parts.iter().find(|p| {
             target.contains(p)
                 && p.pose.path.starts_with(crate::sustainer::PREFIX)
                 && p.pose.path.contains("/Modules/")
@@ -188,70 +192,79 @@ impl App {
             );
             return false;
         };
-        // Normalize a translated or rotated member to the same front-down view
-        // as the inspector. The actual assembly and the user's camera stay intact.
-        let local = g.housing_pose * housing.pose.matrix(0.).inverse();
-        let mut scene = Scene::default();
-        let mut materials = Vec::new();
+        let housing_pose = housing.pose.matrix(0.);
+        let local = g.housing_pose * housing_pose.inverse();
+        let world = housing_pose * g.housing_pose.inverse();
+        let (mut lo, mut hi) = bounds(housing, housing_pose);
+        for part in source_scene
+            .parts
+            .iter()
+            .filter(|p| p.visible && target.contains(p))
+        {
+            let (min, max) = bounds(part, part.pose.matrix(0.));
+            lo = lo.min(min);
+            hi = hi.max(max);
+        }
+        // Keep the closest stacked neighbor in frame while the editing camera
+        // stays focused on the selected case in tall assemblies.
+        let neighbor = source_scene
+            .member_supports
+            .iter()
+            .position(|below| below.contains(&target.member))
+            .or_else(|| {
+                source_scene
+                    .member_supports
+                    .get(target.member)?
+                    .first()
+                    .copied()
+            })
+            .or_else(|| {
+                let level = source_scene.member_placements.get(target.member)?.level;
+                source_scene
+                    .member_placements
+                    .iter()
+                    .enumerate()
+                    .find(|(index, placement)| *index != target.member && placement.level == level)
+                    .map(|(index, _)| index)
+            });
+        if let Some(neighbor) = neighbor
+            && let Some(&(min, max)) = source_scene.member_bounds.get(neighbor)
+        {
+            let offset = source_scene.member_lid_slide_offset(neighbor);
+            lo = lo.min(min + offset);
+            hi = hi.max(max + offset);
+        }
+        let shell_top = bounds(housing, g.housing_pose).1.y;
+        let mut scene = source_scene.clone();
+        let opacity = self.interior_exterior_opacity as f32 / 100.;
+        let mut materials = vec![MaterialOverride::Opacity(opacity); scene.parts.len()];
         let mut heights = BTreeMap::new();
-        let mut lo = Vec3::splat(f32::INFINITY);
-        let mut hi = Vec3::splat(f32::NEG_INFINITY);
         let mut original_count = 0;
         let selection = self
             .sustainer_divider_editor
             .selected
             .and_then(|i| layout.items.get(i));
-        for source in self.scene.parts.iter().filter(|p| target.contains(p)) {
-            let path = &source.pose.path;
-            let board = path.starts_with(dividers::PREFIX);
-            let shell = path.contains("/Modules/") || path.ends_with("Facade.stl");
-            let hinge = path.contains("/Hinges/") && !path.contains("Top");
-            let holder = path.ends_with("/LOCK HOLDER.stl");
-            // The pin set contains both moving and fixed bodies. Only the small
-            // pins have the facade's stationary holder as their parent.
-            let pin = path.contains("/Rods/")
-                || (path.contains("/1 SET OF PINS") && {
-                    let id = crate::constraints::PartId::of(source);
-                    self.scene
-                        .relations
-                        .iter()
-                        .any(|r| r.child == id && r.parent.path.ends_with("/LOCK HOLDER.stl"))
-                });
-            if !(board || shell || hinge || holder || pin) {
+        for (part, material) in scene.parts.iter_mut().zip(&mut materials) {
+            if !target.contains(part) {
                 continue;
             }
-            let mut part = source.clone();
-            let (_, rotation, position) =
-                (local * source.pose.matrix(0.)).to_scale_rotation_translation();
-            let (x, y, z) = rotation.to_euler(glam::EulerRot::XYZ);
-            part.pose.rotation = [x.to_degrees(), y.to_degrees(), z.to_degrees()];
-            part.pose.position = position.to_array();
-            part.visible = true;
-            let (min, max) = bounds(&part);
-            let color = if board {
-                original_count += 1;
-                let Some(slot) = occupied_slot(g, min, max).filter(|p| layout.items.contains(p))
-                else {
-                    continue;
-                };
-                let selected = selection == Some(&slot);
-                heights.insert(slot, max.y);
-                if selected {
-                    [0.35, 0.69, 0.51, 1.]
-                } else {
-                    [0.83, 0.87, 0.81, 1.]
-                }
-            } else if shell {
-                lo = lo.min(min);
-                hi = hi.max(max);
-                [0.82, 0.85, 0.86, 1.]
-            } else if pin {
-                [0.96, 0.48, 0.18, 1.]
-            } else {
-                [0.44, 0.49, 0.50, 1.]
+            if !part.pose.path.starts_with(dividers::PREFIX) {
+                *material = MaterialOverride::Opacity(1.);
+                continue;
+            }
+            original_count += 1;
+            let (min, max) = bounds(part, local * part.pose.matrix(0.));
+            let Some(slot) = occupied_slot(g, min, max).filter(|p| layout.items.contains(p)) else {
+                part.visible = false;
+                continue;
             };
-            materials.push(MaterialOverride::Color(color));
-            scene.parts.push(part);
+            part.visible = true;
+            *material = MaterialOverride::Color(if selection == Some(&slot) {
+                [0.35, 0.69, 0.51, 1.]
+            } else {
+                [0.83, 0.87, 0.81, 1.]
+            });
+            heights.insert(slot, max.y);
         }
         let delta = response.drag_delta();
         if response.dragged_by(egui::PointerButton::Primary) {
@@ -286,6 +299,9 @@ impl App {
             ViewOptions::default(),
             &materials,
         );
+        if self.smoke {
+            self.divider_editor_smoke.rendered = Some((scene, materials));
+        }
         painter.image(
             texture,
             rect,
@@ -298,10 +314,14 @@ impl App {
             };
             let installed = layout.items.contains(&placement);
             let height = heights.get(&placement).copied();
-            let top = height.unwrap_or(if installed { hi.y - 4. } else { g.floor + 0.3 });
-            let edge = line.map(|[x, z]| Vec3::new(x, top, z));
+            let top = height.unwrap_or(if installed {
+                shell_top - 4.
+            } else {
+                g.floor + 0.3
+            });
+            let edge = line.map(|[x, z]| world.transform_point3(Vec3::new(x, top, z)));
             let edge_depth = edge.map(|p| matrix.project_point3(p).z);
-            let foot = line.map(|[x, z]| Vec3::new(x, g.floor + 0.3, z));
+            let foot = line.map(|[x, z]| world.transform_point3(Vec3::new(x, g.floor + 0.3, z)));
             state.slots.push(Slot {
                 placement,
                 edge: edge.map(screen),

@@ -1,13 +1,14 @@
 //! Native pointer regression for the linked box divider views.
 use super::*;
 use crate::constraints::{AssemblyRules, PartId};
+use crate::render::MaterialOverride;
 use crate::scene::Target;
 use crate::sustainer_dividers::{self as dividers, Axis, Placement};
 use egui::{Pos2, Rect};
 use glam::Mat4;
 
 const BOX: Target = Target {
-    member: 1,
+    member: 0,
     drawer: None,
 };
 
@@ -24,6 +25,7 @@ pub(super) struct State {
     pub(super) done_rect: Option<Rect>,
     seats: BTreeMap<Placement, Mat4>,
     entry_camera: Option<Mat4>,
+    pub(super) rendered: Option<(Scene, Vec<MaterialOverride>)>,
     error: Option<String>,
 }
 
@@ -48,7 +50,7 @@ impl App {
             p.sustainer_dividers.specification = dividers::spec(&p.selection, p.sustainer_options);
             let mut layers = Vec::new();
             for level in [0, 1] {
-                p.sustainer_dividers.items = if level == 0 {
+                p.sustainer_dividers.items = if level != BOX.member as u32 {
                     vec![slot(1, 2)]
                 } else {
                     (0..2)
@@ -124,7 +126,7 @@ impl App {
             || meshes != count
             || qty as usize != count
             || *layout != self.members[BOX.member].preset.sustainer_dividers
-            || self.members[0].preset.sustainer_dividers.items != [slot(1, 2)]
+            || self.members[1].preset.sustainer_dividers.items != [slot(1, 2)]
             || self.sustainer_angle != 0.
             || AssemblyRules::mechanism(&self.scene, BOX)?.value.abs() > 0.01
         {
@@ -145,6 +147,62 @@ impl App {
             if !ok {
                 return Err(format!("Incorrect 3D seat for {slot:?}"));
             }
+        }
+        Ok(())
+    }
+
+    fn check_divider_preview_assembly(&self) -> Result<(), String> {
+        let (display, materials) = self
+            .divider_editor_smoke
+            .rendered
+            .as_ref()
+            .ok_or("Missing divider editor render")?;
+        let lid = AssemblyRules::mechanism(display, BOX)?;
+        if display.parts.len() != self.scene.parts.len()
+            || !lid.supports_upper
+            || lid.slide <= 0.
+            || lid.value < 70.
+            || self.scene.member_bounds != display.member_bounds
+        {
+            return Err("Divider editor did not open the lower case in the full assembly".into());
+        }
+        let mut other_visible = false;
+        for ((source, shown), material) in
+            self.scene.parts.iter().zip(&display.parts).zip(materials)
+        {
+            if shown.visible {
+                let opacity = match material {
+                    MaterialOverride::Opacity(value) => *value,
+                    MaterialOverride::Color(color) => color[3],
+                };
+                let expected = if BOX.contains(shown) {
+                    1.
+                } else {
+                    self.interior_exterior_opacity as f32 / 100.
+                };
+                if opacity != expected {
+                    return Err(format!(
+                        "Incorrect divider preview opacity for {}",
+                        shown.pose.path
+                    ));
+                }
+            }
+            if !BOX.contains(source) {
+                other_visible |= shown.visible;
+                if PartId::of(source) != PartId::of(shown)
+                    || source.mesh_key() != shown.mesh_key()
+                    || source.visible != shown.visible
+                    || !source
+                        .pose
+                        .matrix(0.)
+                        .abs_diff_eq(shown.pose.matrix(0.), 0.02)
+                {
+                    return Err("Divider editor modified a neighboring member".into());
+                }
+            }
+        }
+        if !other_visible {
+            return Err("Divider editor hid the other member".into());
         }
         Ok(())
     }
@@ -211,7 +269,7 @@ impl App {
                         return Err("Saved project lost the edited divider layout".into());
                     }
                 }
-                std::fs::write(folder.join("smoke-result.txt"), "PASS: L5 2F sealed case, eight dividers across two lanes. Native plan and 3D slot clicks, occupied and empty slots, mounted mesh transforms, BOM, other layer isolation, camera restoration and project roundtrip.").map_err(|e| e.to_string())?;
+                std::fs::write(folder.join("smoke-result.txt"), "PASS: L5 2F sealed case, eight dividers across two lanes. The lower case opened in the full assembly with the other member visible and stationary. Native plan and 3D slot clicks, mounted mesh transforms, BOM, camera restoration and project roundtrip.").map_err(|e| e.to_string())?;
                 if folder.join("smoke-error.txt").exists() {
                     std::fs::remove_file(folder.join("smoke-error.txt"))
                         .map_err(|e| e.to_string())?;
@@ -228,6 +286,7 @@ impl App {
                 if !self.divider_model.loaded(&self.sustainer_dividers) {
                     return Ok(());
                 }
+                self.check_divider_preview_assembly()?;
                 let Some(plan_point) = self.divider_plan_point(&left) else {
                     return Ok(());
                 };
@@ -264,6 +323,11 @@ impl App {
                     _ => return Err(format!("Unknown divider smoke stage {stage}")),
                 };
                 self.editor_smoke_pointer.click(click);
+                self.interior_exterior_opacity = match stage {
+                    1 => 20,
+                    2 => 50,
+                    _ => 30,
+                };
             }
             self.smoke_stage += 1;
             Ok(())

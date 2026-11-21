@@ -104,6 +104,7 @@ impl App {
                     close = done.clicked();
                 });
             });
+            self.interior_opacity_ui(ui);
             ui.separator();
             egui::ScrollArea::vertical()
                 .id_salt("divider-properties")

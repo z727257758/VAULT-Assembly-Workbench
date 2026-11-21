@@ -1,7 +1,7 @@
 //! Drawer-local editing against the measured sockets of the loaded baseplate.
 use super::*;
 use crate::{
-    constraints::{AssemblyRules, MotionKind, PartId},
+    constraints::{MotionKind, PartId},
     gridfinity::{self, Bin, Layout},
     gridfinity_editor::{Editor, GridView},
     mesh::Mesh,
@@ -105,51 +105,9 @@ impl Footprint {
     }
 }
 
-/// Keep the solved editing pose across pointer frames. A preview rebuild or any
-/// movement of the source assembly invalidates it; all mesh storage is shared.
-struct OpenDrawer {
-    target: Target,
-    source: usize,
-    poses: Vec<(usize, [f32; 3], [f32; 3], bool)>,
-    scene: Result<Arc<Scene>, String>,
-}
-
-impl OpenDrawer {
-    fn solve(source: &Scene, target: Target) -> Result<Arc<Scene>, String> {
-        let joint = AssemblyRules::mechanism(source, target)?;
-        if joint.kind != MotionKind::Drawer || joint.max <= joint.min {
-            return Err("抽屉没有可用的滑动行程 / Drawer has no available slide travel".into());
-        }
-        let mut scene = source.clone();
-        AssemblyRules::set_slider(&mut scene, &joint.child, joint.max)?;
-        Ok(Arc::new(scene))
-    }
-
-    fn get(cache: &mut Option<Self>, source: &Scene, target: Target) -> Result<Arc<Scene>, String> {
-        let key = source.parts.as_ptr() as usize;
-        let poses = || {
-            source
-                .parts
-                .iter()
-                .map(|p| (p.mesh_key(), p.pose.position, p.pose.rotation, p.visible))
-        };
-        if cache.as_ref().is_none_or(|old| {
-            old.target != target || old.source != key || !poses().eq(old.poses.iter().copied())
-        }) {
-            *cache = Some(Self {
-                target,
-                source: key,
-                poses: poses().collect(),
-                scene: Self::solve(source, target),
-            });
-        }
-        cache.as_ref().unwrap().scene.clone()
-    }
-}
-
 #[derive(Default)]
 pub(super) struct State {
-    opened: Option<OpenDrawer>,
+    opened: Option<workspace::OpenInterior>,
     sockets: Option<Sockets>,
     view: Option<Projection>,
     bins: Vec<Footprint>,
@@ -226,7 +184,12 @@ impl App {
             message(t(self.zh, "正在加载抽屉装配…", "Loading drawer assembly…"));
             return;
         }
-        let opened = match OpenDrawer::get(&mut self.bin_view.opened, &self.scene, target) {
+        let opened = match workspace::OpenInterior::get(
+            &mut self.bin_view.opened,
+            &self.scene,
+            target,
+            MotionKind::Drawer,
+        ) {
             Ok(opened) => opened,
             Err(error) => {
                 message(if pending {
@@ -387,7 +350,7 @@ impl App {
                 move_display_part(&mut scene.parts[i], shift);
             }
         }
-        let opacity = self.bin_exterior_opacity as f32 / 100.;
+        let opacity = self.interior_exterior_opacity as f32 / 100.;
         let mut materials = vec![MaterialOverride::Opacity(opacity); scene.parts.len()];
         materials[plate_index] = MaterialOverride::Color([0.77, 0.80, 0.79, 1.]);
         for bin in &state.bins {
