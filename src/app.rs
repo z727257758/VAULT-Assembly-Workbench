@@ -921,14 +921,14 @@ impl App {
         } else if let Some(font) = self.label_font {
             label.font = font;
         }
-        label
+        label.for_module(&self.selection)
     }
 
     fn validate_label_edit(&mut self) -> Result<(), String> {
         let label = self.label_for_project();
         label.validate()?;
-        if self.project_label_style.is_some() {
-            self.label = label;
+        if let Some(style) = self.project_label_style {
+            style.apply(&mut self.label);
         }
         Ok(())
     }
@@ -2523,14 +2523,24 @@ impl App {
         let mut open = true;
         let path = self.assembly_kind.label_path();
         let is_box = self.assembly_kind == AssemblyKind::Sustainer;
+        if self.label.has_legacy_placeholder() {
+            self.label.text.clear();
+        }
         let before = self.label.clone();
+        let default_text = crate::label::Config::specification_text(&self.selection);
+        let mut lettering = self.label.for_module(&self.selection).active();
         let mut preview = false;
         egui::Window::new(t(z,"编辑标签文字","Edit label text")).id(egui::Id::new("label-editor"))
             .open(&mut open).resizable(false).default_width(440.).show(ctx,|ui|{
                 ui.label(if is_box {t(z,"基于盒子原始标签，保留外形与安装结构。","Based on the original Sustainer label, preserving its shape and mounting features.")} else {t(z,"基于 Label.stl，保留原标签外形与安装结构。","Based on Label.stl, preserving its shape and mounting features.")});
-                ui.checkbox(&mut self.label.enabled,t(z,"启用标签文字","Enable lettering"));
-                ui.add_enabled_ui(self.label.enabled,|ui|{
-                    ui.add(egui::TextEdit::multiline(&mut self.label.text).desired_rows(2).char_limit(48));
+                if ui.checkbox(&mut lettering,t(z,"启用标签文字","Enable lettering")).changed(){
+                    self.label.enabled = lettering;
+                    self.label.blank = !lettering;
+                }
+                ui.add_enabled_ui(lettering,|ui|{
+                    if ui.add(egui::TextEdit::multiline(&mut self.label.text).hint_text(&default_text).desired_rows(2).char_limit(48)).changed(){
+                        self.label.enabled = !self.label.text.trim().is_empty();
+                    }
                     ui.small(if is_box {t(z,"最多两行；文字居中，安全区域 32 × 12 mm。","Up to two centered lines within a 32 × 12 mm safe area.")} else {t(z,"最多两行；文字居中，安全区域 38 × 12 mm。","Up to two centered lines within a 38 × 12 mm safe area.")});
                     crate::label::stroke_check_label_ui(ui, &self.label_for_project(), path);
                 });
@@ -2539,6 +2549,7 @@ impl App {
                     if ui.button(t(z,"恢复空白标签","Restore blank label")).clicked(){
                         self.label.enabled = false;
                         self.label.text.clear();
+                        self.label.blank = true;
                     }
                 });
                 if let Err(e)=self.label_for_project().validate(){ui.colored_label(ui.visuals().error_fg_color,e);}

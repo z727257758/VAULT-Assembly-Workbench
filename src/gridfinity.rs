@@ -279,6 +279,7 @@ impl Layout {
         crate::label::Config {
             enabled: true,
             text: "X".into(),
+            blank: false,
             font: settings.font,
             style: settings.style,
             size: settings.size,

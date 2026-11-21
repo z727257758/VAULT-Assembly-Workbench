@@ -520,12 +520,17 @@ impl App {
         self.inserts_ui(ui, ctx);
         ui.separator();
         let label = self.label.clone();
+        let default_text = crate::label::Config::specification_text(&self.selection);
         option_row(ui, t(z, "标签文字", "Label text"), |ui| {
             if ui
                 .horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.label.text)
-                            .hint_text(t(z, "输入标签文字", "Enter label text"))
+                            .hint_text(if self.label.blank {
+                                t(z, "输入标签文字", "Enter label text")
+                            } else {
+                                &default_text
+                            })
                             .char_limit(48)
                             .desired_width(ui.available_width()),
                     )
@@ -534,6 +539,7 @@ impl App {
                 .changed()
             {
                 self.label.enabled = !self.label.text.trim().is_empty();
+                self.label.blank = false;
                 if let Err(error) = self.validate_label_edit() {
                     self.label = label;
                     self.status = error;

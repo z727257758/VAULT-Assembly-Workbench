@@ -99,6 +99,7 @@ fn swatch(ctx: &egui::Context, layer: LayerId, rgb: [u8; 3], below: f32) -> Resu
 impl App {
     pub(super) fn setup_color_groups_smoke(&mut self, ctx: &egui::Context) -> Result<(), String> {
         self.zh = true;
+        self.project_label_style = None;
         self.material_library = Default::default();
         // A project from the color-bucket UI could store separate slots for the runners.
         let mut old = serde_json::to_value(self.tower_snapshot()).map_err(|e| e.to_string())?;
@@ -117,6 +118,7 @@ impl App {
         let mut members = Vec::new();
         for level in 0..2 {
             let mut p = fresh_like(&self.member_snapshot());
+            p.label = crate::label::Config::default();
             p.selection = Selection {
                 width: "S".into(),
                 depth: 3,
@@ -378,6 +380,30 @@ impl App {
             match self.smoke_stage {
                 0 => {
                     self.check_color_rows(&ui, false)?;
+                    let labels: Vec<_> = self
+                        .scene
+                        .parts
+                        .iter()
+                        .filter(|part| part.pose.path == crate::label::PATH)
+                        .collect();
+                    let lettered = labels
+                        .iter()
+                        .filter(|part| part.mesh.vertices.iter().any(|vertex| vertex.shade == 0.45))
+                        .count();
+                    if labels.len() != 2 || lettered != labels.len() {
+                        return Err(format!(
+                            "Expected two default drawer labels with lettering, found {lettered} of {}",
+                            labels.len()
+                        ));
+                    }
+                    for member in &self.members {
+                        let jobs = member.preset.print_jobs(&member.name);
+                        if jobs[0].preset.label.text != "S3-1F" || !jobs[0].preset.label.active() {
+                            return Err(
+                                "Print job did not resolve the default specification text".into()
+                            );
+                        }
+                    }
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     if !self.capture_native_smoke(ctx, &folder.join("groups.png"))? {
                         return Ok(());

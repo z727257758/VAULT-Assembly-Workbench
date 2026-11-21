@@ -12,6 +12,7 @@ use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 pub const PATH: &str = "01. DRAWERS/07. Universal/Label.stl";
 pub const SUSTAINER_PATH: &str = "02. SUSTAINERS/05. Universal/Label for Sustainers.stl";
+const LEGACY_PLACEHOLDER: &str = "VAULT";
 
 pub fn is_label(path: &str) -> bool {
     matches!(path, PATH | SUSTAINER_PATH)
@@ -60,6 +61,8 @@ pub enum Font {
 pub struct Config {
     pub enabled: bool,
     pub text: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blank: bool,
     pub style: Style,
     pub font: Font,
     pub size: f32,
@@ -70,7 +73,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: false,
-            text: "VAULT".into(),
+            text: LEGACY_PLACEHOLDER.into(),
+            blank: false,
             style: Style::Raised,
             font: Font::ChineseBold,
             size: 5.,
@@ -134,6 +138,28 @@ impl StyleSettings {
 }
 
 impl Config {
+    pub fn specification_text(selection: &crate::catalog::Selection) -> String {
+        format!(
+            "{}{}-{}",
+            selection.width, selection.depth, selection.height
+        )
+    }
+
+    pub fn for_module(&self, selection: &crate::catalog::Selection) -> Self {
+        let mut config = self.clone();
+        if config.blank {
+            config.enabled = false;
+        } else if config.text.trim().is_empty() || config.has_legacy_placeholder() {
+            config.enabled = true;
+            config.text = Self::specification_text(selection);
+        }
+        config
+    }
+
+    pub fn has_legacy_placeholder(&self) -> bool {
+        !self.enabled && self.text == LEGACY_PLACEHOLDER
+    }
+
     pub fn with_font(&self, font: Option<Font>) -> Self {
         let mut config = self.clone();
         config.font = font.unwrap_or(self.font);
@@ -764,6 +790,34 @@ mod tests {
             ],
         ]);
         assert!(narrow_area_fraction(&ring, 0.6) > 0.99);
+    }
+
+    #[test]
+    fn module_label_uses_current_specification_until_customized_or_hidden() {
+        let mut selection = crate::catalog::Selection::default();
+        let legacy = Config::default();
+        assert_eq!(legacy.for_module(&selection).text, "S3-1F");
+
+        let mut label = Config {
+            text: " \t".into(),
+            ..Default::default()
+        };
+        selection.depth = 5;
+        selection.height = "2F".into();
+        let resolved = label.for_module(&selection);
+        assert!(resolved.active());
+        assert_eq!(resolved.text, "S5-2F");
+        assert_eq!(label.text, " \t");
+
+        label.text = "收纳".into();
+        label.enabled = true;
+        assert_eq!(label.for_module(&selection), label);
+
+        label.text.clear();
+        label.enabled = false;
+        label.blank = true;
+        let restored: Config = toml::from_str(&toml::to_string(&label).unwrap()).unwrap();
+        assert!(!restored.for_module(&selection).active());
     }
 
     #[test]

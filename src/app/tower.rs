@@ -349,9 +349,15 @@ pub(super) struct PrintJob {
 }
 impl Preset {
     pub(super) fn print_jobs(&self, name: &str) -> Vec<PrintJob> {
-        let job = |name, preset: Preset, mut items: Vec<Bom>, drawer| {
+        let job = |name, mut preset: Preset, mut items: Vec<Bom>, drawer| {
             for b in &mut items {
                 b.normalize_print(&preset.selection);
+            }
+            if items
+                .iter()
+                .any(|item| item.enabled && crate::label::is_label(&item.path))
+            {
+                preset.label = preset.label.for_module(&preset.selection);
             }
             PrintJob {
                 name,
@@ -433,6 +439,7 @@ fn fresh_like(p: &Preset) -> Preset {
     next.bom.clear();
     next.label.text.clear();
     next.label.enabled = false;
+    next.label.blank = false;
     next
 }
 fn normalize(members: &mut [Member]) {
@@ -1819,10 +1826,7 @@ impl App {
                     let label = if p.label.active() {
                         p.label.text.replace('\n', " / ")
                     } else {
-                        format!(
-                            "{}{}-{}",
-                            p.selection.width, p.selection.depth, p.selection.height
-                        )
+                        crate::label::Config::specification_text(&p.selection)
                     };
                     let selected = self.inline_edit.open
                         && self.inline_edit.target

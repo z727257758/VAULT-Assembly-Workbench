@@ -203,7 +203,7 @@ impl Preset {
                 child.validate_member(catalog)?;
             }
         }
-        self.label.validate()?;
+        self.label.for_module(&self.selection).validate()?;
         self.gridfinity.validate(&self.selection)?;
         self.divider_layout.validate(catalog, &self.selection)?;
         self.sustainer_dividers
@@ -386,6 +386,9 @@ impl App {
         self.drawer_extension = p.drawer_extension;
         self.gridfinity = p.gridfinity;
         self.label = p.label;
+        if self.label.has_legacy_placeholder() {
+            self.label.text.clear();
+        }
         self.divider_layout = p.divider_layout;
         self.sustainer_dividers = p.sustainer_dividers;
         self.export_options.plate = p
@@ -1019,7 +1022,7 @@ fn load_member_scene(
     } else {
         crate::dividers::apply(&mut scene, &p.divider_layout, &p.selection)?;
     }
-    crate::label::apply(&mut scene, &p.label)?;
+    crate::label::apply(&mut scene, &p.label.for_module(&p.selection))?;
     crate::gridfinity::apply_preview(
         &mut scene,
         home,
