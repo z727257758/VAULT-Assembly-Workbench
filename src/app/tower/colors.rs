@@ -287,10 +287,94 @@ fn edit_members(
     .inner
 }
 
+fn presets_ui(app: &mut App, ui: &mut egui::Ui) -> bool {
+    let z = app.zh;
+    let mut selected = None;
+    ui.menu_button(t(z, "配色预设", "Color presets"), |ui| {
+        if ui
+            .button(t(z, "保存当前配色…", "Save current colors…"))
+            .clicked()
+        {
+            app.tower.color_preset_name.get_or_insert_with(String::new);
+            ui.close();
+        }
+        if !app.color_presets.is_empty() {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (name, theme) in &app.color_presets {
+                        if ui
+                            .selectable_label(*theme == app.global_colors, name)
+                            .clicked()
+                        {
+                            selected = Some(theme.clone());
+                            ui.close();
+                        }
+                    }
+                });
+        }
+    });
+    if let Some(theme) = selected {
+        match app.apply_global_theme(theme) {
+            Ok(()) => {
+                app.tower.open_color = None;
+                app.tower.color_edit = None;
+                app.tower.color_preset_name = None;
+                ui.ctx().request_repaint();
+                return true;
+            }
+            Err(error) => app.tower.error = error,
+        }
+    }
+    if let Some(mut draft) = app.tower.color_preset_name.take() {
+        ui.add(
+            egui::TextEdit::singleline(&mut draft)
+                .char_limit(48)
+                .hint_text(t(z, "预设名称", "Preset name")),
+        );
+        let name = draft.trim();
+        let overwrite = app.color_presets.contains_key(name);
+        let mut save = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            let label = if overwrite {
+                t(z, "覆盖预设", "Replace preset")
+            } else {
+                t(z, "保存预设", "Save preset")
+            };
+            save = ui
+                .add_enabled(!name.is_empty(), egui::Button::new(label))
+                .clicked();
+            cancel = ui.button(t(z, "取消", "Cancel")).clicked();
+        });
+        if save {
+            let previous = app
+                .color_presets
+                .insert(name.to_owned(), app.global_colors.clone());
+            match app.save_settings() {
+                Ok(()) => return false,
+                Err(error) => {
+                    if let Some(previous) = previous {
+                        app.color_presets.insert(name.to_owned(), previous);
+                    } else {
+                        app.color_presets.remove(name);
+                    }
+                    app.tower.error = error;
+                }
+            }
+        }
+        if !cancel {
+            app.tower.color_preset_name = Some(draft);
+        }
+    }
+    false
+}
+
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     let z = app.zh;
     let items = items(app);
-    let rows = group_rows(&app.global_colors, &items, z);
+    let mut rows = group_rows(&app.global_colors, &items, z);
     let mut palette = Vec::new();
     for row in rows.iter().filter(|row| row.count > 0) {
         let rgb = app.global_colors.group_appearance(row.group).rgb;
@@ -310,6 +394,9 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let busy = app.export_rx.is_some();
+    if ui.add_enabled_ui(!busy, |ui| presets_ui(app, ui)).inner {
+        rows = group_rows(&app.global_colors, &items, z);
+    }
     let mut draft = app.global_colors.clone();
     let mut edit = app.tower.color_edit.take();
     let mut save = false;
@@ -747,6 +834,30 @@ mod tests {
                 ("灰色", "Gray")
             ]
         );
+    }
+
+    #[test]
+    fn settings_preserve_named_themes_with_custom_groups_and_text() {
+        let mut theme = ColorTheme::default();
+        assert_eq!(
+            theme.materials,
+            [crate::print_plate::FilamentMaterial::PetgBasic; 6]
+        );
+        new_custom(&mut theme, "活动件", &[GUIDE, SLIDE], 5);
+        theme.set_text_color_enabled(true).unwrap();
+        theme.validate().unwrap();
+
+        let mut settings: Settings = toml::from_str("language = 'zh'").unwrap();
+        assert!(settings.color_presets.is_empty());
+        let name = "灰色.活动件";
+        settings.color_presets.insert(name.into(), theme.clone());
+        let restored: Settings =
+            toml::from_str(&toml::to_string_pretty(&settings).unwrap()).unwrap();
+        let saved = &restored.color_presets[name];
+        assert_eq!(saved, &theme);
+        assert_eq!(row(&group_rows(saved, &fixture(), true), "活动件").count, 6);
+        assert!(saved.text_color_enabled());
+        assert_eq!(restored.global_colors, ColorTheme::default());
     }
 
     #[test]

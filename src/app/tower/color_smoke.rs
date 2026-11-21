@@ -7,6 +7,7 @@ use egui::{Event, LayerId, Pos2};
 const GUIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Guide.stl";
 const SLIDE: &str = "01. DRAWERS/07. Universal/Runners/x3 Runner Slide.stl";
 const MATERIAL: FilamentMaterial = FilamentMaterial::PlaMatte;
+const PRESET_NAME: &str = "原始配色";
 
 // Read the actual texts painted by egui so that duplicated, hidden or incorrectly
 // labelled rows cannot pass through a separate representation built by the test.
@@ -109,6 +110,9 @@ impl App {
         self.global_colors.validate()?;
         self.global_colors.roles.insert("functional".into(), 2);
         self.global_colors.roles.insert("accessory".into(), 3);
+        self.color_presets.clear();
+        self.color_presets
+            .insert(PRESET_NAME.into(), self.global_colors.clone());
         self.tower.name = "配色分组验收".into();
         let mut members = Vec::new();
         for level in 0..2 {
@@ -401,7 +405,7 @@ impl App {
                     self.click_color_control(control(&ui, "配件", true)?);
                 }
                 4 => {
-                    let button = card_material_button(&ui, "PLA Basic")?;
+                    let button = card_material_button(&ui, "PETG Basic")?;
                     if !self.capture_native_smoke(ctx, &folder.join("card.png"))? {
                         return Ok(());
                     }
@@ -444,10 +448,21 @@ impl App {
                     if !self.capture_native_smoke(ctx, &folder.join("regrouped.png"))? {
                         return Ok(());
                     }
+                    self.click_color_control(control(&ui, "配色预设", true)?);
+                }
+                9 => {
+                    control(&ui, "保存当前配色…", false)?;
+                    self.click_color_control(control(&ui, PRESET_NAME, false)?);
+                }
+                10 => {
+                    self.check_color_rows(&ui, false)?;
+                    if self.global_colors != self.color_presets[PRESET_NAME] {
+                        return Err("Choosing a preset did not restore the complete theme".into());
+                    }
                     self.click_color_control(control(&ui, "设置", true)?);
                 }
-                9 => self.click_color_control(control(&ui, "材料", false)?),
-                10 => {
+                11 => self.click_color_control(control(&ui, "材料", false)?),
+                12 => {
                     control(&ui, "可选耗材", false)?;
                     control(&ui, "默认耗材", false)?;
                     if !self.capture_native_smoke(ctx, &folder.join("material-settings.png"))? {
@@ -455,7 +470,7 @@ impl App {
                     }
                     self.click_color_control(control(&ui, "PLA Basic", false)?);
                 }
-                11 => {
+                13 => {
                     let swatches_visible = ui
                         .iter()
                         .any(|t| t.layer != LayerId::background() && t.value.contains("添加颜色"));
@@ -471,8 +486,8 @@ impl App {
                     }
                     self.click_color_control(control(&ui, "PLA Basic", false)?);
                 }
-                12 | 16 => {
-                    if self.smoke_stage == 16
+                14 | 18 => {
+                    if self.smoke_stage == 18
                         && popup_control(&ui, "颜色", &[default_section()?.layer]).is_some()
                     {
                         return Err(
@@ -494,7 +509,7 @@ impl App {
                         Err(error) => return Err(error),
                     }
                 }
-                13 => {
+                15 => {
                     let (selector, _) =
                         self.default_filament_card(ctx, &ui, default_section()?.layer)?;
                     if !self.capture_native_smoke(ctx, &folder.join("default-filament-card.png"))? {
@@ -502,7 +517,7 @@ impl App {
                     }
                     self.click_color_control(selector.center);
                 }
-                14 => {
+                16 => {
                     let settings = default_section()?.layer;
                     let (selector, _) = self.default_filament_card(ctx, &ui, settings)?;
                     let current = popup_control(&ui, &selector.value, &[settings, selector.layer])
@@ -524,7 +539,7 @@ impl App {
                     }
                     self.click_color_control(current.center);
                 }
-                15 => {
+                17 => {
                     let outside = default_section()?;
                     let (selector, _) = self.default_filament_card(ctx, &ui, outside.layer)?;
                     if popup_control(&ui, &selector.value, &[outside.layer, selector.layer])
@@ -534,7 +549,7 @@ impl App {
                     }
                     self.click_color_control(outside.center);
                 }
-                17 => {
+                19 => {
                     let (_, swatch) =
                         self.default_filament_card(ctx, &ui, default_section()?.layer)?;
                     self.click_color_control(swatch);
@@ -545,7 +560,7 @@ impl App {
                             "Choosing a swatch did not close the default filament card".into()
                         );
                     }
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: inline cards matched the BOM, selected a different material from the dropdown and changed color from its swatches. Regrouping and edits persisted for both members in the preview, the exported filament settings and the saved project. Other groups retained their colors and materials. Materials showed both sections and expanded its swatch editor. The default filament card showed color swatches below its selector, opened a separate material dropdown, and stayed open after a material selection. The card closed on an outside click and on swatch selection.").map_err(|e| e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: inline cards matched the BOM, selected a different material from the dropdown and changed color from its swatches. Regrouping and edits persisted for both members in the preview, the exported filament settings and the saved project. Other groups retained their colors and materials. Selecting a color preset restored the full theme and group assignments. Materials showed both sections and expanded its swatch editor. The default filament card showed color swatches below its selector, opened a separate material dropdown, and stayed open after a material selection. The card closed on an outside click and on swatch selection.").map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(folder.join("smoke-error.txt"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return Ok(());

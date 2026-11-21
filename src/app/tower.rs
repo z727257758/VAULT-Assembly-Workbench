@@ -26,6 +26,7 @@ pub(super) struct State {
     scroll_to_top: bool,
     color_edit: Option<colors::Edit>,
     open_color: Option<colors::CardKey>,
+    color_preset_name: Option<String>,
     reveal_colors: bool,
     color_smoke_input: std::collections::VecDeque<Vec<egui::Event>>,
     pub(super) error: String,
@@ -57,6 +58,7 @@ impl Default for State {
             scroll_to_top: true,
             color_edit: None,
             open_color: None,
+            color_preset_name: None,
             reveal_colors: false,
             color_smoke_input: Default::default(),
             error: String::new(),
@@ -636,6 +638,7 @@ impl App {
         self.tower.rename_draft = None;
         self.tower.color_edit = None;
         self.tower.open_color = None;
+        self.tower.color_preset_name = None;
         self.tower.reveal_colors = false;
         self.restore_project(project.saved);
         self.tower.open_layer_card = Some(LayerCard::Layer(

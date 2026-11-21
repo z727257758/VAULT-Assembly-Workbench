@@ -341,14 +341,7 @@ const DEFAULT_PALETTE: [[u8; 3]; 6] = [
     [246, 246, 243],
 ];
 
-const DEFAULT_MATERIALS: [FilamentMaterial; 6] = [
-    FilamentMaterial::PlaBasic,
-    FilamentMaterial::PetgHf,
-    FilamentMaterial::PlaBasic,
-    FilamentMaterial::PlaBasic,
-    FilamentMaterial::PlaBasic,
-    FilamentMaterial::PlaBasic,
-];
+const DEFAULT_MATERIALS: [FilamentMaterial; 6] = [FilamentMaterial::PetgBasic; 6];
 fn legacy_materials() -> [FilamentMaterial; 6] {
     [FilamentMaterial::PetgBasic; 6]
 }

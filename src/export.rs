@@ -1494,11 +1494,10 @@ endsolid t";
         }
         options.plate.palette[0] = [240, 20, 30];
         options.plate.palette[1] = [10, 100, 220];
-        let default_materials = [PlaBasic, PetgHf, PlaBasic, PlaBasic, PlaBasic, PlaBasic];
+        let default_materials = [PetgBasic; 6];
         assert_eq!(options.plate.materials, default_materials);
         for (name, materials) in [
             ("default", default_materials),
-            ("all-basic", [PetgBasic; 6]),
             (
                 "custom",
                 [PetgHf, PlaBasic, PetgBasic, PlaMatte, PetgHf, PetgMatte],

@@ -101,6 +101,8 @@ struct Settings {
     material_library: crate::print_plate::MaterialLibrary,
     #[serde(default, deserialize_with = "crate::print_plate::ColorTheme::load")]
     global_colors: crate::print_plate::ColorTheme,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    color_presets: std::collections::BTreeMap<String, crate::print_plate::ColorTheme>,
     #[serde(default)]
     appearance: appearance::Appearance,
     #[serde(default)]
@@ -202,6 +204,7 @@ pub struct App {
     workflow_history: workflow::History,
     member_edit_baseline: Option<workflow::Snapshot>,
     global_colors: crate::print_plate::ColorTheme,
+    color_presets: std::collections::BTreeMap<String, crate::print_plate::ColorTheme>,
     material_library: crate::print_plate::MaterialLibrary,
     member_selection: std::collections::BTreeSet<usize>,
     sustainer_dividers: crate::sustainer_dividers::Layout,
@@ -356,6 +359,10 @@ impl App {
             global_colors: settings
                 .as_ref()
                 .map(|s| s.global_colors.clone())
+                .unwrap_or_default(),
+            color_presets: settings
+                .as_ref()
+                .map(|s| s.color_presets.clone())
                 .unwrap_or_default(),
             material_library: settings
                 .as_ref()
@@ -890,6 +897,7 @@ impl App {
         let settings = Settings {
             material_library: self.material_library.clone(),
             global_colors: self.global_colors.clone(),
+            color_presets: self.color_presets.clone(),
             appearance: self.appearance,
             export: self.export_options.clone(),
             model_root: self.last_model_root.to_string_lossy().into(),
@@ -4075,6 +4083,7 @@ mod accessory_export_tests {
         let saved = Settings {
             material_library: Default::default(),
             global_colors: Default::default(),
+            color_presets: Default::default(),
             appearance: appearance::Appearance::Dark,
             model_root: library.path().to_string_lossy().into(),
             language: "en".into(),
