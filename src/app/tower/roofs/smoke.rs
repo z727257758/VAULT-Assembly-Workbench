@@ -31,6 +31,7 @@ impl App {
         if let Err(error) = self.tower_apply(vec![member], 0, ctx) {
             self.tower.error = error;
         }
+        self.tower.open_layer_card = Some(LayerCard::Roof);
         self.smoke_stage = 0;
         self.smoke_frame = 0;
         self.screenshot_requested = false;
@@ -194,6 +195,11 @@ impl App {
         };
         if let Err(error) = result {
             self.tower.error = error;
+        } else if matches!(self.smoke_stage, 0 | 5) {
+            // These fixture steps edit the top layer rather than the roof card.
+            self.tower.open_layer_card = Some(LayerCard::Roof);
+        } else if self.tower.open_layer_card != Some(LayerCard::Roof) {
+            self.tower.error = "Roof configuration closed its card".into();
         }
         self.smoke_stage += 1;
     }

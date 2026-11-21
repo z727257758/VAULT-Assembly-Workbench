@@ -1,4 +1,107 @@
+use super::super::{LayerCard, State};
 use super::*;
+
+#[test]
+fn roof_box_drawer_and_base_headers_expand_exclusively() {
+    let ctx = egui::Context::default();
+    let mut state = State::default();
+    let cards = [
+        (LayerCard::Roof, "Top cover"),
+        (LayerCard::Layer(1), "Drawer"),
+        (LayerCard::Layer(0), "Box"),
+        (LayerCard::Base, "Base"),
+    ];
+    let mut time = 0.;
+    let mut frame = |events| {
+        time += 0.1;
+        let mut rects = [egui::Rect::NOTHING; 4];
+        let mut bodies = [false; 4];
+        let open_card = state.open_layer_card;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(460., 700.),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_max_width(360.);
+                    for (index, (card, title)) in cards.into_iter().enumerate() {
+                        let expanded = open_card == Some(card);
+                        let body = |ui: &mut egui::Ui| {
+                            bodies[index] = true;
+                            ui.label("Card options");
+                        };
+                        let (rect, open) = match card {
+                            LayerCard::Layer(level) => {
+                                let response = layer(
+                                    ui,
+                                    Header {
+                                        level,
+                                        kind: title,
+                                        size: "S3",
+                                        height: "1F",
+                                        height_mm: 47.,
+                                        can_delete: true,
+                                        zh: false,
+                                    },
+                                    expanded,
+                                    body,
+                                );
+                                (response.response.rect, response.open)
+                            }
+                            LayerCard::Roof | LayerCard::Base => {
+                                let id = if card == LayerCard::Roof {
+                                    "tower-roofs"
+                                } else {
+                                    "tower-bases"
+                                };
+                                let response = section(ui, id, title, "S3", false, expanded, body);
+                                (response.response.rect, response.inner)
+                            }
+                        };
+                        rects[index] = rect;
+                        if let Some(open) = open {
+                            state.toggle_layer_card(card, open);
+                        }
+                    }
+                });
+            },
+        );
+        (rects, bodies)
+    };
+
+    frame(vec![]);
+    let (mut rects, bodies) = frame(vec![]);
+    assert_eq!(bodies, [false, false, true, false]);
+    for (clicked, expected) in [
+        (0, Some(0)),
+        (2, Some(2)),
+        (1, Some(1)),
+        (3, Some(3)),
+        (3, None),
+    ] {
+        let pos = rects[clicked].left_top() + egui::vec2(90., 24.);
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]);
+        }
+        let (next_rects, bodies) = frame(vec![]);
+        assert_eq!(bodies, std::array::from_fn(|index| expected == Some(index)));
+        rects = next_rects;
+    }
+}
 
 #[test]
 fn section_header_click_preserves_other_sections() {

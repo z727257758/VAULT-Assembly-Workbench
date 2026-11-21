@@ -4,14 +4,22 @@ pub(super) mod colors;
 mod layers;
 mod modifications;
 mod roofs;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayerCard {
+    Roof,
+    Layer(u32),
+    Base,
+}
+
 pub(super) struct State {
     pub name: String,
     rename_draft: Option<String>,
     pub show_parts: bool,
     pub print_list: bool,
-    pub(super) open_layer: Option<u32>,
+    open_layer_card: Option<LayerCard>,
     pub(super) layer_group_request: Option<bool>,
-    scroll_to_layer: Option<u32>,
+    scroll_to_layer_card: Option<LayerCard>,
     card_positions: BTreeMap<u32, f32>,
     reorder: Option<ReorderMotion>,
     scroll_to_top: bool,
@@ -38,9 +46,9 @@ impl Default for State {
             rename_draft: None,
             show_parts: false,
             print_list: false,
-            open_layer: Some(0),
+            open_layer_card: Some(LayerCard::Layer(0)),
             layer_group_request: None,
-            scroll_to_layer: None,
+            scroll_to_layer_card: None,
             card_positions: BTreeMap::new(),
             reorder: None,
             scroll_to_top: true,
@@ -69,10 +77,18 @@ impl State {
     }
 
     pub(super) fn reveal_layer(&mut self, level: u32) {
-        self.open_layer = Some(level);
+        self.open_layer_card = Some(LayerCard::Layer(level));
         self.layer_group_request = Some(true);
-        self.scroll_to_layer = Some(level);
+        self.scroll_to_layer_card = self.open_layer_card;
         self.print_list = false;
+    }
+
+    fn toggle_layer_card(&mut self, card: LayerCard, open: bool) {
+        let next = open.then_some(card);
+        if next != self.open_layer_card {
+            self.open_layer_card = next;
+            self.scroll_to_layer_card = next;
+        }
     }
 
     fn title_ui(&mut self, ui: &mut egui::Ui, z: bool) {
@@ -584,7 +600,7 @@ impl App {
         self.combination_spec = None;
         self.member_selection.clear();
         self.combination_view_state = None;
-        self.tower.open_layer = Some(level);
+        self.tower.open_layer_card = Some(LayerCard::Layer(level));
         self.tower.error.clear();
         self.assembly(ctx);
         Ok(())
@@ -604,7 +620,10 @@ impl App {
         self.tower.open_color = None;
         self.tower.reveal_colors = false;
         self.restore_project(project.saved);
-        self.tower.open_layer = Some(self.members[self.active_member].placement.level);
+        self.tower.open_layer_card = Some(LayerCard::Layer(
+            self.members[self.active_member].placement.level,
+        ));
+        self.tower.scroll_to_layer_card = None;
         self.tower.print_list = false;
         self.tab = 0;
         self.tower.scroll_to_top = true;
@@ -843,6 +862,17 @@ impl App {
             Action::Add(_) | Action::Duplicate(_) | Action::Delete(_) | Action::Move(..)
         );
         let top_kind_changed = matches!(action, Action::Kind(..));
+        let keep_card = match action {
+            Action::Roof(..) | Action::RoofLayout(_) | Action::TopHandle(..) => {
+                Some(LayerCard::Roof)
+            }
+            Action::Base(..) => Some(LayerCard::Base),
+            Action::Resize(..) => self
+                .tower
+                .open_layer_card
+                .filter(|card| matches!(card, LayerCard::Roof | LayerCard::Base)),
+            _ => None,
+        };
         let mut next = self.members.clone();
         let level;
         let mut reorder = None;
@@ -1048,6 +1078,9 @@ impl App {
         let explosion = self.explosion;
         let dimensions = self.dimensions;
         self.tower_apply(next, level, ctx)?;
+        if let Some(card) = keep_card {
+            self.tower.open_layer_card = Some(card);
+        }
         if let Some(mut pending) = preview_reorder
             && !self.preview.is_current(pending.revision)
         {
@@ -1282,7 +1315,7 @@ impl App {
             let all = match rows(&self.members) {
                 Ok(rows) => rows,
                 Err(error) => {
-                    self.tower.scroll_to_layer = None;
+                    self.tower.scroll_to_layer_card = None;
                     ui.colored_label(ui.visuals().error_fg_color, error);
                     ui.small(t(z, "原方案的标签、内部配置和装配位置完整保留。可新建层式项目，或选择原成员编辑。", "Original labels, inserts and placements are preserved. Start a layer project or edit an existing member."));
                     for (i, m) in self.members.iter().enumerate() {
@@ -1366,8 +1399,14 @@ impl App {
     ) {
         let z = self.zh;
         let first = &all[0];
-        let scroll_to_layer = self.tower.scroll_to_layer.take();
-        roofs::show(self, ui, all.last().unwrap(), action);
+        let scroll_to_card = self.tower.scroll_to_layer_card.take();
+        let roof = roofs::show(self, ui, all.last().unwrap(), action);
+        if scroll_to_card == Some(LayerCard::Roof) {
+            layers::reveal_card(ui, roof.response.rect);
+        }
+        if let Some(open) = roof.inner {
+            self.tower.toggle_layer_card(LayerCard::Roof, open);
+        }
         let origin_y = ui.cursor().min.y;
         let now = ctx.input(|input| input.time);
         let mut reorder = self.tower.reorder.take();
@@ -1379,7 +1418,8 @@ impl App {
         }
         self.tower.card_positions.clear();
         for row in all.iter().rev() {
-            let expanded = self.tower.open_layer == Some(row.level);
+            let key = LayerCard::Layer(row.level);
+            let expanded = self.tower.open_layer_card == Some(key);
             let all_boxes = row
                 .members
                 .iter()
@@ -1546,14 +1586,11 @@ impl App {
                 .card_positions
                 .insert(row.level, visual_rect.min.y - origin_y);
             ui.advance_cursor_after_rect(card_ui.min_rect().translate(-offset));
-            if scroll_to_layer == Some(row.level) {
-                let mut target = visual_rect.translate(-offset);
-                let visible_height = (ui.clip_rect().height() - 20.).max(40.);
-                target.max.y = target.max.y.min(target.min.y + visible_height);
-                ui.scroll_to_rect(target, None);
+            if scroll_to_card == Some(key) {
+                layers::reveal_card(ui, visual_rect.translate(-offset));
             }
             if let Some(open) = card.open {
-                self.tower.open_layer = if open { Some(row.level) } else { None };
+                self.tower.toggle_layer_card(key, open);
                 if open && !expanded {
                     self.select_member_in_combination(row.members[0], ctx);
                 }
@@ -1581,7 +1618,7 @@ impl App {
             .members
             .iter()
             .all(|&i| self.members[i].exterior.base == crate::catalog::exterior::Base::None);
-        layers::section(
+        let base = layers::section(
             ui,
             "tower-bases",
             if base_empty {
@@ -1591,7 +1628,7 @@ impl App {
             },
             &format!("{}{}", first.width, first.depth),
             base_empty,
-            false,
+            self.tower.open_layer_card == Some(LayerCard::Base),
             |ui| {
                 ui.set_min_width(ui.available_width());
                 for (column, &i) in first.members.iter().enumerate() {
@@ -1627,6 +1664,12 @@ impl App {
                 }
             },
         );
+        if scroll_to_card == Some(LayerCard::Base) {
+            layers::reveal_card(ui, base.response.rect);
+        }
+        if let Some(open) = base.inner {
+            self.tower.toggle_layer_card(LayerCard::Base, open);
+        }
         ui.add_space(6.);
     }
 
@@ -2130,7 +2173,7 @@ impl App {
         self.smoke_frame = 0;
         self.screenshot_requested = false;
         if std::env::args().any(|a| a == "--smoke-build-panel") {
-            self.tower.open_layer = Some(2);
+            self.tower.open_layer_card = Some(LayerCard::Layer(2));
         }
         if std::env::args().any(|a| a == "--smoke-project-menu") {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1050., 700.)));
@@ -2247,16 +2290,16 @@ impl App {
             }
             if build_panel_smoke
                 && self.smoke_stage == 2
-                && (self.tower.open_layer != Some(0)
+                && (self.tower.open_layer_card != Some(LayerCard::Layer(0))
                     || self.tower.print_list
-                    || self.tower.scroll_to_layer.is_some()
+                    || self.tower.scroll_to_layer_card.is_some()
                     || self.tower.layer_group_request.is_some()
                     || self.inline_edit.open)
             {
                 return Err("Preview selection did not reveal its layer in the build panel".into());
             }
             if build_panel_smoke && self.smoke_stage == 3 {
-                if self.tower.open_layer != Some(1) {
+                if self.tower.open_layer_card != Some(LayerCard::Layer(1)) {
                     return Err("The moved layer did not stay expanded at its new position".into());
                 }
                 let motion = self

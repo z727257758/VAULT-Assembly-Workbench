@@ -358,13 +358,9 @@ pub(super) fn section(
     title: &str,
     summary: &str,
     empty: bool,
-    default_open: bool,
+    expanded: bool,
     body: impl FnOnce(&mut egui::Ui),
-) {
-    let state_id = ui.make_persistent_id(("layer-section", id));
-    let expanded = ui
-        .data_mut(|d| d.get_temp::<bool>(state_id))
-        .unwrap_or(default_open);
+) -> egui::InnerResponse<Option<bool>> {
     let mut header = egui::Rect::NOTHING;
     let response = surface(ui, id, expanded, empty, |ui| {
         header = ui
@@ -397,7 +393,12 @@ pub(super) fn section(
             title,
         )
     });
-    if let Some(open) = background_open(&response.response, header, expanded) {
-        ui.data_mut(|d| d.insert_temp(state_id, open));
-    }
+    let open = background_open(&response.response, header, expanded);
+    egui::InnerResponse::new(open, response.response)
+}
+
+pub(super) fn reveal_card(ui: &egui::Ui, mut rect: egui::Rect) {
+    let visible_height = (ui.clip_rect().height() - 20.).max(40.);
+    rect.max.y = rect.max.y.min(rect.min.y + visible_height);
+    ui.scroll_to_rect(rect, None);
 }

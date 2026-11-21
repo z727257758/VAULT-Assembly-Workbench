@@ -134,7 +134,7 @@ pub(super) fn show(
     ui: &mut egui::Ui,
     top: &crate::constraints::tower::Row,
     action: &mut Option<Action>,
-) {
+) -> egui::InnerResponse<Option<bool>> {
     let z = app.zh;
     let current = layout(&app.members).unwrap_or(Layout::Apart);
     let empty = top.members.iter().all(|&i| {
@@ -161,7 +161,7 @@ pub(super) fn show(
         },
         &summary,
         empty,
-        app.smoke && std::env::args().any(|a| a == "--smoke-top"),
+        app.tower.open_layer_card == Some(LayerCard::Roof),
         |ui| {
             ui.small(t(
                 z,
@@ -269,5 +269,5 @@ pub(super) fn show(
                 });
             }
         },
-    );
+    )
 }
