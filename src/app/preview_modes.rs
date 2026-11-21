@@ -453,7 +453,7 @@ impl App {
             self.open_preview_label(Some(part), ctx);
         }
     }
-    fn open_preview_label(&mut self, target: Option<PrintPart>, ctx: &egui::Context) {
+    pub(super) fn open_preview_label(&mut self, target: Option<PrintPart>, ctx: &egui::Context) {
         self.tab = 0;
         self.tower.print_list = false;
         self.preview_modes.mode = Mode::Assembly;

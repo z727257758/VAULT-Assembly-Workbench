@@ -28,7 +28,7 @@ pub(super) struct State {
     open_color: Option<colors::CardKey>,
     reveal_colors: bool,
     color_smoke_input: std::collections::VecDeque<Vec<egui::Event>>,
-    error: String,
+    pub(super) error: String,
     reset_inserts: bool,
     projects: Vec<Project>,
     current: usize,
@@ -856,7 +856,7 @@ pub(super) enum Action {
     Duplicate(u32),
     Delete(u32),
     Move(u32, u32),
-    Add(AssemblyKind),
+    Add(AssemblyKind, Option<u32>),
     Kind(usize, AssemblyKind),
     Pattern(usize, Vec<String>),
     Edit(usize, Option<usize>),
@@ -891,7 +891,7 @@ impl App {
         }
         let boundaries = matches!(
             action,
-            Action::Add(_) | Action::Duplicate(_) | Action::Delete(_) | Action::Move(..)
+            Action::Add(..) | Action::Duplicate(_) | Action::Delete(_) | Action::Move(..)
         );
         let top_kind_changed = matches!(action, Action::Kind(..));
         let keep_card = match action {
@@ -1000,18 +1000,28 @@ impl App {
                 }
                 level = to;
             }
-            Action::Add(kind) => {
+            Action::Add(kind, above) => {
                 let all = rows(&next)?;
-                let top = all.last().ok_or("先打开模型库 / Open library first")?;
-                let mut additions: Vec<_> = top.members.iter().map(|i| next[*i].clone()).collect();
+                let source = match above {
+                    Some(level) => all.iter().find(|row| row.level == level),
+                    None => all.last(),
+                }
+                .ok_or("所选层不存在 / Selected layer is unavailable")?;
+                level = source.level + 1;
+                let mut additions: Vec<_> =
+                    source.members.iter().map(|i| next[*i].clone()).collect();
                 for m in &mut additions {
-                    m.placement.level = top.level + 1;
+                    m.placement.level = level;
                     m.preset = fresh_like(&m.preset);
                     m.preset.assembly_kind = kind;
                     m.exterior = Default::default();
                     configure(&mut m.preset, &self.catalog, false)?;
                 }
-                level = top.level + 1;
+                for member in &mut next {
+                    if member.placement.level >= level {
+                        member.placement.level += 1;
+                    }
+                }
                 next.extend(additions);
             }
             Action::Kind(i, kind) => {
@@ -1644,10 +1654,10 @@ impl App {
         self.tower.reorder = reorder;
         ui.horizontal_wrapped(|ui| {
             if ui.button(t(z, "＋ 抽屉层", "＋ Drawer layer")).clicked() {
-                *action = Some(Action::Add(AssemblyKind::Drawer));
+                *action = Some(Action::Add(AssemblyKind::Drawer, None));
             }
             if ui.button(t(z, "＋ 箱子层", "＋ Box layer")).clicked() {
-                *action = Some(Action::Add(AssemblyKind::Sustainer));
+                *action = Some(Action::Add(AssemblyKind::Sustainer, None));
             }
         });
         ui.add_space(8.);

@@ -45,9 +45,13 @@ pub(super) struct State {
 }
 
 fn pointer(pos: Pos2, pressed: bool) -> Event {
+    button_event(pos, pressed, egui::PointerButton::Primary)
+}
+
+fn button_event(pos: Pos2, pressed: bool, button: egui::PointerButton) -> Event {
     Event::PointerButton {
         pos,
-        button: egui::PointerButton::Primary,
+        button,
         pressed,
         modifiers: Default::default(),
     }
@@ -65,6 +69,16 @@ pub(super) struct Pointer {
 }
 
 impl Pointer {
+    pub(super) fn secondary(&mut self, start: Pos2, end: Pos2) {
+        let button = egui::PointerButton::Secondary;
+        self.inputs.extend([
+            vec![Event::PointerMoved(start)],
+            vec![button_event(start, true, button)],
+            vec![Event::PointerMoved(end)],
+            vec![button_event(end, false, button)],
+        ]);
+    }
+
     pub(super) fn click(&mut self, pos: Pos2) {
         self.inputs
             .extend([vec![Event::PointerMoved(pos)], vec![pointer(pos, true)]]);

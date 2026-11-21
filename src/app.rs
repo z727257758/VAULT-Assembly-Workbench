@@ -20,6 +20,7 @@ mod settings_panel;
 pub(crate) use recipes::audit as audit_presets;
 mod stopper_smoke;
 mod tower;
+mod viewport_menu;
 mod workflow;
 mod workspace;
 use crate::ui_style;
@@ -1016,6 +1017,7 @@ impl App {
                                     | "--smoke-build-panel"
                                     | "--smoke-color-groups"
                                     | "--smoke-project-menu"
+                                    | "--smoke-viewport-menu"
                             )
                         })
                     {
@@ -2201,6 +2203,9 @@ impl App {
                             self.explosion,
                         );
                     }
+                    if !reordering && (!spatial_input || response.context_menu_opened()) {
+                        self.viewport_context_menu(&response);
+                    }
                     let dpi = ctx.pixels_per_point();
                     let id = self.renderer.render(
                         0,
@@ -2244,7 +2249,7 @@ impl App {
                     );
                     if !reordering && self.scene_key == "combination" && self.explosion == 0. {
                         self.paint_active_member(ui, rect);
-                        if !self.inline_edit.open {
+                        if self.viewport_shows_dimensions(ctx) {
                             self.paint_spatial_dimensions(ui, rect);
                         }
                     }
@@ -2785,7 +2790,7 @@ impl eframe::App for App {
             && std::env::args().any(|arg| {
                 matches!(
                     arg.as_str(),
-                    "--smoke-bin-editor" | "--smoke-divider-editor"
+                    "--smoke-bin-editor" | "--smoke-divider-editor" | "--smoke-viewport-menu"
                 )
             })
         {
@@ -2916,6 +2921,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-top") {
             self.roof_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-viewport-menu") {
+            self.viewport_menu_smoke(ctx);
             return;
         }
         if self.smoke

@@ -16,7 +16,7 @@ pub(super) struct State {
     smoke: smoke::State,
 }
 
-fn motion_labels(kind: MotionKind, zh: bool) -> (&'static str, &'static str) {
+pub(super) fn motion_labels(kind: MotionKind, zh: bool) -> (&'static str, &'static str) {
     match kind {
         MotionKind::Drawer => (t(zh, "拉出", "Pull out"), t(zh, "推回", "Push in")),
         MotionKind::Lid => (t(zh, "开盖", "Open lid"), t(zh, "合盖", "Close lid")),
@@ -95,7 +95,7 @@ impl App {
         }
     }
 
-    fn motion_toggle_goal(&self, m: &Mechanism) -> Option<f32> {
+    pub(super) fn motion_toggle_goal(&self, m: &Mechanism) -> Option<f32> {
         let plan = self
             .animation
             .tracks

@@ -319,6 +319,8 @@ impl App {
         let Some(&(lo, hi)) = self.scene.member_bounds.get(self.active_member) else {
             return;
         };
+        let offset = self.scene.member_lid_slide_offset(self.active_member);
+        let (lo, hi) = (lo + offset, hi + offset);
         let painter = ui.painter().with_clip_rect(rect);
         let stroke = egui::Stroke::new(1., Color32::LIGHT_BLUE);
         for (a, b, value) in [

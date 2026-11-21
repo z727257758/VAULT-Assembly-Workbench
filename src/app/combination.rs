@@ -546,7 +546,12 @@ impl App {
         self.combination_move_source = None;
         self.assembly(ctx);
     }
-    fn add_member(&mut self, kind: Option<AssemblyKind>, above: bool, _ctx: &egui::Context) {
+    pub(super) fn add_member(
+        &mut self,
+        kind: Option<AssemblyKind>,
+        above: bool,
+        _ctx: &egui::Context,
+    ) {
         self.commit_member();
         self.ensure_members();
         let mut preset = self.members[self.active_member].preset.clone();
