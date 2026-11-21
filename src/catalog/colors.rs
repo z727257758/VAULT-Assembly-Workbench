@@ -29,8 +29,15 @@ pub fn role(path: &str) -> &'static str {
                 .trim_end_matches(".stl");
             match name {
                 "Grid Dividers" => "divider",
-                "Geared Rails" | "Runners" | "Latch" | "Springs" | "Key" | "Hidden Key"
-                | "Hidden Key Part 2" | "Key Cap" => "functional",
+                "Key Cap" => "body",
+                "Runners"
+                    if path.rsplit('/').next().is_some_and(|file| {
+                        file.contains("Runner Guide") || file.contains("Runner Slide")
+                    }) =>
+                {
+                    "body"
+                }
+                "Geared Rails" | "Runners" | "Latch" | "Springs" => "functional",
                 _ => "accessory",
             }
         }
@@ -158,6 +165,11 @@ mod tests {
                     "01. DRAWERS/05. XL Families/XL7/Boxes/XL7 Back Panel.stl",
                     "01. DRAWERS/06. XL² Families/XL7²/XL7² Module 1F.stl",
                     "01. DRAWERS/01. S Families/Facades/S1F (Turn On Supports).stl",
+                    "01. DRAWERS/07. Universal/Key Cap.stl",
+                    "01. DRAWERS/07. Universal/Runners/x3 Runner Guide.stl",
+                    "01. DRAWERS/07. Universal/Runners/x3 Runner Slide.stl",
+                    "01. DRAWERS/07. Universal/Runners/XL Runners/x7 Runner Guide XL.stl",
+                    "01. DRAWERS/07. Universal/Runners/XL Runners/x7 Runner Slide XL.stl",
                     "02. SUSTAINERS/03. L Families/L7/Modules/L7 4F Dividers Module.stl",
                     "02. SUSTAINERS/01. S Families/S7/Roof/S7 Roof Part 1.stl",
                     "02. SUSTAINERS/02. M Families/M7/Roofs/M7 Roof Whole.stl",
@@ -167,10 +179,8 @@ mod tests {
             (
                 "functional",
                 &[
-                    "01. DRAWERS/07. Universal/Runners/XL Runners/x7 Runner Slide XL.stl",
+                    "01. DRAWERS/07. Universal/Runners/Runner Stopper.stl",
                     "01. DRAWERS/07. Universal/Geared Rails/S Rails.stl",
-                    "01. DRAWERS/07. Universal/Hidden Key Part 2 (Turn on Supports).stl",
-                    "01. DRAWERS/07. Universal/Key Cap.stl",
                     crate::sustainer::STACKING_LATCH,
                     "02. SUSTAINERS/05. Universal/Rods/S-M Rods.stl",
                     "02. SUSTAINERS/05. Universal/Locks/1 SET OF PINS FOR 1 LOCK.stl",
@@ -180,6 +190,9 @@ mod tests {
             (
                 "accessory",
                 &[
+                    "01. DRAWERS/07. Universal/Key (Turn On Supports).stl",
+                    "01. DRAWERS/07. Universal/Hidden Key (Turn On Supports).stl",
+                    "01. DRAWERS/07. Universal/Hidden Key Part 2 (Turn on Supports).stl",
                     "01. DRAWERS/01. S Families/S3/Roofs/S3 Grid Roof.stl",
                     "01. DRAWERS/01. S Families/S3/Gridfinity Baseplate/S3 Baseplate.stl",
                     "02. SUSTAINERS/05. Universal/Baseplates/01. S/S3 Baseplate.stl",
@@ -230,9 +243,9 @@ mod tests {
         assert_eq!(
             counts,
             BTreeMap::from([
-                ("body", 280),
-                ("functional", 53),
-                ("accessory", 273),
+                ("body", 301),
+                ("functional", 29),
+                ("accessory", 276),
                 ("divider", 127),
             ])
         );

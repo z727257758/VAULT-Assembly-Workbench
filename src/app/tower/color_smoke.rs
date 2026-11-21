@@ -99,7 +99,7 @@ impl App {
     pub(super) fn setup_color_groups_smoke(&mut self, ctx: &egui::Context) -> Result<(), String> {
         self.zh = true;
         self.material_library = Default::default();
-        // A project from the color-bucket UI could store two slots for functional parts.
+        // A project from the color-bucket UI could store separate slots for the runners.
         let mut old = serde_json::to_value(self.tower_snapshot()).map_err(|e| e.to_string())?;
         old["colors"] =
             serde_json::json!({"components": {(component(GUIDE)): 2, (component(SLIDE)): 4}});

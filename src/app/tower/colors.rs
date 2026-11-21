@@ -758,16 +758,17 @@ mod tests {
         assert_eq!(row(&rows, TEXT_COLOR_ZH).group, Group::Text);
         assert_eq!(row(&rows, TEXT_COLOR_ZH).count, 0);
         assert_eq!(groups(&theme, true).len(), 5);
-        assert_eq!(row(&rows, "功能件").count, 6);
+        assert_eq!(row(&rows, "主体").count, 6);
+        assert_eq!(row(&rows, "功能件").count, 0);
         assert_eq!(row(&rows, "分隔板").count, 0);
         assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
-        theme.roles.insert("functional".into(), 4);
+        theme.roles.insert("body".into(), 4);
 
         new_custom(&mut theme, "活动件", &[SLIDE], 5);
         let rows = group_rows(&theme, &items, true);
         assert_eq!(rows.len(), 7);
-        assert_eq!(row(&rows, "功能件").count, 2);
-        assert_eq!(theme.role_slot("functional"), 4);
+        assert_eq!(row(&rows, "主体").count, 2);
+        assert_eq!(theme.role_slot("body"), 4);
         assert_eq!(row(&rows, "活动件").count, 4);
         assert_eq!(rows.iter().map(|row| row.count).sum::<u32>(), 9);
         let mut config = Config::default();
@@ -810,7 +811,7 @@ mod tests {
         assign_component(&mut saved, GUIDE, None);
         assign_component(&mut saved, SLIDE, None);
         assert!(saved.groups.is_empty());
-        assert_eq!(row(&group_rows(&saved, &items, true), "功能件").count, 6);
+        assert_eq!(row(&group_rows(&saved, &items, true), "主体").count, 6);
     }
 
     #[test]
