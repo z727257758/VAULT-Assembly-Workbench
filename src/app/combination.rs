@@ -3,6 +3,7 @@ pub(super) mod exterior;
 mod regression;
 mod spatial;
 use super::*;
+use crate::constraints::AssemblyRules;
 use crate::scene::Placement;
 use spatial::{Side, position_relative};
 
@@ -921,7 +922,11 @@ impl App {
         let bounds = if let Some(target) = self.inline_edit.target {
             self.scene.target_envelope(target)
         } else {
-            self.scene.member_bounds.get(self.active_member).copied()
+            let offset = self.scene.member_lid_slide_offset(self.active_member);
+            self.scene
+                .member_bounds
+                .get(self.active_member)
+                .map(|&(lo, hi)| (lo + offset, hi + offset))
         };
         let Some((lo, hi)) = bounds else {
             return;
@@ -1126,11 +1131,32 @@ pub(super) fn load(
             &mut shifts,
         )?;
     }
-    for (i, (_, _, angle)) in scenes.iter_mut().enumerate() {
-        *angle = crate::constraints::AssemblyRules::preview_lid_angle(&layout, i, *angle);
+    let mut sliding_lids = Vec::new();
+    for (i, (local_scene, _, angle)) in scenes.iter_mut().enumerate() {
+        let seated = AssemblyRules::preview_lid_angle(&layout, i, *angle);
+        if seated != *angle && crate::sustainer::lid_angle(local_scene).is_some() {
+            sliding_lids.push((i, *angle));
+            *angle = seated;
+        }
     }
     let mut scene = Scene::combine_positioned(scenes, gap, Some(shifts))?;
     scene.member_supports = layout.supports;
+    for (member, angle) in sliding_lids {
+        crate::preview::check(Some(cancel))?;
+        let mechanism = AssemblyRules::mechanism(
+            &scene,
+            crate::scene::Target {
+                member,
+                drawer: None,
+            },
+        )?;
+        let plan = AssemblyRules::plan_motion(&scene, &mechanism.child, angle)?;
+        AssemblyRules::apply_motion_sample(
+            &mut scene,
+            &mechanism.child,
+            plan.sample(plan.duration),
+        )?;
+    }
     for (member, m) in members.iter().enumerate() {
         if m.preset.assembly_kind != AssemblyKind::Drawer {
             continue;
@@ -1149,18 +1175,16 @@ pub(super) fn load(
             if fraction == 0. {
                 continue;
             }
-            let mechanism = crate::constraints::AssemblyRules::mechanism(
-                &scene,
-                crate::scene::Target { member, drawer },
-            )?;
-            crate::constraints::AssemblyRules::set_slider(
+            let mechanism =
+                AssemblyRules::mechanism(&scene, crate::scene::Target { member, drawer })?;
+            AssemblyRules::set_slider(
                 &mut scene,
                 &mechanism.child,
                 mechanism.min + fraction * (mechanism.max - mechanism.min),
             )?;
         }
     }
-    crate::constraints::AssemblyRules::reset_explosion(&mut scene)?;
+    AssemblyRules::reset_explosion(&mut scene)?;
     Ok(scene)
 }
 
@@ -1516,12 +1540,19 @@ impl App {
                 if self.members.len() != 3 || self.members[0].preset.sustainer_angle != 65. {
                     return Err("Pair addition or saved lid state failed".into());
                 }
-                if self.scene.relations.iter().any(|relation| {
-                    relation.label.ends_with(crate::sustainer::LID)
-                        && self.scene.member_supports.iter().any(|below| below.contains(&((relation.child.instance / MEMBER_STRIDE) as usize)))
-                        && matches!(relation.joint,crate::constraints::Joint::Hinge{angle,..} if angle.abs()>0.01)
-                }) {
-                    return Err("Supporting lid is open".into());
+                let lid = AssemblyRules::mechanism(
+                    &self.scene,
+                    crate::scene::Target {
+                        member: 0,
+                        drawer: None,
+                    },
+                )?;
+                if !lid.supports_upper
+                    || (lid.value - 65.).abs() > 0.01
+                    || lid.slide_distance <= 0.
+                    || (lid.slide - lid.slide_distance).abs() > 0.01
+                {
+                    return Err("Rebuilt lower lid must open at the extracted position".into());
                 }
             }
             if [17, 19, 21].contains(&self.smoke_stage) && self.members.len() != 3 {
@@ -1722,7 +1753,7 @@ impl App {
                 let _ = std::fs::write(
                     folder.join("combination-smoke-result.txt"),
                     format!(
-                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; one assembly viewport with inline member editing; label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; supporting lid closure; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
+                        "PASS: overall workflow; color inheritance and custom override; batch selection and scoped export review; delete undo/redo; one assembly viewport with inline member editing; label editing; overall size change; incompatible resize and unsupported move rejected; saved overall camera; 3D object controls; confirmed add/remove; L/S+S and XL/S+M groups; extracted lower lid preview restored; size dialog; pair ground move/undo/remove. GPU: {}. Parts: {}",
                         self.renderer.state.adapter.get_info().name,
                         self.scene.parts.len()
                     ),

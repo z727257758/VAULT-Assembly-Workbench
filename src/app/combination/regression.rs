@@ -446,7 +446,7 @@ fn library_combination_matrix_seats_graphs_and_closed_dimensions() {
 }
 #[test]
 #[ignore = "requires read-only VAULT_MODEL_ROOT library"]
-fn library_supporting_lid_closes_without_changing_saved_angles_or_dimensions() {
+fn library_lower_lid_restores_its_open_preview_without_changing_closed_dimensions() {
     let (root, catalog, home) = library();
     let mut m = vec![
         member("base", "S", 3, "1F", true, 0, 0),
@@ -475,23 +475,29 @@ fn library_supporting_lid_closes_without_changing_saved_angles_or_dimensions() {
             _ => panic!("lid must be hinged"),
         })
         .collect();
-    assert!(angles.contains(&(0, 0.)));
+    assert!(angles.contains(&(0, 65.)));
     assert!(
         angles
             .iter()
             .any(|&(i, a)| i == 1 && (a - 35.).abs() < 0.01)
     );
-    let mut runtime = opened.clone();
-    let base = runtime
+    let base = opened
         .relations
         .iter()
         .find(|r| r.child.instance / MEMBER_STRIDE == 0 && r.label.contains(crate::sustainer::LID))
         .unwrap()
         .child
         .clone();
-    let before = toml::to_string(&runtime.definition()).unwrap();
-    assert!(crate::constraints::AssemblyRules::set_joint_value(&mut runtime, &base, 10.).is_err());
-    assert_eq!(before, toml::to_string(&runtime.definition()).unwrap());
+    let lower = crate::constraints::AssemblyRules::mechanism_for_joint(&opened, &base).unwrap();
+    assert!(lower.supports_upper && lower.slide > 0.);
+    assert!((lower.slide - lower.slide_distance).abs() < 0.01);
+    assert!(opened.member_bounds[0].1.x - lower.slide < opened.member_bounds[1].0.x);
+    assert_eq!(opened.member_shifts, closed.member_shifts);
+    let mut seated = closed;
+    let before = toml::to_string(&seated.definition()).unwrap();
+    assert!(crate::constraints::AssemblyRules::set_joint_value(&mut seated, &base, 10.).is_err());
+    assert_eq!(before, toml::to_string(&seated.definition()).unwrap());
+    let mut runtime = opened;
     let top = runtime
         .relations
         .iter()
@@ -501,7 +507,7 @@ fn library_supporting_lid_closes_without_changing_saved_angles_or_dimensions() {
         .clone();
     crate::constraints::AssemblyRules::set_joint_value(&mut runtime, &top, 45.).unwrap();
     assert!(runtime.relations.iter().any(|r| r.child == base
-        && matches!(r.joint, crate::constraints::Joint::Hinge { angle: 0., .. })));
+        && matches!(r.joint, crate::constraints::Joint::Hinge { angle: 65., .. })));
 }
 #[test]
 #[ignore = "requires read-only VAULT_MODEL_ROOT library and large-mesh memory"]

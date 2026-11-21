@@ -54,8 +54,12 @@ impl Motion {
                 let prior =
                     previous.map_or_else(Track::default, |motion| motion.sample(old, start));
                 let (lo, hi) = target.member_bounds[index];
+                let source_position =
+                    source.member_shifts[old] + source.member_lid_slide_offset(old);
+                let target_position =
+                    target.member_shifts[index] + target.member_lid_slide_offset(index);
                 Track {
-                    offset: source.member_shifts[old] - target.member_shifts[index] + prior.offset,
+                    offset: source_position - target_position + prior.offset,
                     explosion_offset: explosion_shift(source, old) - explosion_shift(target, index)
                         + prior.explosion_offset,
                     band_delta: source_ranks[old] as f32 - target_ranks[index] as f32

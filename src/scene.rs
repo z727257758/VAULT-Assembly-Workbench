@@ -96,6 +96,8 @@ pub struct Scene {
     pub member_supports: Vec<Vec<usize>>,
     /// Closed, world-axis envelopes measured from actual vertices on the worker.
     pub member_bounds: Vec<(Vec3, Vec3)>,
+    /// Temporary leftward travel of a box while inspecting its lid, in millimetres.
+    pub member_lid_slides: Vec<f32>,
     pub sustainer_interior: Option<Box<crate::sustainer_dividers::Geometry>>,
     pub member_interiors: Vec<Option<Box<crate::sustainer_dividers::Geometry>>>,
     pub title: String,
@@ -328,6 +330,7 @@ impl Scene {
             member_explosion_shifts: Vec::new(),
             member_supports: Vec::new(),
             member_bounds: Vec::new(),
+            member_lid_slides: Vec::new(),
             sustainer_interior: None,
             member_interiors: Vec::new(),
             title,
@@ -1130,6 +1133,15 @@ impl Placement {
     }
 }
 impl Scene {
+    pub(crate) fn member_lid_slide_offset(&self, member: usize) -> Vec3 {
+        Vec3::NEG_X
+            * self
+                .member_lid_slides
+                .get(member)
+                .copied()
+                .unwrap_or_default()
+    }
+
     pub(crate) fn closed_extent(&self) -> Result<(Vec3, Vec3), String> {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
@@ -1202,6 +1214,7 @@ impl Scene {
             x += width + gap;
         }
         let mut result = Scene { title: format!("组合 / Combination · {}", members.len()), assembly: true,
+            member_lid_slides: vec![0.; members.len()],
             constraint_warning: Some("组合遵循文档规格规则；安装面按网格估算，接口啮合未验证 / Document-compatible layout; mesh seating estimates, connector engagement unverified".into()), ..Default::default() };
         for (index, (mut scene, placement, angle)) in members.iter().cloned().enumerate() {
             let (lo, hi) = bounds[index];

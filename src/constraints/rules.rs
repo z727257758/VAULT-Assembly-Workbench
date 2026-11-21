@@ -34,6 +34,8 @@ impl AssemblyRules {
     pub const LID_SPEED: f32 = 120.;
     pub const DRAWER_SPEED: f32 = 220.;
     pub const LATCH_SECONDS: f32 = 0.25;
+    const LID_SLIDE_SPEED: f32 = 480.;
+    const LID_SLIDE_GAP: f32 = 12.;
 
     pub fn validate_drawer_extension(value: f32) -> Result<(), String> {
         if value.is_finite() && (0. ..=1.).contains(&value) {
@@ -121,6 +123,20 @@ impl AssemblyRules {
         if !latch_joints.is_empty() && value > 0.001 && latch < 0.999 {
             return Err("An open mechanism requires released locks".into());
         }
+        let member = member as usize;
+        let supports_upper = scene.member_supports.iter().any(|s| s.contains(&member));
+        let (slide, slide_distance) = if kind == MotionKind::Lid {
+            (
+                scene.member_lid_slides.get(member).copied().unwrap_or(0.),
+                if supports_upper {
+                    Self::lid_slide_distance(scene, member).unwrap_or(0.)
+                } else {
+                    0.
+                },
+            )
+        } else {
+            (0., 0.)
+        };
         Ok(Mechanism {
             child: child.clone(),
             kind,
@@ -129,11 +145,33 @@ impl AssemblyRules {
             value,
             latch,
             latch_joints,
-            supports_upper: scene
-                .member_supports
-                .iter()
-                .any(|s| s.contains(&(member as usize))),
+            supports_upper,
+            slide,
+            slide_distance,
         })
+    }
+
+    /// Separate the preview box from the closed envelopes of components above its seat.
+    fn lid_slide_distance(scene: &Scene, member: usize) -> Option<f32> {
+        let (_, hi) = scene.member_bounds.get(member)?;
+        let mut supported = vec![member];
+        let mut next = 0;
+        let mut left = f32::INFINITY;
+        while let Some(&below) = supported.get(next) {
+            for (above, supports) in scene.member_supports.iter().enumerate() {
+                if supports.contains(&below) && !supported.contains(&above) {
+                    let x = scene.member_bounds.get(above)?.0.x;
+                    if !x.is_finite() {
+                        return None;
+                    }
+                    left = left.min(x);
+                    supported.push(above);
+                }
+            }
+            next += 1;
+        }
+        let distance = hi.x - left + Self::LID_SLIDE_GAP;
+        (distance.is_finite() && distance > 0.).then_some(distance)
     }
 
     pub(crate) fn mechanism(
@@ -161,11 +199,15 @@ impl AssemblyRules {
         }
     }
 
-    fn validate_motion_value(m: &Mechanism, value: f32) -> Result<(), String> {
+    fn validate_motion_value(m: &Mechanism, value: f32, slide: f32) -> Result<(), String> {
         if !value.is_finite() || !(m.min..=m.max).contains(&value) {
             return Err("Motion target exceeds its joint travel".into());
         }
-        if m.kind == MotionKind::Lid && m.supports_upper && value > 0. {
+        let max_slide = m.slide.max(m.slide_distance);
+        if !slide.is_finite() || slide < 0. || slide > max_slide * (1. + f32::EPSILON) {
+            return Err("Box slide exceeds its preview travel".into());
+        }
+        if m.blocked_by_upper_at(slide) && value > 0. {
             return Err("支承上层的箱盖必须保持闭合 / Supporting lid must remain closed".into());
         }
         Ok(())
@@ -173,7 +215,14 @@ impl AssemblyRules {
 
     pub fn plan_motion(scene: &Scene, child: &PartId, goal: f32) -> Result<MotionPlan, String> {
         let m = Self::mechanism_for_joint(scene, child)?;
-        Self::validate_motion_value(&m, goal)?;
+        let goal_slide = if goal > m.min {
+            m.slide.max(m.slide_distance)
+        } else {
+            0.
+        };
+        Self::validate_motion_value(&m, goal, goal_slide)?;
+        let slide_out_time = (goal_slide - m.slide).max(0.) / Self::LID_SLIDE_SPEED;
+        let slide_in_time = (m.slide - goal_slide).max(0.) / Self::LID_SLIDE_SPEED;
         let release_time = if m.has_latch() && goal > m.min + 0.001 {
             (1. - m.latch) * Self::LATCH_SECONDS
         } else {
@@ -193,8 +242,11 @@ impl AssemblyRules {
         let plan = MotionPlan {
             mechanism: m,
             goal,
-            duration: release_time + move_time + lock_time,
+            duration: slide_out_time + release_time + move_time + lock_time + slide_in_time,
             latch_only: None,
+            goal_slide,
+            slide_out_time,
+            slide_in_time,
             release_time,
             move_time,
             lock_time,
@@ -207,7 +259,7 @@ impl AssemblyRules {
         Ok(plan)
     }
 
-    /// Apply a constrained path sample without rebuilding meshes or display-only extraction.
+    /// Apply a preview path sample without rebuilding the member meshes.
     pub fn apply_motion_sample(
         scene: &mut Scene,
         child: &PartId,
@@ -218,7 +270,7 @@ impl AssemblyRules {
     }
 
     fn solve_sample(scene: &mut Scene, m: &Mechanism, sample: MotionSample) -> Result<(), String> {
-        Self::validate_motion_value(m, sample.value)?;
+        Self::validate_motion_value(m, sample.value, sample.slide)?;
         if !sample.latch.is_finite() || !(0. ..=1.).contains(&sample.latch) {
             return Err("Invalid motion sample".into());
         }
@@ -228,8 +280,24 @@ impl AssemblyRules {
         if m.has_latch() && sample.value > 0.001 && sample.latch < 0.999 {
             return Err("Release the lock before moving the drawer or lid".into());
         }
-        if m.kind == MotionKind::Lid && m.supports_upper && sample.latch > m.latch + 1e-6 {
+        if m.blocked_by_upper_at(sample.slide)
+            && (sample.latch > m.latch + 1e-6 || sample.slide < m.slide && sample.latch > 1e-6)
+        {
             return Err("A supporting lid cannot be unlocked".into());
+        }
+        if sample.slide != m.slide {
+            let member = m.child.instance / crate::scene::MEMBER_STRIDE;
+            let shift = m.slide - sample.slide;
+            for part in &mut scene.parts {
+                if part.pose.instance / crate::scene::MEMBER_STRIDE == member {
+                    part.pose.position[0] += shift;
+                }
+            }
+            let member = member as usize;
+            if scene.member_lid_slides.len() <= member {
+                scene.member_lid_slides.resize(member + 1, 0.);
+            }
+            scene.member_lid_slides[member] = sample.slide;
         }
         let driver = scene
             .relations
@@ -452,7 +520,7 @@ impl AssemblyRules {
         Ok(layout)
     }
 
-    /// Supporting boxes are displayed closed without changing their saved preference.
+    /// Seat supporting boxes with their lids closed before applying any preview slide.
     pub fn preview_lid_angle(layout: &stacking::Layout, member: usize, requested: f32) -> f32 {
         if layout.supports.iter().any(|below| below.contains(&member)) {
             0.
@@ -643,8 +711,21 @@ impl AssemblyRules {
         } else {
             0.
         };
+        let slide = if value > mechanism.min {
+            mechanism.slide
+        } else {
+            0.
+        };
         Self::transaction(scene, |candidate| {
-            Self::solve_sample(candidate, &mechanism, MotionSample { value, latch })?;
+            Self::solve_sample(
+                candidate,
+                &mechanism,
+                MotionSample {
+                    value,
+                    latch,
+                    slide,
+                },
+            )?;
             if kind == MotionKind::Lid {
                 Self::reset_explosion(candidate)?;
             }
@@ -652,6 +733,7 @@ impl AssemblyRules {
         })?;
         mechanism.value = value;
         mechanism.latch = latch;
+        mechanism.slide = slide;
         Ok(mechanism)
     }
 
@@ -685,6 +767,7 @@ impl AssemblyRules {
             let sample = MotionSample {
                 value: m.value,
                 latch: value / latch.released,
+                slide: m.slide,
             };
             return Self::transaction(scene, |candidate| Self::solve_sample(candidate, &m, sample))
                 .map(|()| None);

@@ -273,6 +273,47 @@ impl App {
             .ok_or("Editor motion button is disabled")?;
         self.animate_joint_to(&selected.child, goal, ctx)
     }
+
+    fn check_lower_lid_slide(&self, lid: &Mechanism) -> Result<(), String> {
+        const EPSILON: f32 = 0.01;
+        let closed = lid.value.abs() < EPSILON && lid.latch < 0.001;
+        if lid.slide_distance <= EPSILON
+            || !(0. ..=lid.slide_distance + EPSILON).contains(&lid.slide)
+            || (!closed && lid.slide < lid.slide_distance - EPSILON)
+        {
+            return Err("The lower box must finish sliding left before its lid unlocks".into());
+        }
+        if !closed {
+            let bounds = &self.animation.smoke.bounds;
+            let lower_right = bounds[0].1.x - lid.slide;
+            if bounds[1..].iter().any(|&(lo, _)| lower_right >= lo.x) {
+                return Err("The lower lid started opening underneath another member".into());
+            }
+        }
+        let translated = glam::Mat4::from_translation(glam::Vec3::NEG_X * lid.slide);
+        for part in &self.scene.parts {
+            let id = PartId::of(part);
+            let lower = id.instance / crate::scene::MEMBER_STRIDE == 0;
+            if lower && !closed {
+                continue;
+            }
+            let datum = self
+                .animation
+                .smoke
+                .closed_poses
+                .get(&id)
+                .ok_or("Missing closed pose while checking lower box slide")?;
+            let expected = if lower { translated * *datum } else { *datum };
+            if !part.pose.matrix(0.).abs_diff_eq(expected, EPSILON) {
+                return Err(format!(
+                    "Incorrect pose during lower box slide: {}",
+                    id.path
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::app) fn motion_smoke(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(16));
         let folder = self.home.join("output/motion-ui");
@@ -310,9 +351,24 @@ impl App {
                     .map(|p| (PartId::of(p), p.pose.matrix(0.)))
                     .collect();
             }
-            let wait_for_endpoint = matches!(self.smoke_stage, 3 | 5 | 6 | 8 | 9 | 11..=15);
-            if wait_for_endpoint || ([2, 4].contains(&self.smoke_stage) && self.smoke_frame == 0) {
+            let wait_for_endpoint =
+                matches!(self.smoke_stage, 3 | 5 | 6 | 8 | 9 | 11..=16 | 18 | 19 | 21);
+            let wait_for_slide = matches!(self.smoke_stage, 17 | 20);
+            if wait_for_endpoint
+                || ((wait_for_slide || [2, 4].contains(&self.smoke_stage)) && self.smoke_frame == 0)
+            {
                 self.advance_motion(0.05, ctx);
+            }
+            let lower_lid = self.smoke_mechanism(0, None)?;
+            if (17..=21).contains(&self.smoke_stage) {
+                self.check_lower_lid_slide(&lower_lid)?;
+            }
+            if wait_for_slide && !(0.01..lower_lid.slide_distance - 0.01).contains(&lower_lid.slide)
+            {
+                if self.animation.tracks.is_empty() {
+                    return Err("Lower box animation skipped the horizontal slide".into());
+                }
+                return Ok(false);
             }
             self.check_shared_drawers()?;
             let drawer = self.smoke_mechanism(1, Some(1))?;
@@ -352,7 +408,12 @@ impl App {
                     .iter()
                     .find(|p| PartId::of(p) == *id)
                     .ok_or("Root disappeared")?;
-                if !part.pose.matrix(0.).abs_diff_eq(*matrix, 0.001) {
+                let expected = if id.instance / crate::scene::MEMBER_STRIDE == 0 {
+                    glam::Mat4::from_translation(glam::Vec3::NEG_X * lower_lid.slide) * *matrix
+                } else {
+                    *matrix
+                };
+                if !part.pose.matrix(0.).abs_diff_eq(expected, 0.001) {
                     return Err("Motion moved a grounded housing".into());
                 }
             }
@@ -402,7 +463,7 @@ impl App {
                         return Err("Motion endpoints did not survive a project rebuild".into());
                     }
                 }
-                6 | 11 | 14 => self.check_independent_lock(None)?,
+                6 | 11 | 14 | 16 => self.check_independent_lock(None)?,
                 12 => self.check_independent_lock(Some(Target {
                     member: 1,
                     drawer: Some(1),
@@ -413,6 +474,22 @@ impl App {
                 }))?,
                 15 if (lid.value - 65.).abs() > 0.01 || lid.latch < 0.999 => {
                     return Err("Lid did not clear the released clasp".into());
+                }
+                18 | 21 => {
+                    if lower_lid.slide.abs() > 0.01
+                        || lower_lid.value.abs() > 0.01
+                        || lower_lid.latch > 0.001
+                    {
+                        return Err("The lower box did not return closed and locked".into());
+                    }
+                }
+                19 => {
+                    if (lower_lid.slide - lower_lid.slide_distance).abs() > 0.01
+                        || (lower_lid.value - lower_lid.max).abs() > 0.01
+                        || lower_lid.latch < 0.999
+                    {
+                        return Err("The lower lid did not reach the open endpoint".into());
+                    }
                 }
                 _ => {}
             }
@@ -486,8 +563,15 @@ impl App {
                     let before =
                         toml::to_string(&self.scene.definition()).map_err(|e| e.to_string())?;
                     let lid = self.smoke_mechanism(0, None)?;
-                    if self.animate_joint_to(&lid.child, 90., ctx).is_ok() {
-                        return Err("Supporting lid was allowed to open".into());
+                    let seated_open = MotionSample {
+                        value: 90.,
+                        latch: 1.,
+                        slide: 0.,
+                    };
+                    if AssemblyRules::apply_motion_sample(&mut self.scene, &lid.child, seated_open)
+                        .is_ok()
+                    {
+                        return Err("The seated lower lid opened without sliding".into());
                     }
                     let m = self.smoke_mechanism(1, Some(1))?;
                     for value in [-1., m.max + 1.] {
@@ -501,11 +585,8 @@ impl App {
                         return Err("Rejected motion changed the scene".into());
                     }
                     self.tower_edit_slot(0, None, ctx);
-                    if self.motion_toggle_goal(&lid).is_some() {
-                        return Err("Supporting lid offered an opening action".into());
-                    }
                     if self.animate_latch_to(&lid.child, true, ctx).is_ok() {
-                        return Err("Supporting lid allowed an independent clasp release".into());
+                        return Err("Seated lower lid allowed an independent clasp release".into());
                     }
                     // The upper member comes to rest on a lid whose clasp is already half open.
                     let supports = std::mem::take(&mut self.scene.member_supports);
@@ -515,6 +596,7 @@ impl App {
                         MotionSample {
                             value: lid.min,
                             latch: 0.5,
+                            slide: 0.,
                         },
                     );
                     self.scene.member_supports = supports;
@@ -595,8 +677,29 @@ impl App {
                     let lid = self.smoke_mechanism(2, None)?;
                     self.animate_joint_to(&lid.child, 65., ctx)?;
                 }
+                15 => {
+                    let lid = self.smoke_mechanism(2, None)?;
+                    self.animate_joint_to(&lid.child, lid.min, ctx)?;
+                }
+                16 | 18 | 19 => {
+                    self.tower_edit_slot(0, None, ctx);
+                    if self.smoke_stage == 16 {
+                        self.camera.yaw = 0.;
+                        self.camera.pitch = crate::render::Camera::default().pitch;
+                    }
+                    let lid = self.smoke_mechanism(0, None)?;
+                    self.smoke_toggle(&lid, ctx)?;
+                }
+                17 => {
+                    let lid = self.smoke_mechanism(0, None)?;
+                    self.smoke_toggle(&lid, ctx)?;
+                    if (self.smoke_mechanism(0, None)?.slide - lid.slide).abs() > 0.01 {
+                        return Err("Reversing the lower box slide jumped the model".into());
+                    }
+                }
+                20 => {}
                 _ => {
-                    std::fs::write(folder.join("smoke-result.txt"), "PASS: both visible drawer grips stand vertically when locked and turn horizontally when released. Independent key/cap rotation and opposing rack travel on a seated drawer. The S4 2F display hook reaches over the roof lip when locked and clears it when released. Pin displacement and plate tilt checked with the lid seated and lifted. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, support and travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip.").map_err(|e|e.to_string())?;
+                    std::fs::write(folder.join("smoke-result.txt"), "PASS: both visible drawer grips stand vertically when locked and turn horizontally when released. Independent key/cap rotation and opposing rack travel on a seated drawer. The S4 2F display hook reaches over the roof lip when locked and clears it when released. Pin displacement and plate tilt checked with the lid seated and lifted. Automatic unlock, opening, closing and re-latching. Shared-shell drawer isolation, two-stage guide travel, fixed stoppers and housings. Layer-view suspension, reversal, invalid travel rejection, mesh reuse and closed dimensions. Lid and drawer endpoints restored after TOML roundtrip. The lower box slid left before opening, reversed mid-slide without a jump, and closed fully before returning. Upper members stayed fixed.").map_err(|e|e.to_string())?;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

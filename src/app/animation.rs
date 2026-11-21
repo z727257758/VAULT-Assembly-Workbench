@@ -47,15 +47,19 @@ impl App {
         });
         let mechanisms: Vec<_> = targets
             .filter_map(|target| AssemblyRules::mechanism(&self.scene, target).ok())
-            .filter(|m| m.max > m.min + 0.001 && (m.kind != MotionKind::Lid || !m.supports_upper))
+            .filter(|m| {
+                m.max > m.min + 0.001
+                    && (m.kind != MotionKind::Lid || !m.supports_upper || m.slide_distance > 0.)
+            })
             .collect();
         let close = mechanisms.iter().any(|m| {
             self.animation
                 .tracks
                 .iter()
                 .find(|track| track.plan.mechanism.child == m.child)
-                .map_or(m.value, |track| track.plan.goal)
-                > m.min + 0.001
+                .map_or(m.value > m.min + 0.001 || m.slide > 0.001, |track| {
+                    track.plan.goal > m.min + 0.001
+                })
         });
         let label = match (mechanisms.as_slice(), close) {
             ([m], false) if m.kind == MotionKind::Drawer => t(z, "拉开", "Pull out"),
@@ -99,9 +103,13 @@ impl App {
             .map(|track| &track.plan)
             .find(|plan| plan.mechanism.child == m.child && plan.latch_only.is_none());
         let goal = plan.map_or(m.value, |plan| plan.goal);
-        let can_open = !(m.kind == MotionKind::Lid && m.supports_upper) && m.max > goal + 0.001;
+        let can_open = (m.kind != MotionKind::Lid || !m.supports_upper || m.slide_distance > 0.)
+            && m.max > goal + 0.001;
         let can_close = goal > m.min + 0.001
-            || (plan.is_none() && m.kind == MotionKind::Lid && m.supports_upper && m.latch > 0.001);
+            || (plan.is_none()
+                && m.kind == MotionKind::Lid
+                && m.supports_upper
+                && (m.latch > 0.001 || m.slide > 0.001));
         match (can_open, can_close) {
             (true, true) if plan.is_some_and(|plan| plan.goal < plan.mechanism.value) => {
                 Some(m.max)
@@ -121,7 +129,7 @@ impl App {
             .tracks
             .iter()
             .find(|t| t.plan.mechanism.child == m.child);
-        let supported = m.kind == MotionKind::Lid && m.supports_upper;
+        let supported = m.blocked_by_upper_at(m.slide);
         let release = match playing.and_then(|t| t.plan.latch_only) {
             Some(released) => !released,
             None if supported => m.latch <= 0.001,
@@ -198,6 +206,15 @@ impl App {
         let label = if goal == Some(m.min) { close } else { open };
         let response = ui.add_enabled(goal.is_some(), egui::Button::new(label));
         if let Some(goal) = goal {
+            let response = if m.slide_distance > 0. && goal > m.min {
+                response.on_hover_text(t(
+                    z,
+                    "箱体先向左滑出，再开盖",
+                    "Slide left, then open the lid",
+                ))
+            } else {
+                response
+            };
             if response.clicked()
                 && let Err(error) = self.animate_joint_to(&m.child, goal, ctx)
             {

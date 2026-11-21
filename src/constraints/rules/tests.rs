@@ -428,7 +428,8 @@ fn lid_path_releases_before_lifting_and_closes_before_latching_even_after_revers
             &lid,
             MotionSample {
                 value: 1.,
-                latch: 0.5
+                latch: 0.5,
+                slide: 0.,
             }
         )
         .is_err()
@@ -465,6 +466,81 @@ fn lid_path_releases_before_lifting_and_closes_before_latching_even_after_revers
 }
 
 #[test]
+fn supported_lid_previews_clear_the_full_stack_and_return_after_latching() {
+    let mut scene = hinged_box("Facade.stl");
+    let lid = PartId::of(&scene.parts[1]);
+    for instance in 1..=3 {
+        let mut part = scene.parts[0].clone();
+        part.pose.instance = instance * MEMBER_STRIDE;
+        scene.parts.push(part);
+    }
+    scene.member_supports = vec![vec![], vec![0], vec![1], vec![]];
+    scene.member_bounds = vec![
+        (Vec3::ZERO, Vec3::splat(12.)),
+        (Vec3::new(-4., 12., 0.), Vec3::new(12., 24., 12.)),
+        (Vec3::new(-15., 24., 0.), Vec3::new(12., 36., 12.)),
+        (Vec3::new(-100., 0., 0.), Vec3::new(-30., 12., 12.)),
+    ];
+    let bounds = scene.member_bounds.clone();
+    let before = snapshot(&scene);
+    let initial_poses: Vec<_> = scene.parts.iter().map(|p| p.pose.position).collect();
+
+    assert!(AssemblyRules::set_joint_value(&mut scene, &lid, 90.).is_err());
+    assert!(AssemblyRules::plan_latch(&scene, &lid, true).is_err());
+    assert_eq!(before, snapshot(&scene));
+
+    let open = AssemblyRules::plan_motion(&scene, &lid, 90.).unwrap();
+    let separation = bounds[0].1.x - bounds[2].0.x + AssemblyRules::LID_SLIDE_GAP;
+    assert_eq!(open.mechanism.slide_distance, separation);
+    let sliding = open.sample(open.slide_out_time * 0.5);
+    assert_eq!((sliding.value, sliding.latch), (0., 0.));
+    assert!((sliding.slide - separation * 0.5).abs() < 0.001);
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, sliding).unwrap();
+    for (part, initial) in scene.parts.iter().zip(&initial_poses) {
+        let shift = if part.pose.instance == 0 {
+            -Vec3::X * sliding.slide
+        } else {
+            Vec3::ZERO
+        };
+        assert!(Vec3::from(part.pose.position).abs_diff_eq(Vec3::from(*initial) + shift, 0.001));
+    }
+    let before = snapshot(&scene);
+    let early = MotionSample {
+        value: 15.,
+        latch: 1.,
+        slide: sliding.slide,
+    };
+    assert!(AssemblyRules::apply_motion_sample(&mut scene, &lid, early).is_err());
+    assert_eq!(before, snapshot(&scene));
+    assert_eq!(scene.member_lid_slides[0], sliding.slide);
+
+    let release = open.sample(open.slide_out_time + open.release_time * 0.5);
+    assert_eq!((release.value, release.slide), (0., separation));
+    assert!((0. ..1.).contains(&release.latch));
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, release).unwrap();
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, open.sample(open.duration)).unwrap();
+    let close = AssemblyRules::plan_motion(&scene, &lid, 0.).unwrap();
+    let latch = close.sample(close.move_time + close.lock_time * 0.5);
+    assert_eq!((latch.value, latch.slide), (0., separation));
+    assert!((0. ..1.).contains(&latch.latch));
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, latch).unwrap();
+    let returning = close.sample(close.duration - close.slide_in_time * 0.5);
+    assert_eq!((returning.value, returning.latch), (0., 0.));
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, returning).unwrap();
+
+    let reverse = AssemblyRules::plan_motion(&scene, &lid, 65.).unwrap();
+    assert_eq!(reverse.sample(0.).slide, returning.slide);
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, reverse.sample(reverse.duration)).unwrap();
+    let close = AssemblyRules::plan_motion(&scene, &lid, 0.).unwrap();
+    AssemblyRules::apply_motion_sample(&mut scene, &lid, close.sample(close.duration)).unwrap();
+    assert_eq!(scene.member_lid_slides[0], 0.);
+    assert_eq!(scene.member_bounds, bounds);
+    for (part, initial) in scene.parts.iter().zip(initial_poses) {
+        assert!(Vec3::from(part.pose.position).abs_diff_eq(Vec3::from(initial), 0.001));
+    }
+}
+
+#[test]
 fn animation_rechecks_support_travel_and_missing_lock_constraints_before_committing() {
     let mut scene = hinged_box("Facade.stl");
     let lid = PartId::of(&scene.parts[1]);
@@ -496,7 +572,8 @@ fn animation_rechecks_support_travel_and_missing_lock_constraints_before_committ
             &child,
             MotionSample {
                 value: 101.,
-                latch: 0.
+                latch: 0.,
+                slide: 0.,
             }
         )
         .is_err()

@@ -208,10 +208,11 @@ impl AssemblyRules {
                 "Operate the lock on a closed drawer or lid with a complete lock assembly".into(),
             );
         }
-        if released && m.kind == MotionKind::Lid && m.supports_upper {
+        if released && m.blocked_by_upper_at(m.slide) {
             return Err("A supporting lid cannot be unlocked".into());
         }
         let goal = m.value;
+        let goal_slide = m.slide;
         let fraction = if released { 1. } else { 0. };
         let duration = (fraction - m.latch).abs() * Self::LATCH_SECONDS;
         let plan = MotionPlan {
@@ -219,6 +220,9 @@ impl AssemblyRules {
             goal,
             duration,
             latch_only: Some(released),
+            goal_slide,
+            slide_out_time: 0.,
+            slide_in_time: 0.,
             release_time: 0.,
             move_time: 0.,
             lock_time: 0.,
