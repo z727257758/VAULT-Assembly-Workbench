@@ -507,6 +507,53 @@ impl App {
             self.label_open = true;
         }
     }
+    pub(super) fn paint_preview_selection(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        scene: &Scene,
+        camera: &Camera,
+        explosion: f32,
+    ) {
+        let matrix = camera.matrix(rect.aspect_ratio());
+        if let Some(index) = self.selected {
+            if let Some(part) = scene.parts.get(index).filter(|p| p.visible) {
+                workspace::paint_selection_box(
+                    ui,
+                    rect,
+                    matrix * part.pose.matrix(explosion),
+                    part.mesh.min,
+                    part.mesh.max,
+                );
+            }
+            return;
+        }
+        if self.scene_key != "combination" {
+            return;
+        }
+        let target = self.inline_edit.target.unwrap_or(crate::scene::Target {
+            member: self.active_member,
+            drawer: self.active_drawer,
+        });
+        let mut lo = glam::Vec3::splat(f32::INFINITY);
+        let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
+        for part in scene
+            .parts
+            .iter()
+            .filter(|p| p.visible && target.contains(p))
+        {
+            let pose = part.pose.matrix(explosion);
+            for point in workspace::box_corners(part.mesh.min, part.mesh.max) {
+                let point = pose.transform_point3(point);
+                lo = lo.min(point);
+                hi = hi.max(point);
+            }
+        }
+        if lo.is_finite() && hi.is_finite() {
+            workspace::paint_selection_box(ui, rect, matrix, lo, hi);
+        }
+    }
+
     fn layers_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let z = self.zh;
         let names: Vec<_> = self.members.iter().map(|m| m.name.clone()).collect();
@@ -545,6 +592,9 @@ impl App {
             },
         );
         paint_image(ui, id, rect);
+        if !reordering {
+            self.paint_preview_selection(ui, rect, &layout.scene, &self.preview_modes.camera, 0.);
+        }
         // Keep the legend outside the model so different-height neighbors do not overlap labels.
         let painter = ui.painter().with_clip_rect(rect);
         let mut y = rect.top() + 98.;
@@ -1116,6 +1166,9 @@ impl App {
         self.smoke_frame = 0;
         match self.smoke_stage {
             0 => {
+                self.selected = self.scene.parts.iter().position(|p| {
+                    crate::scene::Target::of(p).member == 1 && p.pose.path.ends_with("Facade.stl")
+                });
                 self.preview_modes.mode = Mode::Exploded;
                 self.explosion = 1.;
                 self.camera.fit(&self.scene, 1.);

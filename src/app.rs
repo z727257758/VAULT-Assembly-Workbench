@@ -2179,59 +2179,18 @@ impl App {
                             self.paint_spatial_dimensions(ui, rect);
                         }
                     }
-                    if self.export_options.plate.preview_colors
-                        && self.scene_key != "combination"
-                        && let Some(part) = self
-                            .selected
-                            .and_then(|i| self.scene.parts.get(i))
-                            .filter(|p| p.visible)
+                    if !reordering
+                        && (self.explosion != 0.
+                            || self.export_options.plate.preview_colors
+                                && self.scene_key != "combination")
                     {
-                        let matrix = self.camera.matrix(rect.aspect_ratio())
-                            * part.pose.matrix(self.explosion);
-                        let corners: Vec<_> = (0..8)
-                            .map(|i| {
-                                let v = glam::Vec3::new(
-                                    if i & 1 == 0 {
-                                        part.mesh.min.x
-                                    } else {
-                                        part.mesh.max.x
-                                    },
-                                    if i & 2 == 0 {
-                                        part.mesh.min.y
-                                    } else {
-                                        part.mesh.max.y
-                                    },
-                                    if i & 4 == 0 {
-                                        part.mesh.min.z
-                                    } else {
-                                        part.mesh.max.z
-                                    },
-                                );
-                                let ndc = matrix.project_point3(v);
-                                (
-                                    egui::pos2(
-                                        rect.center().x + ndc.x * rect.width() * 0.5,
-                                        rect.center().y - ndc.y * rect.height() * 0.5,
-                                    ),
-                                    ndc.z,
-                                )
-                            })
-                            .collect();
-                        let painter = ui.painter().with_clip_rect(rect);
-                        for i in 0..8 {
-                            for bit in [1, 2, 4] {
-                                let j = i ^ bit;
-                                if i < j
-                                    && (0. ..=1.).contains(&corners[i].1)
-                                    && (0. ..=1.).contains(&corners[j].1)
-                                {
-                                    painter.line_segment(
-                                        [corners[i].0, corners[j].0],
-                                        egui::Stroke::new(1.5, Color32::LIGHT_BLUE),
-                                    );
-                                }
-                            }
-                        }
+                        self.paint_preview_selection(
+                            ui,
+                            rect,
+                            &self.scene,
+                            &self.camera,
+                            self.explosion,
+                        );
                     }
                     for (hit, color) in [
                         (self.parent_face, Color32::LIGHT_GREEN),

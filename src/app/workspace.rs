@@ -119,6 +119,41 @@ pub(super) fn model_and_plan_rects(stage: egui::Rect) -> (egui::Rect, egui::Rect
     )
 }
 
+pub(super) fn box_corners(lo: glam::Vec3, hi: glam::Vec3) -> [glam::Vec3; 8] {
+    std::array::from_fn(|i| {
+        glam::Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        )
+    })
+}
+
+pub(super) fn paint_selection_box(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    matrix: glam::Mat4,
+    lo: glam::Vec3,
+    hi: glam::Vec3,
+) {
+    let corners = box_corners(lo, hi).map(|p| {
+        let v = matrix.project_point3(p);
+        (v.is_finite() && (0. ..=1.).contains(&v.z))
+            .then(|| rect.center() + egui::vec2(v.x * rect.width(), -v.y * rect.height()) * 0.5)
+    });
+    let painter = ui.painter().with_clip_rect(rect);
+    let stroke = egui::Stroke::new(1.5, Color32::LIGHT_BLUE);
+    for i in 0..corners.len() {
+        for axis in [1, 2, 4] {
+            if i & axis == 0
+                && let (Some(a), Some(b)) = (corners[i], corners[i | axis])
+            {
+                painter.line_segment([a, b], stroke);
+            }
+        }
+    }
+}
+
 impl App {
     pub(super) fn interior_opacity_ui(&mut self, ui: &mut egui::Ui) {
         let z = self.zh;
