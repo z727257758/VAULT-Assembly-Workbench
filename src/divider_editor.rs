@@ -14,10 +14,57 @@ pub struct Editor {
     add_mode: bool,
     undo: Vec<Layout>,
     redo: Vec<Layout>,
-    drag: Option<(Layout, Pos2)>,
+    drag: Option<Drag>,
+    pub(crate) plan_add_rect: Option<Rect>,
     pub error: String,
 }
+struct Drag {
+    index: usize,
+    origin: Pos2,
+    offset: Vec2,
+}
+
+fn t(zh: bool, cn: &'static str, en: &'static str) -> &'static str {
+    if zh { cn } else { en }
+}
+
 impl Editor {
+    pub(crate) fn close(&mut self) {
+        self.open = false;
+        self.cancel_gesture();
+        self.plan_add_rect = None;
+    }
+
+    pub(crate) fn cancel_gesture(&mut self) {
+        self.drag = None;
+        self.error.clear();
+        self.add_mode = false;
+    }
+
+    pub(crate) fn divider_color(selected: bool) -> Color32 {
+        if selected {
+            Color32::from_rgb(244, 173, 70)
+        } else {
+            Color32::from_rgb(66, 157, 173)
+        }
+    }
+
+    pub(crate) fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+
+    pub(crate) fn select(&mut self, index: Option<usize>) {
+        if self.selected != index {
+            self.selected = index;
+            self.error.clear();
+            self.drag = None;
+        }
+    }
+
+    pub(crate) fn placing(&self) -> bool {
+        self.add_mode
+    }
+
     pub fn reset(&mut self) {
         self.selected = None;
         self.undo.clear();
@@ -25,8 +72,16 @@ impl Editor {
         self.drag = None;
         self.error.clear();
         self.add_mode = false;
+        self.plan_add_rect = None;
     }
-    fn commit(&mut self, layout: &mut Layout, next: Layout, c: &Catalog, s: &Selection) -> bool {
+
+    pub(crate) fn commit(
+        &mut self,
+        layout: &mut Layout,
+        next: Layout,
+        c: &Catalog,
+        s: &Selection,
+    ) -> bool {
         if *layout == next {
             return false;
         }
@@ -124,181 +179,572 @@ impl Editor {
         };
         to.push(std::mem::replace(layout, next));
         self.selected = None;
+        self.drag = None;
         self.error.clear();
         true
     }
-    pub fn selected_part(&self, layout: &Layout) -> Option<(String, u32)> {
-        let i = self.selected?;
-        let p = layout.items.get(i)?;
+    pub(crate) fn placement_candidate(
+        &self,
+        layout: &Layout,
+        s: &Selection,
+        grid: Grid,
+        center: [f32; 2],
+    ) -> Option<Layout> {
+        dividers::code(&self.path)?;
+        let mut next = self.candidate(layout, s);
+        next.items.push(self.placement_at(grid, center));
+        Some(next)
+    }
+
+    pub(crate) fn place(
+        &mut self,
+        layout: &mut Layout,
+        c: &Catalog,
+        s: &Selection,
+        grid: Grid,
+        center: [f32; 2],
+    ) -> bool {
+        self.add(layout, c, s, grid, Some(center))
+    }
+
+    pub(crate) fn drag_position(
+        layout: &Layout,
+        grid: Grid,
+        index: usize,
+        delta_cells: Vec2,
+    ) -> Option<Layout> {
+        let old = layout.items.get(index)?;
+        let mut next = layout.clone();
+        let mut delta = [delta_cells.x.round() as i32, delta_cells.y.round() as i32];
+        if grid.full(old) {
+            delta[usize::from(old.vertical)] = 0;
+        }
+        next.items[index].start = std::array::from_fn(|axis| old.start[axis] + delta[axis]);
+        Some(next)
+    }
+
+    pub(crate) fn drag_preview(&self, layout: &Layout, grid: Grid) -> Option<(usize, Layout)> {
+        let drag = self.drag.as_ref()?;
         Some((
-            p.path.clone(),
-            layout.items[..i]
-                .iter()
-                .filter(|n| n.path == p.path)
-                .count() as u32,
+            drag.index,
+            Self::drag_position(layout, grid, drag.index, drag.offset)?,
         ))
     }
-    pub fn show(
+
+    pub(crate) fn panel(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         c: &Catalog,
         s: &Selection,
         layout: &mut Layout,
-    ) -> bool {
-        if !self.open {
-            return false;
+        zh: bool,
+    ) -> Rect {
+        let grid = match Grid::new(s) {
+            Ok(grid) => grid,
+            Err(error) => {
+                self.plan_add_rect = None;
+                ui.label(error);
+                return Rect::NOTHING;
+            }
+        };
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_gesture();
         }
-        let mut open = true;
-        let mut changed = false;
-        egui::Window::new("内部分隔编辑 · 底孔网格").id(egui::Id::new("divider-editor"))
-            .default_pos([24.,95.]).default_size([660.,650.]).min_width(600.).open(&mut open).show(ctx,|ui| {
-            let g=match Grid::new(s) {Ok(g)=>g,Err(e)=>{ui.label(e);return;}};
-            ui.label(format!("{} · 10.5 mm 孔距 · {} × {} 个底孔",dividers::spec(s),g.cols,g.rows));
-            ui.label("点击放置；拖动隔板吸附底孔。底座不允许重叠；贯穿整宽/整深自动配端件，每块配 2 个松配合连接销。");
-            ui.label("编辑时三维仅显示抽屉与隔板，关闭后恢复视图。布局与 Gridfinity 底板互斥；T 形/十字接合暂不开放。尺寸标注为底座范围及底部净距。");
-            ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.undo.is_empty(),egui::Button::new("撤销")).clicked() {
-                    changed|=self.history(layout,false);
-                }
-                if ui.add_enabled(!self.redo.is_empty(),egui::Button::new("重做")).clicked() {
-                    changed|=self.history(layout,true);
-                }
-                if ui.add_enabled(layout.enabled || !layout.items.is_empty(), crate::ui_style::danger_button("移除分隔配置")).clicked() {
-                    let next=Layout {specification:dividers::spec(s),..Default::default()};changed|=self.commit(layout,next,c,s);self.selected=None;
-                }
-                ui.separator();ui.label(format!("{} 块隔板",layout.items.len()));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("高度");
-                egui::ComboBox::from_id_salt("divider-height").selected_text(["20 mm","34.5 mm","82.5 mm"][self.height]).show_ui(ui,|ui| {
-                    ui.selectable_value(&mut self.height,0,"20 mm");ui.selectable_value(&mut self.height,1,"34.5 mm");
-                    if s.height!="1F" {ui.selectable_value(&mut self.height,2,"82.5 mm");}
-                });
-                if s.height=="1F" && self.height==2 {self.height=0;}
-                ui.selectable_value(&mut self.vertical,false,"横向");ui.selectable_value(&mut self.vertical,true,"纵向");
-                let folder=["20MM","34.5MM","82.5MM"][self.height];
-                let mut choices:Vec<_>=c.accessories(s).into_iter().filter(|e|e.path.contains("/Grid Dividers/") && e.path.contains(folder) && dividers::code(&e.path).is_some()).collect();
-                choices.sort_by_key(|e|dividers::code(&e.path));
-                if !choices.iter().any(|e|e.path==self.path) {self.path=choices.iter().find(|e|dividers::code(&e.path)==Some(g.full_code(self.vertical))).or(choices.first()).map(|e|e.path.clone()).unwrap_or_default();}
-                egui::ComboBox::from_id_salt("divider-length").width(175.).selected_text(self.path.rsplit('/').next().unwrap_or("选择型号")).show_ui(ui,|ui| {
-                    for e in &choices {let n=dividers::code(&e.path).unwrap();ui.selectable_value(&mut self.path,e.path.clone(),format!("{} · {:.1} mm",e.name,n as f32*PITCH));}
-                });
-                if ui.add(crate::ui_style::primary_button("添加隔板")).clicked() {changed|=self.add(layout,c,s,g,None);}
-                if ui.toggle_value(&mut self.add_mode,"点击放置").changed() {self.error.clear();self.drag=None;}
-                if self.add_mode && ui.button("结束放置").clicked() {self.add_mode=false;self.error.clear();}
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("平行等分（吸附网格）");
-                for count in [2,3] {
-                    if ui.button(format!("{count} 等分")).clicked() {
-                        let folder=["20MM","34.5MM","82.5MM"][self.height];
-                        if let Some(e)=c.accessories(s).into_iter().find(|e|e.path.contains(folder)&&dividers::code(&e.path)==Some(g.full_code(self.vertical))) {
-                            let mut next=self.candidate(layout,s);next.items.clear();
-                            for k in 1..count {
-                                let cross=if self.vertical {g.cols} else {g.rows};
-                                let row=((cross-1) as f32*k as f32/count as f32).round() as i32;
-                                let start=if self.vertical {[row,g.full_start(true)]} else {[g.full_start(false),row]};
-                                next.items.push(Placement {path:e.path.clone(),start,vertical:self.vertical});
-                            }
-                            changed|=self.commit(layout,next,c,s);self.selected=None;
-                        }
-                    }
-                }
-                ui.add_enabled_ui(self.selected.is_some_and(|i|i<layout.items.len()),|ui| {
-                    let i=self.selected.unwrap_or(0);
-                    if ui.add(crate::ui_style::danger_button("删除选中")).clicked() {let mut next=layout.clone();next.items.remove(i);changed|=self.commit(layout,next,c,s);self.selected=None;}
-                    if ui.button("复制选中").clicked() {self.path=layout.items[i].path.clone();self.vertical=layout.items[i].vertical;changed|=self.add(layout,c,s,g,None);}
-                    if ui.button("旋转 90°").clicked() {
-                        let mut next=layout.clone();let p=&mut next.items[i];let n=dividers::code(&p.path).unwrap();
-                        let old_axis=usize::from(p.vertical);let mut center=p.start.map(|n|n as f32);
-                        center[old_axis]+=(n-1) as f32/2.;p.vertical= !p.vertical;
-                        let axis=usize::from(p.vertical);p.start[1-axis]=center[1-axis].round() as i32;
-                        p.start[axis]=if n==g.full_code(p.vertical) {g.full_start(p.vertical)} else {(center[axis]-(n-1) as f32/2.).round() as i32};
-                        changed|=self.commit(layout,next,c,s);
+        let heights = ["20 mm", "34.5 mm", "82.5 mm"];
+        let folders = ["20MM", "34.5MM", "82.5MM"];
+        let max_height = if s.height == "1F" { 1 } else { 2 };
+        if self.height > max_height {
+            self.height = 0;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t(zh, "高度", "Height"));
+            egui::ComboBox::from_id_salt("divider-height")
+                .width(62.)
+                .selected_text(heights[self.height])
+                .show_ui(ui, |ui| {
+                    for (height, &name) in heights.iter().enumerate().take(max_height + 1) {
+                        ui.selectable_value(&mut self.height, height, name);
                     }
                 });
-            });
-            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(),64.),egui::Layout::top_down(egui::Align::Min),|ui| {
-            if let Some(i)=self.selected.filter(|i|*i<layout.items.len()) {
-                let mut next=layout.clone();let p=&mut next.items[i];let mut edit=false;
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("#{} {}",i+1,p.path.rsplit('/').next().unwrap_or("")));
-                    ui.label("起始列");edit|=ui.add(egui::DragValue::new(&mut p.start[0]).range(0..=g.cols-1)).changed();
-                    ui.label("起始行");edit|=ui.add(egui::DragValue::new(&mut p.start[1]).range(0..=g.rows-1)).changed();
-                    if ui.button("替换为当前型号").clicked() {p.path=self.path.clone();edit=true;}
-                });
-                if edit {changed|=self.commit(layout,next,c,s);}
-            }
-            else {ui.horizontal_wrapped(|ui| {ui.label("选中隔板后可修改位置或替换型号。");});}
-            });
-            if self.add_mode && ctx.input(|i|i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked()) {self.add_mode=false;self.error.clear();}
-            let hint=if !self.error.is_empty() {self.error.as_str()} else if self.add_mode {"放置模式：绿色可放置，红色有冲突；点击连续添加，Esc / 右键退出。"} else {"选择模式：单击选中，拖动移动。点击放置开关可进入添加模式。"};
-            let color = if self.error.is_empty() { ui.visuals().weak_text_color() } else { ui.visuals().error_fg_color };
-            ui.add(egui::Label::new(egui::RichText::new(hint).color(color)).truncate()).on_hover_text(hint);
-            let available=Vec2::new(ui.available_width(),ui.available_height().clamp(260.,470.));
-            let (canvas,response)=ui.allocate_exact_size(available,egui::Sense::click_and_drag());
-            let margin=36.;let size=Vec2::new(g.right-g.left,g.front-g.rear);
-            let scale=((canvas.width()-margin*2.)/size.x).min((canvas.height()-margin*2.)/size.y);
-            let origin=canvas.center()-size*scale/2.;
-            let to_screen=|x:f32,y:f32|origin+Vec2::new((x-g.left)*scale,(y-g.rear)*scale);
-            let box_rect=Rect::from_min_max(to_screen(g.left,g.rear),to_screen(g.right,g.front));
-            let paint=ui.painter();paint.rect_filled(box_rect,5.,Color32::from_rgb(32,43,52));
-            paint.rect_stroke(box_rect,5.,Stroke::new(2.,Color32::GRAY),egui::StrokeKind::Inside);
-            let caption_color = ui.visuals().text_color();
-            paint.text(box_rect.center_top()-Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("{:.1} mm · 后部",size.x),egui::FontId::proportional(13.),caption_color);
-            paint.text(box_rect.center_bottom()+Vec2::new(0.,16.),egui::Align2::CENTER_CENTER,format!("前部 / 面板 · 深 {:.1} mm",size.y),egui::FontId::proportional(13.),caption_color);
-            for y in 0..g.rows {for x in 0..g.cols {let p=g.point([x as f32,y as f32]);paint.circle_filled(to_screen(p[0],p[1]),1.8,Color32::from_gray(100));}}
-            let mut hit=None;
-            for (i,p) in layout.items.iter().enumerate() {
-                let b=g.bounds(p);let rect=Rect::from_min_max(to_screen(b[0],b[1]),to_screen(b[2],b[3]));
-                let color=if self.selected==Some(i) {Color32::from_rgb(244,173,70)} else {Color32::from_rgb(66,157,173)};
-                paint.rect_filled(rect,2.,color.gamma_multiply(0.35));paint.rect_stroke(rect,2.,Stroke::new(2.,color),egui::StrokeKind::Inside);
-                let center=g.center(p);let l=dividers::code(&p.path).unwrap() as f32*PITCH/2.;
-                let (a,b)=if p.vertical {(to_screen(center[0],center[1]-l),to_screen(center[0],center[1]+l))}else{(to_screen(center[0]-l,center[1]),to_screen(center[0]+l,center[1]))};
-                paint.line_segment([a,b],Stroke::new(4.,color));
-                paint.text(rect.center(),egui::Align2::CENTER_CENTER,format!("#{} · {:.0}",i+1,l*2.),egui::FontId::proportional(12.),Color32::WHITE);
-                if response.interact_pointer_pos().is_some_and(|p|rect.contains(p)) {hit=Some(i);}
-            }
-            // Clear widths between full-span parallel divider bases.
-            if !layout.items.is_empty() && layout.items.iter().all(|p|g.full(p)&&p.vertical==layout.items[0].vertical) {
-                let vertical=layout.items[0].vertical;
-                let mut spans:Vec<_>=layout.items.iter().map(|p|{let b=g.bounds(p);if vertical {(b[0],b[2])}else{(b[1],b[3])}}).collect();spans.sort_by(|a,b|a.0.total_cmp(&b.0));
-                let mut from=if vertical {g.left}else{g.rear};let end=if vertical {g.right}else{g.front};
-                for (lo,hi) in spans.into_iter().chain(std::iter::once((end,end))) {
-                    let center=(from+lo)/2.;let point=if vertical {to_screen(center,g.rear+8.)}else{to_screen(g.left+14.,center)};
-                    paint.text(point,egui::Align2::CENTER_CENTER,format!("{:.1}",lo-from),egui::FontId::proportional(12.),Color32::LIGHT_GREEN);from=hi;
-                }
-            }
-            let hover=if self.add_mode && !self.path.is_empty() {response.hover_pos().filter(|p|box_rect.contains(*p)).map(|p| {
-                let raw=(p-origin)/scale+Vec2::new(g.left,g.rear);
-                let center=[raw.x/PITCH+(g.cols-1) as f32/2.,(raw.y+3.5)/PITCH+(g.rows-1) as f32/2.];
-                let placement=self.placement_at(g,center);
-                let mut next=self.candidate(layout,s);next.items.push(placement.clone());
-                (placement,next)
-            })}else{None};
-            if let Some((placement,next))=&hover {
-                let valid=next.validate(c,s);let color=if valid.is_ok(){Color32::LIGHT_GREEN}else{Color32::LIGHT_RED};
-                let b=g.bounds(placement);let rect=Rect::from_min_max(to_screen(b[0],b[1]),to_screen(b[2],b[3]));
-                paint.rect_filled(rect,2.,color.gamma_multiply(0.18));paint.rect_stroke(rect,2.,Stroke::new(2.,color),egui::StrokeKind::Inside);
-                paint.text(rect.center(),egui::Align2::CENTER_CENTER,if valid.is_ok(){"点击放置"}else{"不可放置"},egui::FontId::proportional(13.),color);
-                if let Err(reason)=valid {response.clone().on_hover_text(reason);}
-            }
-            if response.clicked() {
-                if self.add_mode {
-                    if let Some((_,next))=hover {let i=next.items.len()-1;if self.commit(layout,next,c,s){self.selected=Some(i);changed=true;}}
-                } else {self.selected=hit;}
-            }
-            if !self.add_mode && response.drag_started() {self.selected=hit;if hit.is_some() {self.drag=response.interact_pointer_pos().map(|p|(layout.clone(),p));}}
-            if !self.add_mode && response.dragged() && let (Some(i),Some((baseline,start)),Some(pos))=(self.selected,self.drag.as_ref(),response.interact_pointer_pos()) {
-                let delta=(pos-*start)/(scale*PITCH);let mut next=baseline.clone();
-                next.items[i].start[0]+=delta.x.round() as i32;next.items[i].start[1]+=delta.y.round() as i32;
-                if g.full(&baseline.items[i]) {let axis=usize::from(baseline.items[i].vertical);next.items[i].start[axis]=baseline.items[i].start[axis];}
-                match next.validate(c,s) {Ok(())=>{if *layout!=next {*layout=next;changed=true;}self.error.clear();},Err(e)=>self.error=e}
-            }
-            if response.drag_stopped() && let Some((old,_))=self.drag.take() && old!=*layout {self.undo.push(old);self.redo.clear();}
+            ui.selectable_value(&mut self.vertical, false, t(zh, "横向", "Across"));
+            ui.selectable_value(&mut self.vertical, true, t(zh, "纵向", "Lengthwise"));
         });
-        self.open = open;
-        changed
+        let folder = folders[self.height];
+        let span = grid.full_code(self.vertical);
+        let slots = if self.vertical { grid.rows } else { grid.cols };
+        let mut choices: Vec<_> = c
+            .accessories(s)
+            .into_iter()
+            .filter_map(|entry| {
+                let code = dividers::code(&entry.path)?;
+                (entry.path.contains("/Grid Dividers/")
+                    && entry.path.contains(folder)
+                    && code <= slots)
+                    .then_some((code, entry.path))
+            })
+            .collect();
+        choices.sort_by_key(|(code, _)| *code);
+        let full_path = choices
+            .iter()
+            .find(|(code, _)| *code == span)
+            .map(|(_, path)| path.as_str());
+        if !choices.iter().any(|(_, path)| path == &self.path) {
+            self.path = full_path
+                .or_else(|| choices.first().map(|(_, path)| path.as_str()))
+                .unwrap_or_default()
+                .into();
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t(zh, "型号", "Model"));
+            egui::ComboBox::from_id_salt("divider-length")
+                .width(104.)
+                .selected_text(
+                    self.path
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(t(zh, "无可用型号", "No models")),
+                )
+                .show_ui(ui, |ui| {
+                    for (code, path) in &choices {
+                        let name = path.rsplit('/').next().unwrap_or(path);
+                        ui.selectable_value(
+                            &mut self.path,
+                            path.clone(),
+                            format!("{name} · {:.1} mm", *code as f32 * PITCH),
+                        );
+                    }
+                });
+        });
+        ui.horizontal_wrapped(|ui| {
+            self.presets(ui, layout, c, s, full_path.map(|path| (grid, path)), zh);
+            let count = layout.items.len();
+            ui.weak(if zh {
+                format!("{count} 块隔板")
+            } else {
+                format!("{count} dividers")
+            });
+        });
+        let plan_rect = self.canvas(ui, layout, c, s, grid, zh);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.path.is_empty(),
+                    crate::ui_style::primary_button(t(zh, "添加", "Add")),
+                )
+                .clicked()
+            {
+                self.add(layout, c, s, grid, None);
+            }
+            let place = ui
+                .add_enabled(
+                    !self.path.is_empty(),
+                    egui::Button::selectable(self.add_mode, t(zh, "点击放置", "Click to place")),
+                )
+                .on_hover_text(t(
+                    zh,
+                    "点击底孔连续放置，按 Esc 或右键退出",
+                    "Click holes to place dividers. Press Esc or right-click to exit.",
+                ));
+            self.plan_add_rect = Some(place.rect);
+            if place.clicked() {
+                self.add_mode = !self.add_mode;
+                self.drag = None;
+                self.error.clear();
+            }
+            if ui
+                .add_enabled(
+                    !self.undo.is_empty(),
+                    egui::Button::new(t(zh, "撤销", "Undo")),
+                )
+                .clicked()
+            {
+                self.history(layout, false);
+            }
+            if ui
+                .add_enabled(
+                    !self.redo.is_empty(),
+                    egui::Button::new(t(zh, "重做", "Redo")),
+                )
+                .clicked()
+            {
+                self.history(layout, true);
+            }
+        });
+        self.properties(ui, layout, c, s, grid, zh);
+        if !self.error.is_empty() {
+            ui.colored_label(ui.visuals().error_fg_color, &self.error);
+        }
+        ui.collapsing(t(zh, "操作说明", "How to edit"), |ui| {
+            ui.small(t(
+                zh,
+                "点击隔板选中，拖动可沿 10.5 mm 孔距移动。贯穿整宽或整深的隔板自动配端件，每块隔板配两个销。简图标注底部净距。",
+                "Click a divider to select it and drag it in 10.5 mm steps. Full spans include end pieces, and each divider includes two pins. Plan labels show gaps between divider bases.",
+            ));
+        });
+        plan_rect
+    }
+
+    fn presets(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: &mut Layout,
+        c: &Catalog,
+        s: &Selection,
+        full_span: Option<(Grid, &str)>,
+        zh: bool,
+    ) {
+        ui.menu_button(t(zh, "预设", "Presets"), |ui| {
+            if ui
+                .add_enabled(
+                    !layout.items.is_empty(),
+                    egui::Button::new(t(zh, "清空", "Clear")),
+                )
+                .clicked()
+            {
+                let mut next = self.candidate(layout, s);
+                next.items.clear();
+                if self.commit(layout, next, c, s) {
+                    self.select(None);
+                }
+                ui.close();
+            }
+            let Some((grid, path)) = full_span else {
+                return;
+            };
+            for count in [2, 3] {
+                let label = if zh {
+                    format!("{count} 等分")
+                } else {
+                    format!("Split into {count}")
+                };
+                if ui.button(label).clicked() {
+                    let mut next = self.candidate(layout, s);
+                    let axis = usize::from(self.vertical);
+                    let cross = if self.vertical { grid.cols } else { grid.rows };
+                    next.items = (1..count)
+                        .map(|k| {
+                            let mut start = [0; 2];
+                            start[axis] = grid.full_start(self.vertical);
+                            start[1 - axis] =
+                                ((cross - 1) as f32 * k as f32 / count as f32).round() as i32;
+                            Placement {
+                                path: path.to_owned(),
+                                start,
+                                vertical: self.vertical,
+                            }
+                        })
+                        .collect();
+                    if self.commit(layout, next, c, s) {
+                        self.select(None);
+                    }
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    fn properties(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: &mut Layout,
+        c: &Catalog,
+        s: &Selection,
+        grid: Grid,
+        zh: bool,
+    ) {
+        let Some(i) = self.selected.filter(|&i| i < layout.items.len()) else {
+            return;
+        };
+        ui.separator();
+        let divider = layout.items[i].clone();
+        ui.strong(format!(
+            "{} {} · {}",
+            t(zh, "隔板", "Divider"),
+            i + 1,
+            divider.path.rsplit('/').next().unwrap_or(&divider.path)
+        ));
+        let mut next = layout.clone();
+        let axis = usize::from(divider.vertical);
+        let full = grid.full(&divider);
+        let n = dividers::code(&divider.path).unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            for (a, name, limit) in [
+                (0, t(zh, "列", "Column"), grid.cols),
+                (1, t(zh, "行", "Row"), grid.rows),
+            ] {
+                let mut value = divider.start[a] + 1;
+                let label = ui.label(name);
+                if ui
+                    .add_enabled(
+                        !full || a != axis,
+                        egui::DragValue::new(&mut value).range(1..=limit),
+                    )
+                    .labelled_by(label.id)
+                    .changed()
+                {
+                    next.items[i].start[a] = value - 1;
+                }
+            }
+        });
+        self.commit(layout, next, c, s);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(t(zh, "复制", "Duplicate")).clicked() {
+                self.height = match dividers::height(&divider.path) {
+                    82.5 => 2,
+                    34.5 => 1,
+                    _ => 0,
+                };
+                self.vertical = divider.vertical;
+                self.path.clone_from(&divider.path);
+                self.add(layout, c, s, grid, None);
+            }
+            if ui.button(t(zh, "旋转 90°", "Rotate 90°")).clicked() {
+                let mut next = layout.clone();
+                let mut center = divider.start.map(|value| value as f32);
+                center[axis] += (n - 1) as f32 / 2.;
+                let vertical = !divider.vertical;
+                let new_axis = usize::from(vertical);
+                let mut start = center.map(|value| value.round() as i32);
+                start[new_axis] = if n == grid.full_code(vertical) {
+                    grid.full_start(vertical)
+                } else {
+                    (center[new_axis] - (n - 1) as f32 / 2.).round() as i32
+                };
+                next.items[i] = Placement {
+                    start,
+                    vertical,
+                    ..divider.clone()
+                };
+                self.commit(layout, next, c, s);
+            }
+            if ui
+                .add_enabled(
+                    !self.path.is_empty() && self.path != divider.path,
+                    egui::Button::new(t(zh, "替换型号", "Replace model")),
+                )
+                .clicked()
+            {
+                let mut next = layout.clone();
+                let p = &mut next.items[i];
+                p.path.clone_from(&self.path);
+                if dividers::code(&p.path) == Some(grid.full_code(p.vertical)) {
+                    p.start[axis] = grid.full_start(p.vertical);
+                }
+                self.commit(layout, next, c, s);
+            }
+            if ui
+                .add(crate::ui_style::danger_button(t(zh, "删除", "Delete")))
+                .clicked()
+            {
+                let mut next = layout.clone();
+                next.items.remove(i);
+                if self.commit(layout, next, c, s) {
+                    self.select(None);
+                }
+            }
+        });
+    }
+
+    fn canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: &mut Layout,
+        c: &Catalog,
+        s: &Selection,
+        grid: Grid,
+        zh: bool,
+    ) -> Rect {
+        let size = Vec2::new(grid.right - grid.left, grid.front - grid.rear);
+        let width = ui.available_width().max(1.);
+        let scale = (width / size.x).min(245. / size.y);
+        let (space, response) = ui.allocate_exact_size(
+            Vec2::new(width, size.y * scale + 34.),
+            egui::Sense::click_and_drag(),
+        );
+        let rect = Rect::from_min_size(
+            space.center_top() + Vec2::new(-size.x * scale / 2., 16.),
+            size * scale,
+        );
+        let floor_origin = Vec2::new(grid.left, grid.rear);
+        let screen = |x: f32, y: f32| rect.min + (Vec2::new(x, y) - floor_origin) * scale;
+        let cell = |pointer: Pos2| {
+            let p = (pointer - rect.min) / scale + floor_origin;
+            let first = grid.point([0., 0.]);
+            [(p.x - first[0]) / PITCH, (p.y - first[1]) / PITCH]
+        };
+        let placement_rect = |p: &Placement| {
+            let [left, rear, right, front] = grid.bounds(p);
+            Rect::from_min_max(screen(left, rear), screen(right, front))
+        };
+        let hit = |layout: &Layout, pos: Pos2| {
+            rect.contains(pos)
+                .then(|| {
+                    layout
+                        .items
+                        .iter()
+                        .rposition(|p| placement_rect(p).contains(pos))
+                })
+                .flatten()
+        };
+
+        if self.add_mode && response.secondary_clicked() {
+            self.cancel_gesture();
+        }
+        if !self.add_mode && response.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            let index = origin.and_then(|pos| hit(layout, pos));
+            self.select(index);
+            if let Some((index, origin)) = index.zip(origin) {
+                self.drag = Some(Drag {
+                    index,
+                    origin,
+                    offset: Vec2::ZERO,
+                });
+            }
+        }
+        if let Some(drag) = &mut self.drag
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            drag.offset = (pos - drag.origin) / (scale * PITCH);
+        }
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            if self.add_mode {
+                if rect.contains(pointer) {
+                    self.place(layout, c, s, grid, cell(pointer));
+                }
+            } else {
+                self.select(hit(layout, pointer));
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some((_, next)) = self.drag_preview(layout, grid) {
+                self.error.clear();
+                self.commit(layout, next, c, s);
+            }
+            self.drag = None;
+        }
+
+        let paint = ui.painter_at(rect);
+        paint.rect_filled(rect, 5., Color32::from_rgb(32, 43, 52));
+        paint.rect_stroke(
+            rect,
+            5.,
+            Stroke::new(1., Color32::GRAY),
+            egui::StrokeKind::Inside,
+        );
+        let caption = ui.visuals().weak_text_color();
+        let font = egui::FontId::proportional(11.);
+        ui.painter().text(
+            rect.center_top() - Vec2::new(0., 8.),
+            egui::Align2::CENTER_CENTER,
+            format!("{} · {:.1} mm", t(zh, "后部", "Rear"), size.x),
+            font.clone(),
+            caption,
+        );
+        ui.painter().text(
+            rect.center_bottom() + Vec2::new(0., 9.),
+            egui::Align2::CENTER_CENTER,
+            format!("{} · {:.1} mm", t(zh, "前部", "Front"), size.y),
+            font,
+            caption,
+        );
+        for y in 0..grid.rows {
+            for x in 0..grid.cols {
+                let [x, y] = grid.point([x as f32, y as f32]);
+                paint.circle_filled(screen(x, y), 1.35, Color32::from_gray(110));
+            }
+        }
+        for (i, p) in layout.items.iter().enumerate() {
+            let color = Self::divider_color(self.selected == Some(i));
+            let part = placement_rect(p);
+            paint.rect_filled(part, 2., color.gamma_multiply(0.28));
+            paint.rect_stroke(part, 2., Stroke::new(1.5, color), egui::StrokeKind::Inside);
+            let [x, y] = grid.center(p);
+            let half = dividers::code(&p.path).unwrap_or_default() as f32 * PITCH / 2.;
+            let line = if p.vertical {
+                [screen(x, y - half), screen(x, y + half)]
+            } else {
+                [screen(x - half, y), screen(x + half, y)]
+            };
+            paint.line_segment(line, Stroke::new(2.5, color));
+        }
+        if !layout.items.is_empty()
+            && layout
+                .items
+                .iter()
+                .all(|p| grid.full(p) && p.vertical == layout.items[0].vertical)
+        {
+            Self::paint_clearances(&paint, grid, layout, screen);
+        }
+
+        let preview = if self.add_mode {
+            response
+                .hover_pos()
+                .filter(|&pos| rect.contains(pos))
+                .and_then(|pos| self.placement_candidate(layout, s, grid, cell(pos)))
+                .map(|next| (next.items.len() - 1, next))
+        } else {
+            self.drag_preview(layout, grid)
+        };
+        if let Some((i, next)) = preview {
+            let valid = next.validate(c, s);
+            let color = if valid.is_ok() {
+                Color32::LIGHT_GREEN
+            } else {
+                Color32::LIGHT_RED
+            };
+            let part = placement_rect(&next.items[i]);
+            paint.rect_filled(part, 2., color.gamma_multiply(0.24));
+            paint.rect_stroke(part, 2., Stroke::new(2., color), egui::StrokeKind::Inside);
+            if let Err(reason) = valid {
+                response.on_hover_text(reason);
+            }
+        }
+        rect
+    }
+
+    fn paint_clearances(
+        paint: &egui::Painter,
+        grid: Grid,
+        layout: &Layout,
+        screen: impl Fn(f32, f32) -> Pos2,
+    ) {
+        let vertical = layout.items[0].vertical;
+        let axis = usize::from(!vertical);
+        let mut spans: Vec<_> = layout
+            .items
+            .iter()
+            .map(|p| {
+                let b = grid.bounds(p);
+                (b[axis], b[axis + 2])
+            })
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut from, end) = if vertical {
+            (grid.left, grid.right)
+        } else {
+            (grid.rear, grid.front)
+        };
+        for (lo, hi) in spans.into_iter().chain(std::iter::once((end, end))) {
+            let gap = lo - from;
+            let center = (from + lo) / 2.;
+            let point = if vertical {
+                screen(center, grid.rear + 8.)
+            } else {
+                screen(grid.left + 15., center)
+            };
+            paint.text(
+                point,
+                egui::Align2::CENTER_CENTER,
+                format!("{gap:.1}"),
+                egui::FontId::proportional(10.),
+                Color32::LIGHT_GREEN,
+            );
+            from = hi;
+        }
     }
 }
 
@@ -334,7 +780,9 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    editor.show(ctx, &c, &s, layout);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        editor.panel(ui, &c, &s, layout, true);
+                    });
                 },
             );
             output
@@ -380,6 +828,47 @@ mod tests {
         }
         assert_eq!(layout.items[0].start, [1, 2]);
         assert_eq!(layout.items[1].start, [1, 6]);
+
+        editor.cancel_gesture();
+        let point = |row| {
+            let raw = g.point([5., row]);
+            canvas.min
+                + Vec2::new(
+                    (raw[0] - g.left) / (g.right - g.left) * canvas.width(),
+                    (raw[1] - g.rear) / (g.front - g.rear) * canvas.height(),
+                )
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let previous = layout.clone();
+        let undo_count = editor.undo.len();
+        let start = point(2.);
+        for (row, valid) in [(4., false), (3., true)] {
+            let end = point(row);
+            frame(
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+                &mut editor,
+                &mut layout,
+            );
+            frame(
+                vec![egui::Event::PointerMoved(end)],
+                &mut editor,
+                &mut layout,
+            );
+            assert_eq!(layout, previous, "drag previews must not change the layout");
+            frame(vec![button(end, false)], &mut editor, &mut layout);
+            if valid {
+                assert_eq!(layout.items[0].start, [1, 3]);
+                assert_eq!(editor.undo.len(), undo_count + 1);
+            } else {
+                assert_eq!(layout, previous);
+                assert_eq!(editor.undo.len(), undo_count);
+            }
+        }
     }
     #[test]
     fn click_anchors_full_spans_and_rounds_short_centers_once() {

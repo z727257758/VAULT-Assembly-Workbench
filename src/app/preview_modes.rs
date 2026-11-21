@@ -221,13 +221,6 @@ impl App {
                     self.preview_modes.camera.fit(&layout.scene, 0.);
                 }
             }
-            _ if self.interior_editor_open() => {
-                let edit_pose = self.opened_drawer_divider_preview();
-                self.camera.fit(
-                    &self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene)),
-                    self.explosion,
-                );
-            }
             _ => self.camera.fit(&self.scene, self.explosion),
         }
     }
@@ -260,7 +253,7 @@ impl App {
     }
     pub(super) fn preview_modes_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
         let z = self.zh;
-        if !self.scene.assembly || self.interior_editor_open() {
+        if !self.scene.assembly {
             self.preview_modes.mode = Mode::Assembly;
             return false;
         }

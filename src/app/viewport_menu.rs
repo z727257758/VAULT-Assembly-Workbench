@@ -44,7 +44,6 @@ impl App {
             && self.combination_view
             && !self.busy
             && !self.preview.has_pending()
-            && !self.interior_editor_open()
             && self.export_rx.is_none();
         if !ready {
             egui::Popup::close_id(ctx, popup);

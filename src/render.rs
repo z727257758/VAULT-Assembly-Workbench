@@ -113,7 +113,6 @@ pub struct ViewOptions<'a> {
     pub explosion: f32,
     pub selected: Option<usize>,
     pub ghost: bool,
-    pub interior_only: bool,
     pub colliding: Vec<usize>,
     pub member_offsets: Vec<Vec3>,
     pub print_beds: Option<PrintBedView<'a>>,
@@ -432,7 +431,6 @@ impl Renderer {
             explosion,
             selected,
             ghost,
-            interior_only,
             colliding,
             member_offsets,
             print_beds,
@@ -515,14 +513,9 @@ impl Renderer {
                 color,
                 ink,
             };
-            let visible = if interior_only {
-                crate::dividers::interior_part(&p.pose.path)
-            } else {
-                p.visible
-            };
             self.draw_list.push(DrawPart {
                 mesh: p.mesh_key(),
-                visible,
+                visible: p.visible,
                 uniform,
             });
         }

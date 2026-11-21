@@ -2,7 +2,7 @@
 use crate::{
     catalog::{Bom, Catalog, Selection},
     constraints::{self, PartId, Relation},
-    scene::Scene,
+    scene::{Part, Scene},
 };
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -299,6 +299,10 @@ fn place(
     scene.relations.push(relation);
     Ok(())
 }
+pub(crate) fn drawer_floor(drawer: &Part) -> f32 {
+    drawer.mesh.min.y + 3.02
+}
+
 pub fn apply(scene: &mut Scene, layout: &Layout, s: &Selection) -> Result<(), String> {
     if !layout.enabled || layout.items.is_empty() {
         return Ok(());
@@ -311,7 +315,7 @@ pub fn apply(scene: &mut Scene, layout: &Layout, s: &Selection) -> Result<(), St
         .ok_or("分隔布局需要抽屉盒体")?;
     let b = &scene.parts[drawer];
     let matrix = b.pose.matrix(0.);
-    let floor = b.mesh.min.y + 3.02;
+    let floor = drawer_floor(b);
     if (b.source_size.x - (g.right - g.left + 8.4)).abs() > 0.1 {
         return Err("抽屉尺寸与已验证底孔网格不一致".into());
     }

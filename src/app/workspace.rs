@@ -1,7 +1,8 @@
 use super::*;
 use crate::constraints::{AssemblyRules, MotionKind};
-use crate::scene::Target;
+use crate::scene::{Part, Target};
 use crate::ui_style;
+use glam::{Mat4, Vec3};
 use std::sync::Arc;
 
 /// Cache an opened display copy while the loaded assembly and its poses match.
@@ -52,6 +53,50 @@ impl OpenInterior {
         }
         cache.as_ref().unwrap().scene.clone()
     }
+}
+
+pub(super) fn drawer_camera(
+    part: &Part,
+    interior_frame: Mat4,
+    rect: egui::Rect,
+    show_housing: bool,
+) -> Camera {
+    let model = part.pose.matrix(0.);
+    let lo = part.mesh.min;
+    let hi = part.mesh.max;
+    // Taller drawer walls need a steeper view to keep the front sockets accessible.
+    let pitch = (hi.y - lo.y).atan2(42. * 0.67).clamp(0.86, 1.26);
+    let side = 0.16f32;
+    let eye = interior_frame
+        .transform_vector3(Vec3::new(
+            side.sin() * pitch.cos(),
+            pitch.sin(),
+            -side.cos() * pitch.cos(),
+        ))
+        .normalize();
+    let mut camera = Camera {
+        yaw: eye.x.atan2(eye.z),
+        pitch: eye.y.asin().clamp(-1.56, 1.56),
+        center: model.transform_point3((lo + hi) * 0.5),
+        radius: ((hi - lo).length() * 0.5).max(1.),
+        ..Default::default()
+    };
+    let matrix = camera.matrix(rect.aspect_ratio()) * model;
+    let mut extent = 0.01f32;
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            for z in [lo.z, hi.z] {
+                let p = matrix.project_point3(Vec3::new(x, y, z));
+                extent = extent.max(p.x.abs()).max(p.y.abs());
+            }
+        }
+    }
+    camera.zoom = if show_housing { 0.78 } else { 0.86 } / extent;
+    // Move the drawer slightly down the frame to leave the installation visible behind it.
+    if show_housing {
+        camera.pan[1] = 0.12;
+    }
+    camera
 }
 
 pub(super) fn model_and_plan_rects(stage: egui::Rect) -> (egui::Rect, egui::Rect) {

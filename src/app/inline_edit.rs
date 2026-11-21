@@ -257,6 +257,9 @@ impl App {
         self.tower.print_list = false;
         self.preview_modes.mode = preview_modes::Mode::Assembly;
         if self.inline_edit.open && self.inline_edit.target == Some(target) {
+            if self.divider_editor.open {
+                self.close_drawer_divider_editor();
+            }
             if self.gridfinity_open {
                 self.close_bin_editor();
             }
@@ -328,17 +331,6 @@ impl App {
             self.ghost = false;
         }
         ctx.request_repaint();
-    }
-    pub(super) fn local_scene_instance(&self, local: u32) -> u32 {
-        if self.scene_key == "combination" {
-            Target {
-                member: self.active_member,
-                drawer: self.active_drawer,
-            }
-            .instance(local)
-        } else {
-            local
-        }
     }
     pub(super) fn focus_preview_path(&mut self, path: String, ctx: &egui::Context) {
         if self.combination_view {
@@ -684,7 +676,7 @@ impl App {
                 }
                 self.layout_cache
                     .remove(&crate::dividers::spec(&self.selection));
-                self.divider_editor.open = false;
+                self.close_drawer_divider_editor();
                 self.divider_editor.reset();
                 if mode == 1 {
                     if let Some(path) = baseplate {
@@ -705,7 +697,7 @@ impl App {
                             t(z, "编辑…", "Edit…")
                         };
                         if ui.button(label).clicked() {
-                            self.divider_editor.open = true;
+                            self.open_drawer_divider_editor(ctx);
                         }
                         if ui
                             .add(ui_style::danger_button(t(z, "移除", "Remove")))

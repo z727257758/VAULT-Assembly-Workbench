@@ -7,6 +7,8 @@ mod combination;
 mod divider_editor_smoke;
 mod divider_view;
 mod divider_workspace;
+mod drawer_divider_smoke;
+mod drawer_divider_workspace;
 mod exterior_smoke;
 mod inline_edit;
 mod large_stl_smoke;
@@ -166,13 +168,6 @@ struct SceneRequest {
 
 type ExportResult = Result<PathBuf, String>;
 
-struct DividerView {
-    camera: Camera,
-    explosion: f32,
-    dimensions: bool,
-    key: String,
-    shown_key: String,
-}
 struct AssemblyView {
     key: String,
     scene: Scene,
@@ -222,6 +217,7 @@ pub struct App {
     bin_editor_smoke: bin_editor_smoke::State,
     editor_smoke_pointer: bin_editor_smoke::Pointer,
     divider_editor_smoke: divider_editor_smoke::State,
+    drawer_divider_smoke: drawer_divider_smoke::State,
     gridfinity_editor: crate::gridfinity_editor::Editor,
     gridfinity_selected: Option<u32>,
     gridfinity_error: Option<String>,
@@ -232,8 +228,7 @@ pub struct App {
     bom: Vec<Bom>,
     divider_layout: crate::dividers::Layout,
     divider_editor: crate::divider_editor::Editor,
-    divider_view: Option<DividerView>,
-    drawer_divider_preview: Option<workspace::OpenInterior>,
+    drawer_divider_view: drawer_divider_workspace::State,
     layout_cache: BTreeMap<String, crate::dividers::Layout>,
     scene: Scene,
     renderer: Renderer,
@@ -384,6 +379,7 @@ impl App {
             bin_editor_smoke: Default::default(),
             editor_smoke_pointer: Default::default(),
             divider_editor_smoke: Default::default(),
+            drawer_divider_smoke: Default::default(),
             gridfinity_editor: Default::default(),
             gridfinity_selected: None,
             gridfinity_error: None,
@@ -398,8 +394,7 @@ impl App {
             sustainer_divider_editor: Default::default(),
             divider_model: Default::default(),
             sustainer_layout_cache: Default::default(),
-            divider_view: None,
-            drawer_divider_preview: None,
+            drawer_divider_view: Default::default(),
             layout_cache: Default::default(),
             scene: Scene::default(),
             renderer,
@@ -1042,6 +1037,10 @@ impl App {
                     if self.smoke && std::env::args().any(|a| a == "--smoke-divider-editor") {
                         self.setup_divider_editor_smoke(ctx);
                     }
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-drawer-divider-editor")
+                    {
+                        self.setup_drawer_divider_smoke(ctx);
+                    }
                     if self.smoke && std::env::args().any(|a| a == "--smoke-exterior") {
                         self.setup_exterior_smoke();
                     }
@@ -1592,7 +1591,7 @@ impl App {
     }
 
     fn remove_dividers(&mut self, ctx: &egui::Context) {
-        self.divider_editor.open = false;
+        self.close_drawer_divider_editor();
         self.divider_layout.remove(&mut self.bom, &self.selection);
         self.layout_cache
             .remove(&crate::dividers::spec(&self.selection));
@@ -1622,7 +1621,7 @@ impl App {
             return false;
         }
         if change_plate {
-            self.divider_editor.open = false;
+            self.close_drawer_divider_editor();
             self.layout_cache
                 .remove(&crate::dividers::spec(&self.selection));
             self.divider_editor.reset();
@@ -1630,9 +1629,11 @@ impl App {
         true
     }
     fn add_to_bom(&mut self, path: String, ctx: &egui::Context) {
-        if self.divider_layout.enabled && path.contains("/Grid Dividers/") {
-            self.divider_editor.open = true;
-            self.status = "请在分隔编辑器中添加隔板，配套端件和销自动统计".into();
+        if self.assembly_kind == AssemblyKind::Drawer
+            && self.divider_layout.enabled
+            && path.contains("/Grid Dividers/")
+        {
+            self.open_drawer_divider_editor(ctx);
             return;
         }
         let allowed = if self.assembly_kind == AssemblyKind::Sustainer {
@@ -1679,85 +1680,6 @@ impl App {
             "Added to BOM; check alternatives and quantities",
         )
         .into();
-    }
-    fn interior_scene(&self, source: &Scene) -> Scene {
-        let mut scene = source.clone();
-        for p in &mut scene.parts {
-            p.visible = crate::dividers::interior_part(&p.pose.path)
-                && (self.scene_key != "combination"
-                    || crate::scene::Target {
-                        member: self.active_member,
-                        drawer: self.active_drawer,
-                    }
-                    .contains(p));
-        }
-        scene
-    }
-    fn interior_editor_open(&self) -> bool {
-        self.divider_editor.open
-    }
-    fn opened_drawer_divider_preview(&mut self) -> Option<std::sync::Arc<Scene>> {
-        if !self.interior_editor_open() || self.scene_key != "combination" {
-            self.drawer_divider_preview = None;
-            return None;
-        }
-        workspace::OpenInterior::get(
-            &mut self.drawer_divider_preview,
-            &self.scene,
-            crate::scene::Target {
-                member: self.active_member,
-                drawer: self.active_drawer,
-            },
-            crate::constraints::MotionKind::Drawer,
-        )
-        .ok()
-    }
-    fn divider_view(&mut self, ctx: &egui::Context) {
-        if self.scene_key == "combination" {
-            return;
-        }
-        if self.interior_editor_open() {
-            if !self.scene.assembly {
-                if !self.preview.has_pending()
-                    && !self.busy
-                    && self.failed_preview.is_none()
-                    && self.catalog.stl_count() > 0
-                {
-                    self.assembly(ctx);
-                }
-                return;
-            }
-            let needs_fit = self
-                .divider_view
-                .as_ref()
-                .is_none_or(|v| v.shown_key != self.scene_key);
-            if self.divider_view.is_none() {
-                self.divider_view = Some(DividerView {
-                    camera: self.camera.clone(),
-                    explosion: self.explosion,
-                    dimensions: self.dimensions,
-                    key: self.scene_key.clone(),
-                    shown_key: String::new(),
-                });
-            }
-            if needs_fit {
-                self.explosion = 0.;
-                self.dimensions = false;
-                self.camera = Camera::default();
-                self.camera.fit(&self.interior_scene(&self.scene), 0.);
-                self.camera.yaw = 0.6;
-                self.camera.pitch = 0.9;
-                self.divider_view.as_mut().unwrap().shown_key = self.scene_key.clone();
-            }
-        } else if let Some(view) = self.divider_view.take() {
-            self.explosion = view.explosion;
-            self.dimensions = view.dimensions;
-            if view.key == self.scene_key {
-                self.camera = view.camera;
-            } else {
-                self.camera.fit(&self.scene, self.explosion);
-            }
-        }
     }
     fn selected_color_properties(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.commit_member();
@@ -2071,6 +1993,10 @@ impl App {
             )
             .show(ctx, |ui| {
                 appearance::paint_stage(ui, ui.max_rect());
+                if self.divider_editor.open && self.assembly_kind == AssemblyKind::Drawer {
+                    self.drawer_divider_workspace(ui);
+                    return;
+                }
                 if self.gridfinity_open && self.assembly_kind == AssemblyKind::Drawer {
                     self.bin_workspace(ui);
                     return;
@@ -2165,7 +2091,6 @@ impl App {
                     let size = ui.available_size().max(egui::vec2(10., 10.));
                     let (rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let edit_pose = self.opened_drawer_divider_preview();
                     let member_offsets = self.layer_reorder_offsets(ctx, 0., self.explosion);
                     let reordering =
                         self.pending_layer_reorder.is_some() || !member_offsets.is_empty();
@@ -2198,12 +2123,7 @@ impl App {
                         && let Some(p) = response.interact_pointer_pos()
                     {
                         let (o, d) = self.camera.ray(p, rect);
-                        self.last_hit = if self.interior_editor_open() {
-                            self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene))
-                                .pick(o, d, self.explosion)
-                        } else {
-                            self.scene.pick(o, d, self.explosion)
-                        };
+                        self.last_hit = self.scene.pick(o, d, self.explosion);
                         self.selected = self.last_hit.map(|h| h.part);
                         if self.scene_key == "combination"
                             && let Some(index) = self.selected
@@ -2222,14 +2142,7 @@ impl App {
                     {
                         self.focus_member(ctx);
                     } else if !spatial_input && !reordering && response.double_clicked() {
-                        self.camera.fit(
-                            &if self.interior_editor_open() {
-                                self.interior_scene(edit_pose.as_deref().unwrap_or(&self.scene))
-                            } else {
-                                self.scene.clone()
-                            },
-                            self.explosion,
-                        );
+                        self.camera.fit(&self.scene, self.explosion);
                     }
                     if !reordering && (!spatial_input || response.context_menu_opened()) {
                         self.viewport_context_menu(&response);
@@ -2238,29 +2151,14 @@ impl App {
                     let id = self.renderer.render(
                         0,
                         [(size.x * dpi) as u32, (size.y * dpi) as u32],
-                        edit_pose.as_deref().unwrap_or(&self.scene),
+                        &self.scene,
                         &self.camera,
                         ViewOptions {
                             explosion: self.explosion,
-                            selected: if self.interior_editor_open() {
-                                self.divider_editor
-                                    .selected_part(&self.divider_layout)
-                                    .and_then(|(path, instance)| {
-                                        self.scene.parts.iter().position(|p| {
-                                            p.pose.path == path
-                                                && p.pose.instance
-                                                    == self.local_scene_instance(instance)
-                                        })
-                                    })
-                            } else {
-                                self.selected
-                            },
+                            selected: self.selected,
                             ghost: self.ghost,
                             member_offsets,
                             print_beds: None,
-                            interior_only: self.interior_editor_open()
-                                && self.scene.assembly
-                                && self.scene_key != "combination",
                             colliding: self
                                 .collision_report
                                 .as_ref()
@@ -2283,7 +2181,6 @@ impl App {
                     }
                     if self.export_options.plate.preview_colors
                         && self.scene_key != "combination"
-                        && !self.interior_editor_open()
                         && let Some(part) = self
                             .selected
                             .and_then(|i| self.scene.parts.get(i))
@@ -2829,7 +2726,10 @@ impl eframe::App for App {
             && std::env::args().any(|arg| {
                 matches!(
                     arg.as_str(),
-                    "--smoke-bin-editor" | "--smoke-divider-editor" | "--smoke-viewport-menu"
+                    "--smoke-bin-editor"
+                        | "--smoke-divider-editor"
+                        | "--smoke-drawer-divider-editor"
+                        | "--smoke-viewport-menu"
                 )
             })
         {
@@ -2855,6 +2755,9 @@ impl eframe::App for App {
         self.workspace_toolbar(ctx);
         self.left(ctx);
         if self.tab != 0 || self.tower.print_list || self.preview_modes.special() {
+            if self.divider_editor.open {
+                self.close_drawer_divider_editor();
+            }
             if self.sustainer_divider_editor.open {
                 self.close_sustainer_divider_editor();
             }
@@ -2865,7 +2768,6 @@ impl eframe::App for App {
                 self.close_inline_editor(ctx);
             }
         }
-        self.divider_view(ctx);
         self.color_window(ctx);
         self.renderer.print_colors = self
             .export_options
@@ -2904,19 +2806,6 @@ impl eframe::App for App {
         self.combination_spec_window(ctx);
         self.exterior_window(ctx);
         self.label_window(ctx);
-        if self.divider_editor.show(
-            ctx,
-            &self.catalog,
-            &self.selection,
-            &mut self.divider_layout,
-        ) {
-            if !self.divider_layout.enabled {
-                self.divider_layout.remove(&mut self.bom, &self.selection);
-                self.layout_cache
-                    .remove(&crate::dividers::spec(&self.selection));
-            }
-            self.assembly(ctx);
-        }
         if let Some((name, texture)) = &self.image {
             let mut open = true;
             egui::Window::new(name)
@@ -2952,6 +2841,10 @@ impl eframe::App for App {
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-divider-editor") {
             self.divider_editor_smoke(ctx);
+            return;
+        }
+        if self.smoke && std::env::args().any(|a| a == "--smoke-drawer-divider-editor") {
+            self.drawer_divider_smoke(ctx);
             return;
         }
         if self.smoke && std::env::args().any(|a| a == "--smoke-presets") {
@@ -3109,7 +3002,7 @@ impl eframe::App for App {
                 }
                 if self.smoke_frame == 5 && self.smoke_stage == 16 {
                     self.selected = None;
-                    self.divider_editor.open = true;
+                    self.open_drawer_divider_editor(ctx);
                 }
                 if self.smoke_frame == 5 && self.smoke_stage == 17 {
                     for p in &mut self.scene.parts {
@@ -3339,7 +3232,7 @@ impl eframe::App for App {
                                 self.zh = true;
                                 self.gridfinity_open = false;
                                 self.label_open = false;
-                                self.divider_editor.open = false;
+                                self.close_drawer_divider_editor();
                                 self.joints_open = false;
                                 self.dimensions = false;
                                 self.export_open = false;
@@ -3549,7 +3442,7 @@ impl eframe::App for App {
                                 self.assembly(ctx);
                             }
                             17 => {
-                                self.divider_editor.open = false;
+                                self.close_drawer_divider_editor();
                             }
                             18 => {
                                 self.explosion = 1.;

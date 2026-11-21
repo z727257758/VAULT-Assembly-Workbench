@@ -360,10 +360,10 @@ impl App {
         self.colors_open = false;
         self.gridfinity_editor = Default::default();
         self.gridfinity_selected = None;
+        self.close_drawer_divider_editor();
         self.divider_editor = Default::default();
         self.close_sustainer_divider_editor();
         self.sustainer_divider_editor.reset();
-        self.divider_view = None;
         self.assembly_view = None;
         self.selected = None;
         self.joints_open = false;
