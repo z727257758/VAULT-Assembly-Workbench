@@ -115,6 +115,24 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub(crate) fn shares_print_project(&self, other: &Self) -> bool {
+        self.printer == other.printer
+            && self.textured == other.textured
+            && self.layer == other.layer
+            && self.walls == other.walls
+            && self.infill == other.infill
+            && self.support_by_name == other.support_by_name
+            && self.margin == other.margin
+            && self.brim == other.brim
+            && self.gap == other.gap
+            && self.rotate == other.rotate
+            && self.split == other.split
+            && self.center == other.center
+            && self.palette == other.palette
+            && self.materials == other.materials
+            && self.extra_filaments == other.extra_filaments
+    }
+
     fn brim_extent(&self) -> Result<f32, String> {
         if self.brim == 0. {
             return Ok(0.);

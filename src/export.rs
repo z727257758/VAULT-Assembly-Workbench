@@ -16,10 +16,18 @@ pub enum Format {
     #[serde(alias = "Bambu")]
     ThreeMf,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Planning {
+    #[default]
+    PerMember,
+    Combined,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
     pub format: Format,
+    pub planning: Planning,
     pub plate: crate::print_plate::Config,
     #[serde(skip)]
     pub material_library: std::sync::Arc<MaterialLibrary>,
@@ -28,6 +36,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             format: Format::ThreeMf,
+            planning: Planning::default(),
             plate: Default::default(),
             material_library: Default::default(),
         }
@@ -262,6 +271,7 @@ fn prepare_inputs(
 }
 
 /// Shared manufacturing geometry and packing for both 3MF and the read-only plate view.
+#[derive(Default)]
 pub(crate) struct PreparedPrint {
     pub sizes: Vec<glam::Vec3>,
     pub materials: Vec<Vec<u32>>,
@@ -272,7 +282,45 @@ pub(crate) struct PreparedPrint {
     pub face_down: Vec<bool>,
     pub placements: Vec<crate::print_plate::Placement>,
 }
-fn prepare_print(
+impl PreparedPrint {
+    pub(crate) fn append_geometry(&mut self, mut job: Self) {
+        let offset = self.resources.len();
+        for (id, _) in job.material_ids.iter_mut().flatten() {
+            *id += offset;
+        }
+        self.sizes.append(&mut job.sizes);
+        self.materials.append(&mut job.materials);
+        self.plate_groups.append(&mut job.plate_groups);
+        self.resources.append(&mut job.resources);
+        self.material_ids.append(&mut job.material_ids);
+        self.local_supports.append(&mut job.local_supports);
+        self.face_down.append(&mut job.face_down);
+    }
+
+    pub(crate) fn pack(
+        &mut self,
+        items: &[Bom],
+        plate: &crate::print_plate::Config,
+    ) -> Result<(), String> {
+        if items.len() != self.sizes.len() {
+            return Err("打印零件与网格数量不一致 / Print items do not match geometry".into());
+        }
+        let parts: Vec<_> = items
+            .iter()
+            .zip(&self.sizes)
+            .map(|(item, &size)| (item.name().to_owned(), size, item.qty))
+            .collect();
+        self.placements = crate::print_plate::arrange_grouped_materials(
+            &parts,
+            &self.materials,
+            &self.plate_groups,
+            plate,
+        )?;
+        Ok(())
+    }
+}
+
+fn prepare_geometry(
     inputs: &[(Bom, PathBuf)],
     label: &crate::label::Config,
     generated: &HashMap<String, std::sync::Arc<Mesh>>,
@@ -386,11 +434,6 @@ fn prepare_print(
         material_ids.push(ids);
         local_supports.push(painted);
     }
-    let parts: Vec<_> = inputs
-        .iter()
-        .zip(&sizes)
-        .map(|((item, _), size)| (item.name().to_string(), *size, item.qty))
-        .collect();
     let materials: Vec<Vec<u32>> = material_ids
         .iter()
         .map(|ids| ids.iter().map(|(_, slot)| *slot).collect())
@@ -410,8 +453,6 @@ fn prepare_print(
             }
         })
         .collect();
-    let placements =
-        crate::print_plate::arrange_grouped_materials(&parts, &materials, &plate_groups, plate)?;
     Ok(PreparedPrint {
         sizes,
         materials,
@@ -420,10 +461,24 @@ fn prepare_print(
         material_ids,
         local_supports,
         face_down,
-        placements,
+        ..Default::default()
     })
 }
-pub(crate) fn prepare_preview(
+
+fn prepare_print(
+    inputs: &[(Bom, PathBuf)],
+    label: &crate::label::Config,
+    generated: &HashMap<String, std::sync::Arc<Mesh>>,
+    plate: &crate::print_plate::Config,
+    gridfinity: Option<(&crate::gridfinity::Layout, &crate::catalog::Selection)>,
+) -> Result<PreparedPrint, String> {
+    let mut plan = prepare_geometry(inputs, label, generated, plate, gridfinity)?;
+    let items: Vec<_> = inputs.iter().map(|(item, _)| item.clone()).collect();
+    plan.pack(&items, plate)?;
+    Ok(plan)
+}
+
+pub(crate) fn prepare_job_geometry(
     root: &Path,
     items: &[Bom],
     label: &crate::label::Config,
@@ -437,7 +492,7 @@ pub(crate) fn prepare_preview(
     plate.validate()?;
     let root = root.canonicalize().map_err(err)?;
     let (inputs, generated) = prepare_inputs(&root, items, label, gridfinity)?;
-    let plan = prepare_print(
+    let plan = prepare_geometry(
         &inputs,
         label,
         &generated,
@@ -454,6 +509,33 @@ fn write_3mf(
     generated: &HashMap<String, std::sync::Arc<Mesh>>,
     plate: &crate::print_plate::Config,
     gridfinity: Option<(&crate::gridfinity::Layout, &crate::catalog::Selection)>,
+    materials: &MaterialLibrary,
+) -> Result<(), String> {
+    let plan = prepare_print(inputs, label, generated, plate, gridfinity)?;
+    let items: Vec<_> = inputs.iter().map(|(item, _)| item.clone()).collect();
+    write_prepared_3mf(file, &items, plan, plate, materials)
+}
+
+pub(crate) fn export_prepared(
+    root: &Path,
+    destination: &Path,
+    items: &[Bom],
+    plan: PreparedPrint,
+    plate: &crate::print_plate::Config,
+    materials: &MaterialLibrary,
+) -> Result<(), String> {
+    let parent = export_parent(&root.canonicalize().map_err(err)?, destination)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(err)?;
+    write_prepared_3mf(staged.as_file_mut(), items, plan, plate, materials)?;
+    staged.persist(destination).map_err(err)?;
+    Ok(())
+}
+
+fn write_prepared_3mf(
+    file: &mut File,
+    inputs: &[Bom],
+    plan: PreparedPrint,
+    plate: &crate::print_plate::Config,
     materials: &MaterialLibrary,
 ) -> Result<(), String> {
     let project_settings = plate.project_json_with_materials(materials)?;
@@ -483,7 +565,7 @@ fn write_3mf(
         local_supports,
         face_down,
         placements,
-    } = prepare_print(inputs, label, generated, plate, gridfinity)?;
+    } = plan;
     for (index, (mesh, origin, name, support_mask)) in resources.iter().enumerate() {
         // Weld by exact source coordinates, preserving triangle order and disconnected bodies.
         let mut map = HashMap::<[u32; 3], usize>::new();
@@ -532,7 +614,7 @@ fn write_3mf(
     // Each copy gets a wrapper object: Bambu's plate map stores one instance per object ID.
     for (i, p) in placements.iter().enumerate() {
         let object = resources.len() + i + 1;
-        let name = xml(&format!("{} #{}", inputs[p.input].0.name(), p.copy + 1));
+        let name = xml(&format!("{} #{}", inputs[p.input].name(), p.copy + 1));
         writeln!(
             zip,
             r#"<object id="{object}" type="model" name="{name}"><components>"#
@@ -544,13 +626,12 @@ fn write_3mf(
         writeln!(zip, "</components></object>").map_err(err)?;
         config += &format!(
             r#"<object id="{object}"><metadata key="name" value="{name}"/><metadata key="extruder" value="{}"/>"#,
-            plate.slot(&inputs[p.input].0.path)
+            material_ids[p.input][0].1
         );
         if local_supports[p.input] {
             config += r#"<metadata key="enable_support" value="1"/><metadata key="support_type" value="tree(manual)"/><metadata key="support_on_build_plate_only" value="1"/>"#;
         } else if plate.support_by_name
             && inputs[p.input]
-                .0
                 .path
                 .to_ascii_lowercase()
                 .contains("turn on supports")
@@ -862,9 +943,12 @@ endsolid t";
                 let regions = plan.material_ids[0].len();
                 let mut preview = crate::scene::layouts::PrintLayout::default();
                 preview.append(
-                    0,
                     "Labels",
                     &inputs.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>(),
+                    &[crate::scene::Target {
+                        member: 0,
+                        drawer: None,
+                    }],
                     plan,
                     &c,
                 );

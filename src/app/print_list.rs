@@ -85,6 +85,113 @@ pub(super) fn checked_jobs<'a>(
     Ok(output)
 }
 
+pub(super) struct PrintBatch {
+    name: String,
+    config: crate::print_plate::Config,
+    jobs: Vec<(usize, tower::PrintJob)>,
+}
+
+pub(super) struct PreparedBatch {
+    pub name: String,
+    pub config: crate::print_plate::Config,
+    pub items: Vec<Bom>,
+    pub owners: Vec<crate::scene::Target>,
+    pub plan: crate::export::PreparedPrint,
+}
+
+pub(super) fn batch_jobs(
+    jobs: Vec<(usize, tower::PrintJob)>,
+    planning: crate::export::Planning,
+    project: &str,
+) -> Vec<PrintBatch> {
+    let mut batches: Vec<PrintBatch> = Vec::new();
+    for (index, job) in jobs {
+        let config = job.preset.print_config.clone().unwrap_or_default();
+        if planning == crate::export::Planning::Combined
+            && let Some(batch) = batches
+                .iter_mut()
+                .find(|b| b.config.shares_print_project(&config))
+        {
+            batch.jobs.push((index, job));
+        } else {
+            let name = if planning == crate::export::Planning::Combined {
+                project.to_owned()
+            } else {
+                job.name.clone()
+            };
+            batches.push(PrintBatch {
+                name,
+                config,
+                jobs: vec![(index, job)],
+            });
+        }
+    }
+    batches
+}
+
+impl PrintBatch {
+    pub(super) fn prepare(
+        self,
+        root: &Path,
+        home: &Path,
+        cancel: Option<&crate::preview::Cancel>,
+    ) -> Result<PreparedBatch, String> {
+        let mut items = Vec::new();
+        let mut owners = Vec::new();
+        let mut plan = crate::export::PreparedPrint::default();
+        for (member, job) in self.jobs {
+            crate::preview::check(cancel)?;
+            let config = job.preset.print_config.unwrap_or_default();
+            let (mut inputs, geometry) = crate::export::prepare_job_geometry(
+                root,
+                &job.items,
+                &job.preset.label,
+                &config,
+                Some((home, &job.preset.gridfinity, &job.preset.selection)),
+            )
+            .map_err(|e| format!("{}: {e}", job.name))?;
+            owners.extend(std::iter::repeat_n(
+                crate::scene::Target {
+                    member,
+                    drawer: job.drawer,
+                },
+                inputs.len(),
+            ));
+            items.append(&mut inputs);
+            plan.append_geometry(geometry);
+        }
+        crate::preview::check(cancel)?;
+        plan.pack(&items, &self.config)
+            .map_err(|e| format!("{}: {e}", self.name))?;
+        Ok(PreparedBatch {
+            name: self.name,
+            config: self.config,
+            items,
+            owners,
+            plan,
+        })
+    }
+}
+
+impl App {
+    pub(super) fn print_planning_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::export::Planning;
+        let old = self.export_options.planning;
+        let z = self.zh;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t(z, "摆盘", "Planning"));
+            ui.selectable_value(&mut self.export_options.planning, Planning::PerMember, t(z, "按单体", "By member"));
+            ui.selectable_value(&mut self.export_options.planning, Planning::Combined, t(z, "按整体", "Combined"))
+                .on_hover_text(t(z, "相同打印设置和耗材槽的零件可以跨成员合盘。", "Parts can share plates across members with matching print settings and filament slots."));
+        });
+        if old != self.export_options.planning
+            && let Err(e) = self.save_settings()
+        {
+            self.status = e;
+        }
+    }
+}
+
 pub(super) fn set_accessory(
     selection: &Selection,
     bom: &mut Vec<Bom>,

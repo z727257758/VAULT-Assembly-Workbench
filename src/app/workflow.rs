@@ -91,12 +91,8 @@ impl App {
                 t(z, "当前成员", "Current member"),
             );
         });
-        if self.export_scope != ExportScope::Current {
-            ui.small(t(
-                z,
-                "每个成员分别生成一个 3MF，输出到同一文件夹；不合并跨成员打印盘。",
-                "One 3MF per member in one folder; plates are not merged across members.",
-            ));
+        if self.export_options.format == crate::export::Format::ThreeMf {
+            self.print_planning_ui(ui);
         }
         ui.strong(t(z, "2 · 打印清单", "2 · Print list"));
         let mut total = 0;

@@ -17,6 +17,8 @@ pub(super) enum Mode {
 struct PrintRequest {
     root: PathBuf,
     home: PathBuf,
+    planning: crate::export::Planning,
+    project: String,
     members: Vec<(usize, Member)>,
 }
 #[derive(Default)]
@@ -75,23 +77,16 @@ fn build(request: PrintRequest, cancel: &crate::preview::Cancel) -> Result<Print
     let mut geometry = crate::scene::MeshPool::default();
     let catalog = Catalog::scan(request.root.clone())?;
     let members = request.members.iter().map(|(i, member)| (*i, member));
-    for (index, job) in print_list::checked_jobs(members, &catalog)? {
-        crate::preview::check(Some(cancel))?;
-        let config = job.preset.print_config.clone().unwrap_or_default();
-        let (inputs, plan) = crate::export::prepare_preview(
-            &request.root,
-            &job.items,
-            &job.preset.label,
-            &config,
-            Some((&request.home, &job.preset.gridfinity, &job.preset.selection)),
-        )
-        .map_err(|e| format!("{}: {e}", job.name))?;
-        crate::preview::check(Some(cancel))?;
-        let start = layout.parts.len();
-        layout.append(index, &job.name, &inputs, plan, &config);
-        for part in layout.parts[start..].iter_mut().flatten() {
-            part.drawer = job.drawer;
-        }
+    let jobs = print_list::checked_jobs(members, &catalog)?;
+    for batch in print_list::batch_jobs(jobs, request.planning, &request.project) {
+        let batch = batch.prepare(&request.root, &request.home, Some(cancel))?;
+        layout.append(
+            &batch.name,
+            &batch.items,
+            &batch.owners,
+            batch.plan,
+            &batch.config,
+        );
         geometry.share(&mut layout.scene)?;
     }
     layout.finish()?;
@@ -140,6 +135,8 @@ impl App {
         PrintRequest {
             root: self.catalog.root.clone(),
             home: self.home.clone(),
+            planning: self.export_options.planning,
+            project: self.tower.name.clone(),
             members,
         }
     }
@@ -345,6 +342,7 @@ impl App {
     }
 
     fn plate_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.print_planning_ui(ui);
         let z = self.zh;
         let scopes = [
             (0, t(z, "全部成员", "All members")),
@@ -1166,6 +1164,22 @@ impl App {
                     return Err("Single-plate view must show one tray with printable parts".into());
                 }
             }
+            if self.smoke_stage == 11 {
+                let layout = self
+                    .preview_modes
+                    .layout
+                    .as_ref()
+                    .ok_or("Missing project layout")?;
+                let mut owners = vec![None; layout.plates.len()];
+                let shared = layout
+                    .parts
+                    .iter()
+                    .flatten()
+                    .any(|part| owners[part.plate].get_or_insert(part.member) != &part.member);
+                if !shared {
+                    return Err("Whole-project planning left every plate member-specific".into());
+                }
+            }
             if self.smoke_stage == 5 && (!self.label_open || self.label.text != "EDIT") {
                 return Err("Label editor lost its member or text".into());
             }
@@ -1250,11 +1264,21 @@ impl App {
                     .iter()
                     .position(|plate| plate.printer == crate::print_plate::Printer::A1Mini);
             }
+            10 => {
+                self.commit_member();
+                let config = crate::print_plate::Config::default();
+                for member in &mut self.members {
+                    member.preset.print_config = Some(config.clone());
+                }
+                self.export_options.plate = config;
+                self.export_options.planning = crate::export::Planning::Combined;
+                self.preview_modes.filter = None;
+            }
             _ => {
                 let _ = std::fs::write(
                     folder.join("result.txt"),
                     format!(
-                        "PASS: overall, exploded, layers, print plates and both bed surfaces, labels, top and oblique views, mixed printers and filtered A1 mini plate. GPU: {}",
+                        "PASS: overall, exploded, layers, print plates and both bed surfaces, labels, top and oblique views, mixed printers, filtered A1 mini plate and shared project plates. GPU: {}",
                         self.renderer.state.adapter.get_info().name
                     ),
                 );
@@ -1278,6 +1302,8 @@ mod tests {
             PrintRequest {
                 root: PathBuf::new(),
                 home: PathBuf::new(),
+                planning: Default::default(),
+                project: String::new(),
                 members: vec![],
             },
             now,

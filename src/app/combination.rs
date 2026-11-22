@@ -1222,8 +1222,10 @@ impl App {
         }
         let root = self.catalog.root.clone();
         let home = self.home.clone();
-        let format = self.export_options.format;
-        let materials = std::sync::Arc::new(self.material_library.clone());
+        let options = crate::export::Options {
+            material_library: std::sync::Arc::new(self.material_library.clone()),
+            ..self.export_options.clone()
+        };
         let (tx, rx) = mpsc::channel();
         self.export_rx = Some(rx);
         self.export_last = None;
@@ -1234,10 +1236,9 @@ impl App {
                 &root,
                 &home,
                 &target,
-                format,
+                &options,
                 &saved,
                 Some(&indices),
-                &materials,
             ));
             ctx.request_repaint();
         });
@@ -1247,10 +1248,9 @@ fn export_members(
     root: &Path,
     home: &Path,
     target: &Path,
-    format: crate::export::Format,
+    options: &crate::export::Options,
     saved: &CombinationPreset,
     selection: Option<&[usize]>,
-    materials: &std::sync::Arc<crate::print_plate::MaterialLibrary>,
 ) -> Result<PathBuf, String> {
     if selection.is_some_and(|ids| ids.is_empty() || ids.iter().any(|&i| i >= saved.members.len()))
     {
@@ -1277,41 +1277,61 @@ fn export_members(
         .prefix(".vault-combination-")
         .tempdir_in(parent)
         .map_err(|e| e.to_string())?;
-    for (index, job) in jobs {
-        let p = &job.preset;
-        let base = format!(
-            "{:02}-{}{}-{}",
-            index + 1,
-            p.selection.width,
-            p.selection.depth,
-            p.selection.height
-        );
-        let name = if saved.members[index].preset.drawers.is_empty() {
-            base
-        } else {
-            let number = job.drawer.map_or(1, |i| i + 2);
-            format!("{base}-{number:02}")
-        };
-        let destination = staging
-            .path()
-            .join(if format == crate::export::Format::ThreeMf {
-                format!("{name}.3mf")
+    if options.format == crate::export::Format::ThreeMf
+        && options.planning == crate::export::Planning::Combined
+    {
+        let batches = print_list::batch_jobs(jobs, options.planning, &saved.project_name);
+        for (index, batch) in batches.into_iter().enumerate() {
+            let batch = batch.prepare(root, home, None)?;
+            let destination = staging
+                .path()
+                .join(format!("VAULT-Combined-{:02}.3mf", index + 1));
+            crate::export::export_prepared(
+                root,
+                &destination,
+                &batch.items,
+                batch.plan,
+                &batch.config,
+                &options.material_library,
+            )?;
+        }
+    } else {
+        for (index, job) in jobs {
+            let p = &job.preset;
+            let base = format!(
+                "{:02}-{}{}-{}",
+                index + 1,
+                p.selection.width,
+                p.selection.depth,
+                p.selection.height
+            );
+            let name = if saved.members[index].preset.drawers.is_empty() {
+                base
             } else {
-                name
-            });
-        crate::export::run_configured(
-            root,
-            &job.items,
-            &destination,
-            &crate::export::Options {
-                format,
-                plate: p.print_config.clone().unwrap_or_default(),
-                material_library: materials.clone(),
-            },
-            &p.label,
-            Some((home, &p.gridfinity, &p.selection)),
-        )
-        .map_err(|e| format!("{}: {e}", job.name))?;
+                let number = job.drawer.map_or(1, |i| i + 2);
+                format!("{base}-{number:02}")
+            };
+            let destination =
+                staging
+                    .path()
+                    .join(if options.format == crate::export::Format::ThreeMf {
+                        format!("{name}.3mf")
+                    } else {
+                        name
+                    });
+            crate::export::run_configured(
+                root,
+                &job.items,
+                &destination,
+                &crate::export::Options {
+                    plate: p.print_config.clone().unwrap_or_default(),
+                    ..options.clone()
+                },
+                &p.label,
+                Some((home, &p.gridfinity, &p.selection)),
+            )
+            .map_err(|e| format!("{}: {e}", job.name))?;
+        }
     }
     let manifest: Vec<_> = saved.members.iter().enumerate().filter(|(i,_)|included(*i)).map(|(i,m)|
         serde_json::json!({"member_index":i+1,"name":m.name,"specification":format!("{}{}-{}",m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height)})
@@ -1345,6 +1365,7 @@ fn export_members(
 
 impl App {
     pub(super) fn setup_combination_smoke(&mut self, plate_preview: bool) {
+        self.export_options.planning = Default::default();
         let base = self.member_snapshot();
         self.members.clear();
         for i in 0..3 {
@@ -2244,16 +2265,11 @@ mod tests {
             combination_gap: 0.,
         };
         let target = temp.path().join("export");
-        export_members(
-            &library,
-            &home,
-            &target,
-            crate::export::Format::Stl,
-            &saved,
-            None,
-            &Default::default(),
-        )
-        .unwrap();
+        let stl_options = crate::export::Options {
+            format: crate::export::Format::Stl,
+            ..Default::default()
+        };
+        export_members(&library, &home, &target, &stl_options, &saved, None).unwrap();
         assert_eq!(
             std::fs::read_dir(target.join("01-S3-1F")).unwrap().count(),
             2
@@ -2264,16 +2280,7 @@ mod tests {
         );
         assert!(target.join("combination.toml").is_file());
         let subset = temp.path().join("selected-export");
-        export_members(
-            &library,
-            &home,
-            &subset,
-            crate::export::Format::Stl,
-            &saved,
-            Some(&[1]),
-            &Default::default(),
-        )
-        .unwrap();
+        export_members(&library, &home, &subset, &stl_options, &saved, Some(&[1])).unwrap();
         assert!(!subset.join("01-S3-1F").exists());
         assert_eq!(
             std::fs::read_dir(subset.join("02-S3-1F")).unwrap().count(),
@@ -2289,10 +2296,9 @@ mod tests {
                 &library,
                 &home,
                 &temp.path().join("empty"),
-                crate::export::Format::Stl,
+                &stl_options,
                 &saved,
                 Some(&[]),
-                &Default::default(),
             )
             .is_err()
         );
@@ -2305,13 +2311,70 @@ mod tests {
                 &library,
                 &home,
                 &library.join("bad"),
-                crate::export::Format::Stl,
+                &stl_options,
                 &saved,
                 None,
-                &Default::default(),
             )
             .is_err()
         );
         assert!(!library.join("bad").exists());
+
+        let options = crate::export::Options {
+            planning: crate::export::Planning::Combined,
+            ..Default::default()
+        };
+        let catalog = Catalog::scan(library.clone()).unwrap();
+        let jobs = print_list::checked_jobs(saved.members.iter().enumerate(), &catalog).unwrap();
+        let mut batches = print_list::batch_jobs(jobs, options.planning, &saved.project_name);
+        assert_eq!(batches.len(), 1);
+        let batch = batches
+            .pop()
+            .unwrap()
+            .prepare(&library, &home, None)
+            .unwrap();
+        let mut preview = crate::scene::layouts::PrintLayout::default();
+        preview.append(
+            &batch.name,
+            &batch.items,
+            &batch.owners,
+            batch.plan,
+            &batch.config,
+        );
+        assert_eq!(preview.plates.len(), 1);
+        assert_eq!(preview.plates[0].copies, 5);
+        assert_eq!(
+            preview
+                .parts
+                .iter()
+                .flatten()
+                .map(|p| p.member)
+                .collect::<Vec<_>>(),
+            [0, 0, 1, 1, 1]
+        );
+
+        let combined = temp.path().join("combined");
+        export_members(&library, &home, &combined, &options, &saved, None).unwrap();
+        let file = std::fs::File::open(combined.join("VAULT-Combined-01.3mf")).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut model = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("Metadata/model_settings.config").unwrap(),
+            &mut model,
+        )
+        .unwrap();
+        assert_eq!(model.matches("<plate>").count(), 1);
+        assert_eq!(model.matches("<model_instance>").count(), 5);
+        assert!(!combined.join("VAULT-Combined-02.3mf").exists());
+
+        let mut mixed = saved;
+        mixed.members[1]
+            .preset
+            .print_config
+            .get_or_insert_with(Default::default)
+            .textured = false;
+        let mixed_out = temp.path().join("mixed");
+        export_members(&library, &home, &mixed_out, &options, &mixed, None).unwrap();
+        assert!(mixed_out.join("VAULT-Combined-01.3mf").is_file());
+        assert!(mixed_out.join("VAULT-Combined-02.3mf").is_file());
     }
 }

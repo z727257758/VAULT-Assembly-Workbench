@@ -170,9 +170,9 @@ pub struct PrintLayout {
 impl PrintLayout {
     pub fn append(
         &mut self,
-        member: usize,
         name: &str,
         inputs: &[crate::catalog::Bom],
+        owners: &[super::Target],
         plan: crate::export::PreparedPrint,
         config: &crate::print_plate::Config,
     ) {
@@ -207,6 +207,7 @@ impl PrintLayout {
             });
         }
         for placement in &plan.placements {
+            let owner = owners[placement.input];
             let down = plan.face_down[placement.input];
             let q = Quat::from_rotation_y(if placement.rotated {
                 std::f32::consts::FRAC_PI_2
@@ -229,7 +230,7 @@ impl PrintLayout {
                     mesh: mesh.clone(),
                     pose: Pose {
                         path: inputs[placement.input].path.clone(),
-                        instance: member as u32 * MEMBER_STRIDE + placement.copy,
+                        instance: owner.instance(placement.copy),
                         body: None,
                         position: position.to_array(),
                         rotation: [rx.to_degrees(), ry.to_degrees(), rz.to_degrees()],
@@ -242,8 +243,8 @@ impl PrintLayout {
                     source_bodies: 1,
                 });
                 self.parts.push(Some(PrintPart {
-                    drawer: None,
-                    member,
+                    drawer: owner.drawer,
+                    member: owner.member,
                     plate: base + placement.plate,
                     path: inputs[placement.input].path.clone(),
                     copy: placement.copy,
