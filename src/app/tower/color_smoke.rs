@@ -553,11 +553,15 @@ impl App {
                         [0xFF, 0x5B, 0x00],
                         [0x53, 0x56, 0x5A],
                         [0x11, 0x11, 0x11],
-                        [0xA5, 0xAC, 0xAF],
-                        [0x11, 0x11, 0x11],
+                        [0xFF, 0xFC, 0xF7],
+                        [0xFF, 0xFC, 0xF7],
                     ];
                     if self.global_colors.palette != expected
                         || self.global_colors.materials != [FilamentMaterial::PetgBasic; 6]
+                        || self.global_colors.role_slot("accessory") != 3
+                        || self.global_colors.role_slot("divider") != 3
+                        || self.global_colors.role_slot("gridfinity") != 1
+                        || self.global_colors.role_slot(crate::print_plate::TEXT_ROLE) != 4
                         || !self.global_colors.text_color_enabled()
                     {
                         return Err(

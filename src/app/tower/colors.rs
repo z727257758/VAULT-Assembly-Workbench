@@ -9,33 +9,43 @@ use std::collections::BTreeSet;
 const TEXT_COLOR_ZH: &str = "字体颜色";
 const TEXT_COLOR_EN: &str = "Text color";
 
-// Body, functional parts, accessories, dividers, Gridfinity bins, then text.
-const BUILTIN_PRESETS: [(&str, &str, [u32; 6]); 4] = [
+// Palette order: body and bins, functional parts, accessories and dividers, text.
+const BUILTIN_PRESETS: [(&str, &str, [u32; 4]); 4] = [
     (
         "经典工业灰橙",
         "Classic industrial gray and orange",
-        [0xA5ACAF, 0xFF5B00, 0x53565A, 0x111111, 0x97999B, 0xFFFFFF],
+        [0xA5ACAF, 0xFF5B00, 0x53565A, 0xFFFFFF],
     ),
     (
         "战术军绿",
         "Tactical army green",
-        [0x213123, 0xFFEDAE, 0x3A4B30, 0x111111, 0x556B2F, 0xFFFCF7],
+        [0x213123, 0xFFEDAE, 0x3A4B30, 0xFFFCF7],
     ),
     (
         "未来蓝青",
         "Futuristic blue and cyan",
-        [0x5B6770, 0x2AD2C9, 0x97999B, 0x111111, 0xA5ACAF, 0xFFFFFF],
+        [0x5B6770, 0x2AD2C9, 0x111111, 0xFFFFFF],
     ),
     (
         "奶白橙黑",
         "Milky white, orange and black",
-        [0xFFFCF7, 0xFF5B00, 0x53565A, 0x111111, 0xA5ACAF, 0x111111],
+        [0xFFFCF7, 0xFF5B00, 0x53565A, 0x111111],
     ),
 ];
 
-fn builtin_theme(colors: [u32; 6]) -> ColorTheme {
+fn builtin_theme(colors: [u32; 4]) -> ColorTheme {
     let mut theme = ColorTheme::default();
-    theme.palette = colors.map(|rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    let palette = colors.map(|rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    theme.palette.fill(palette[0]);
+    theme.palette[..palette.len()].copy_from_slice(&palette);
+    let roles = catalog_colors::ROLES
+        .map(|(role, _, _)| role)
+        .into_iter()
+        .chain([crate::print_plate::TEXT_ROLE]);
+    theme.roles = roles
+        .zip([1, 2, 3, 3, 1, 4])
+        .map(|(role, slot)| (role.into(), slot))
+        .collect();
     theme
 }
 
@@ -365,7 +375,7 @@ fn presets_ui(app: &mut App, ui: &mut egui::Ui) -> bool {
                             let clicked = ui
                                 .selectable_label(theme == app.global_colors, t(z, zh, en))
                                 .clicked();
-                            layers::palette(ui, &theme.palette, theme.palette.len());
+                            layers::palette(ui, &theme.palette, colors.len());
                             clicked
                         })
                         .inner;
@@ -920,6 +930,23 @@ mod tests {
             .into_iter()
             .chain([Group::Text]);
         let themes = BUILTIN_PRESETS.map(|(_, _, colors)| builtin_theme(colors));
+        for theme in &themes {
+            let mut config = crate::print_plate::Config::default();
+            theme.apply(&mut config);
+            assert_eq!(theme.role_slot("body"), theme.role_slot("gridfinity"));
+            assert_eq!(theme.role_slot("accessory"), theme.role_slot("divider"));
+            assert!(
+                config
+                    .role_filaments
+                    .values()
+                    .all(|slot| (1..=4).contains(slot))
+            );
+            assert_eq!(theme.palette.into_iter().collect::<BTreeSet<_>>().len(), 4);
+            assert_ne!(
+                config.slot(crate::label::PATH),
+                config.text_slot(crate::label::PATH)
+            );
+        }
         for theme in themes.into_iter().chain([library.default_theme()]) {
             theme.validate().unwrap();
             for group in groups.clone() {

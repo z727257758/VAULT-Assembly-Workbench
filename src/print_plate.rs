@@ -9,7 +9,7 @@ pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 // The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
 pub(crate) const MAX_PROJECT_SLOTS: u32 = 32;
 pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
-const TEXT_ROLE: &str = "text";
+pub(crate) const TEXT_ROLE: &str = "text";
 const DEFAULT_TEXT_SLOT: u32 = 6;
 fn generated_color_type(path: &str) -> Option<(&'static str, u32)> {
     let file = path
