@@ -6,8 +6,7 @@
 
 面向 **USSA Design VAULT 模块化收纳系统的非官方辅助工具**。本项目只是为了让已获取原模型的用户更方便地查找零件、配置抽屉、预览装配和准备打印文件；不提供或替代原设计模型包。
 
-独立的 Windows 桌面程序，使用 Rust + eframe/egui + wgpu。
-没有 WebView、HTML 前端或本地 HTTP 服务。
+独立的 Windows 桌面程序，使用 Rust、eframe/egui 和 wgpu。当前版本为 0.1.35。
 
 ## 原设计来源与版权声明
 
@@ -30,11 +29,11 @@ Gridfinity 相关生成代码采用 [Gridfinity Rebuilt](https://github.com/kenn
 ## 运行
 
 1. 通过原作者渠道获取 VAULT 模型包，解压到本仓库之外，保留原目录结构。
-2. 双击 `启动VAULT装配工作台.cmd`。有本地构建产物时直接启动；否则通过 Cargo 编译运行，需要 Rust 工具链和 Windows C++ 构建工具。
+2. 双击 `启动VAULT装配工作台.cmd`。启动脚本优先使用 `target/portable-paths/release/` 下最新的可用程序，否则通过 Cargo 编译运行。从源码运行需要 Rust 1.88 或更高版本及 Windows C++ 构建工具。也可在仓库根目录执行 `cargo run --locked`。
 3. 点击“打开模型库”，选择包含 `01. DRAWERS` 等文件夹的根目录。首次启动需手动选择模型库，成功打开后记录到本地 `state/settings.toml`，下次启动自动恢复。打开目录对话框也会定位到上次目录；目录失效时提示重新选择，并优先定位到仍存在的上级目录。取消选择或打开失败不会覆盖上次成功记录。仓库默认配置不包含模型库路径。
 4. 配置抽屉、内部收纳和打印清单，检查预览后导出。
 
-STL 采用流式读取，不再按 250 MB 文件大小拒绝正常模型；单文件最多 800 万三角形、场景最多 1600 万份唯一网格三角形。大网格按整三角形分块上传显卡，不简化或缩放源几何。XL3 Module 1F（约 337 MB）已纳入读取与原生渲染回归；XL 分体抽屉的整体安装面校准限制仍单独提示。
+STL 采用流式读取。大网格按整三角形分块上传显卡，保留源几何。XL3 Module 1F（约 337 MB）已纳入读取与原生渲染回归。三角面预算见下方的[范围与限制](#范围与限制)。
 
 普通 STL 的查找、预览和导出不需要 OpenSCAD。生成 Gridfinity 盒子需要 OpenSCAD，将便携版放入下述相对目录即可自动找到。
 
@@ -98,8 +97,9 @@ STL 采用流式读取，不再按 250 MB 文件大小拒绝正常模型；单�
 预览工具栏提供“整体 / 爆炸 / 分层 / 打印板平铺”四种模式，并保留“编辑标牌”入口。支持标准视角、尺寸三视图和外壳透明；三视图显示选中零件，未选中时显示第一个零件，尺寸假定源 STL 单位为 mm。
 
 - **整体**保留组合的装配位置。切到**爆炸**时直接完全展开，按层和并排关系拉开各成员，再沿各自的拆装方向展示零件。点击“整体”恢复装配视图。展示间隔只用于观察。
+- 在搭建页的**爆炸**视图中，选中零件会打开详情，显示安装位置、尺寸和配色，并可聚焦该零件。可按同一源文件与实体编号选中并聚焦当前可见的同类实例。质量按当前展示网格的体积和所选耗材密度在后台估算，实际耗材用量以切片结果为准。
 - **分层**沿高度以固定层间距展开。组合按成员底部高度分层，同层的并排成员保持在一起；单成员按外壳、导轨、抽屉与前面板、底板、内部收纳及顶盖分组。分层只改变当前展示，不写入装配坐标。
-- **打印板平铺**在后台读取制造网格，与 3MF 共用最终网格、份数、分色、标牌朝向及摆盘规则。各成员按自己的打印机分盘，显示盘号、成员、份数和耗材槽。可切换全部成员 / 勾选层 / 当前成员，查看多盘或单盘，切换俯视与立体。
+- **打印板平铺**在后台读取制造网格，与 3MF 共用最终网格、份数、分色、标牌朝向及摆盘规则。可在工具栏切换“按单体”或“按整体”摆盘，以及“全部成员 / 勾选层 / 当前成员”的预览范围。可查看盘号、成员、份数和耗材槽，切换多盘或单盘视图及俯视或立体视角。
 - 板面每 10 mm 一格，每 50 mm 加粗。P1S 和 X1 Carbon 的左前角以斜线标出 18 × 28 mm 禁区。前缘显示板型，右前方显示两位盘号。点击托盘或盘中零件即可高亮该盘。
 - 平铺展示所选范围内启用的源文件，按保存的份数计算。修改文字、颜色、份数或打印设置后自动重新计算；点击零件可定位所属盘，选中标牌可直接返回编辑，Gridfinity 与 Cullenect 保留原有编辑器。
 
@@ -195,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File tools/setup-gridfinity.ps1
 
 展开“字体颜色”可选择文字耗材和颜色。旧方案沿用原有文字配色，可勾选“使用独立字体颜色”应用该组。单独设置的文字颜色优先于项目分组。
 
-在“配色预设”中可直接选择经典工业灰橙、战术军绿、未来蓝青或奶白橙黑。每套内置预设使用四种爱丽兹 PETG Basic 颜色，同色零件分组共用耗材槽。也可将当前分组、成员归属、颜色、耗材及字体配色一并命名保存。选中预设即可应用到当前项目，并可通过撤销恢复。自定义预设保存在本机的 `state/settings.toml`，可在其他项目中复用。
+在“配色预设”中可直接选择经典工业灰橙、战术军绿、未来蓝青或奶白橙黑。每套内置预设使用四种爱丽兹 PETG Basic 颜色。主体与 Gridfinity 盒子共用槽 1，功能件用槽 2，配件与分隔板共用槽 3，标牌文字用槽 4。也可将当前分组、成员归属、颜色、耗材及字体配色一并命名保存。选中预设即可应用到当前项目，并可通过撤销恢复。自定义预设保存在本机的 `state/settings.toml`，可在其他项目中复用。
 
 PETG Basic 的可选色板同时收录爱丽兹 PETG 经典纯色表的 30 个色号，按 HEX 去重后共有 35 个色样。悬停在爱丽兹色样上可查看颜色名称、耗材编码和 HEX。配色使用现有 PETG Basic 的切片参数。[爱丽兹 PETG 色号表](http://www.aliz3d.com/product/2)
 
@@ -226,7 +226,7 @@ Gridfinity 小盒与 Cullenect 可拆标牌分别按同类型共用颜色，选�
 
 ## 导出与打印
 
-选择“勾选层”时，导出这些层里已启用的文件及其份数。导出按打印朝向选项摆盘：平面分色的独立标牌可字面朝下，其余零件保留源模型打印方向。不使用显示装配位置，也不修改原始 STL。
+在打印清单勾选要导出的层，再从固定底栏打开导出。选择“勾选层”时，导出这些层中已启用的文件及所设份数。3MF 使用制造网格和打印朝向，平面分色的独立标牌可根据摆盘选项字面朝下。STL 使用默认打印朝向。两种导出均保留原始 STL 文件。
 
 | 格式 | 内容 |
 | --- | --- |
@@ -234,6 +234,8 @@ Gridfinity 小盒与 Cullenect 可拆标牌分别按同类型共用颜色，选�
 | 3MF 工程 | 包含所选机型与耗材的 0.4 mm 喷嘴预设、对象耗材槽、标签多色区域及打印盘归属。在 Bambu Studio 中作为工程打开并切片。 |
 
 ### 摆盘与多色
+
+打印板预览与 3MF 导出共用“按单体 / 按整体”选项。“按单体”将成员的打印任务分别摆盘。“按整体”允许打印机、板面、打印参数和耗材槽配置相同的任务跨成员合盘。一个 3MF 工程使用一个机型预设，混用机型时会选用所选任务中成型空间最大的机型并按需重新摆盘。
 
 新项目各组的出厂默认耗材均为 PETG Basic。卡片可选 PLA Basic、PLA Matte、PETG Basic、PETG Matte 和 PETG HF。PETG Matte 有独立色板，导出时使用 PETG Basic 打印预设。3MF 会写入每个槽的颜色、耗材标识、温度、流量及冷却等配置。原先共用耗材的两个组可独立改色，工作台会按需分配槽位。
 
@@ -271,16 +273,16 @@ Gridfinity 小盒与 Cullenect 可拆标牌分别按同类型共用颜色，选�
 - Sustainer 提供按孔轴和安装面定位的装配预览，保留源件不一致提示；改装件和其他特殊系列仍以浏览及单件预览为主。
 - “外壳透明”用于观察内部，不是精确的多层透明模拟。
 - 当前面向 Windows，尚未验证 macOS/Linux。主要界面支持中英文，PDF 使用系统阅读器。
-- 大模型可能加载较慢；单文件上限 250 MB / 800 万三角面；一次加载的不同源文件合计最多 1600 万三角面，组合显示几何也单独限制为 1600 万独立三角面。组合成员共享加载缓存，达到预算时在读取下一份网格前停止。
+- 大模型可能加载较慢。单个 STL 最多 800 万三角面。一次加载的不同源文件合计最多 1600 万三角面，组合显示几何另有 1600 万独立三角面的预算。组合成员共享加载缓存，达到读取预算时停止加载后续网格。
 
 ## 开发与调试
 
 ```powershell
-cargo run
+cargo run --locked
 cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --release
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --release --locked
 ```
 
 普通 `cargo test --locked` 运行不依赖模型库的测试；依赖外部资源的测试明确显示为 ignored，不计为通过。完整集成测试需要只读模型库、OpenSCAD，以及由摆盘调试导出的 JSON 输入夹具：
@@ -294,15 +296,15 @@ cargo build --release
 脚本显式运行所有外部测试，缺少必需资源时失败；仅排除手工诊断工具 `contact_audit::dump_contact_regions`。测试构建保留在 `target/`，生成缓存保留在 `state/`，验证文件保留在 `output/`。Gridfinity 相关测试需要配置生成器。原生界面检查使用真实窗口和 GPU，截图写入 `output/`：
 
 ```powershell
-cargo run --release -- --smoke-test
+cargo run --release --locked -- --smoke-test
 # 检查混合规格并排、堆叠、独立标签、开盖及成员编辑后的整体预览
-cargo run --release -- --smoke-test --smoke-combination
+cargo run --release --locked -- --smoke-test --smoke-combination
 # 层卡片、多抽屉、标牌、项目切换、复制与撤销
-cargo run --release -- --smoke-test --smoke-tower
+cargo run --release --locked -- --smoke-test --smoke-tower
 # 所有内置预设：分别新建项目，检查闭合与爆炸视图
 cargo run --release --locked -- --smoke-test --smoke-presets
 # 配置器界面：浅色／深色、1050×700 窄窗口、同页子抽屉编辑、目标特写、视角恢复与固定导出栏
-cargo run --release -- --smoke-test --smoke-workspace
+cargo run --release --locked -- --smoke-test --smoke-workspace
 # 内盒编辑：三维和简图拖放、落位与重叠回滚
 cargo run --release --locked -- --smoke-test --smoke-bin-editor
 
@@ -317,14 +319,18 @@ cargo run --release --locked -- --smoke-test --smoke-settings
 # 顶部整块／分体、宽深跟随、跨列定位与打印清单（output/top-configuration/）
 cargo run --release --locked -- --smoke-test --smoke-top
 # 整体、爆炸、分层、制造网格打印板、单盘俯视与标牌编辑回归
-cargo run --release -- --smoke-test --smoke-preview-modes
+cargo run --release --locked -- --smoke-test --smoke-preview-modes
+# XL3 大网格读取与 GPU 分块渲染（output/large-stl/）
+cargo run --release --locked -- --smoke-test --smoke-large-stl
+# 内置配色预设、分组与耗材槽
+cargo run --release --locked -- --smoke-test --smoke-color-groups
 # S7 两侧限位卡扣与实际孔位（安装 / 隐藏卡扣对照）
-cargo run --release -- --smoke-test --smoke-stopper
+cargo run --release --locked -- --smoke-test --smoke-stopper
 # 只运行箱子闭盖、开盖、爆炸、密封箱和分体盖的截图检查
-cargo run --release -- --smoke-test --smoke-sustainer
+cargo run --release --locked -- --smoke-test --smoke-sustainer
 # 离线核对全部 126 组箱子，写入 state 坐标和 output/sustainer-calibration/report.*
 # 使用 VAULT_MODEL_ROOT 或已选择的模型库；保留已人工确认的坐标文件
-cargo run --release -- --calibrate-sustainers
+cargo run --release --locked -- --calibrate-sustainers
 ```
 
 使用已选择的只读模型库（或 `VAULT_MODEL_ROOT`）核查全部预设的表面相交：
@@ -340,7 +346,7 @@ cargo run --release --locked -- --audit-presets --preset-id wide-l4
 装配坐标、关系编辑、爆炸方向重排和相交检查通过调试模式开启：
 
 ```powershell
-cargo run -- --debug-ui
+cargo run --locked -- --debug-ui
 ```
 
 装配确认与保存时的几何指纹绑定；模型几何改变，或旧校准文件没有几何指纹时，原位姿仍可恢复，但需要重新人工确认。非有限位姿、无效关节和循环关系会在修改场景前拒绝。
@@ -354,10 +360,11 @@ cargo run -- --debug-ui
 | `src/` | Rust 源码与 WGSL 着色器 |
 | `config/` | 首次启动配置、展示规则和打印参考配置 |
 | `vendor/gridfinity-rebuilt/` | 保留许可证的第三方 SCAD 生成源码 |
-| `tools/` | 生成器安装脚本；本地安装的 OpenSCAD 不纳入 Git |
-| `state/` | 用户设置、装配配置和生成缓存，不纳入 Git |
+| `docs/` | 装配、组合、Sustainer 和 Cullenect 的规则与验证边界 |
+| `tools/` | OpenSCAD 安装脚本和外部资源集成测试脚本 |
+| `state/` | 本机设置 `settings.toml`、本地项目 `projects.toml`、装配校准数据及生成缓存，不纳入 Git |
 | `output/` | 本地导出、截图与验证报告，不纳入 Git |
-| `target/` | Cargo 构建产物，不纳入 Git |
+| `target/portable-paths/` | 由 `.cargo/config.toml` 指定的 Cargo 构建目录，不纳入 Git |
 | `Cargo.lock` | 锁定依赖版本 |
 
 原模型库应放在工作区之外；请勿将原始模型包或含原模型的导出工程随软件发布。

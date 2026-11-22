@@ -2413,6 +2413,7 @@ mod tests {
         config.printer = crate::print_plate::Printer::A1Mini;
         config.textured = false;
         config.walls = 4;
+        config.infill = 100;
         config.set_part_slot("test.stl", 1);
         config.palette[0] = [12, 34, 56];
         let mixed_out = temp.path().join("mixed.3mf");
@@ -2422,10 +2423,23 @@ mod tests {
         assert_eq!(model.matches("<model_instance>").count(), 5);
         assert!(model.contains(r#"key="bed_type" value="High Temp Plate""#));
         assert_eq!(model.matches(r#"key="wall_loops" value="4""#).count(), 3);
+        assert_eq!(
+            model
+                .matches(r#"key="sparse_infill_density" value="100%""#)
+                .count(),
+            3
+        );
+        assert_eq!(
+            model
+                .matches(r#"key="sparse_infill_pattern" value="alignedrectilinear""#)
+                .count(),
+            3
+        );
         let settings: serde_json::Value =
             serde_json::from_str(&read_entry(&mixed_out, "Metadata/project_settings.config"))
                 .unwrap();
         assert_eq!(settings["printer_model"], "Bambu Lab P1S");
+        assert_eq!(settings["sparse_infill_pattern"], "gyroid");
         assert!(
             settings["filament_colour"]
                 .as_array()
@@ -2439,6 +2453,10 @@ mod tests {
         let model = read_entry(&subset, model_config);
         assert_eq!(model.matches("<plate>").count(), 1);
         assert_eq!(model.matches("<model_instance>").count(), 3);
+        let settings: serde_json::Value =
+            serde_json::from_str(&read_entry(&subset, "Metadata/project_settings.config")).unwrap();
+        assert_eq!(settings["sparse_infill_density"], "100%");
+        assert_eq!(settings["sparse_infill_pattern"], "alignedrectilinear");
         let manifest: serde_json::Value =
             serde_json::from_str(&read_entry(&subset, "Metadata/vault/exported-members.json"))
                 .unwrap();

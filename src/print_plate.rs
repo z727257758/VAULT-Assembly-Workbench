@@ -1,6 +1,7 @@
 //! Print-bed packing and Bambu project settings. No assembly transforms.
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
+pub(crate) mod estimate;
 mod materials;
 mod printer;
 pub use materials::{BambuPreset, FilamentMaterial, MaterialLibrary};
@@ -250,6 +251,16 @@ impl Config {
             appearance,
         );
     }
+    pub(crate) fn infill_pattern_for(&self, density: u32) -> Result<&'static str, String> {
+        if density == 100 {
+            // Bambu Studio rejects some sparse patterns, including gyroid, at 100%.
+            return Ok("alignedrectilinear");
+        }
+        self.printer.template_json()?["sparse_infill_pattern"]
+            .as_str()
+            .ok_or_else(|| "Missing embedded sparse infill pattern".into())
+    }
+
     pub fn project_json(&self) -> Result<Vec<u8>, String> {
         self.project_json_with_materials(&MaterialLibrary::default())
     }
@@ -259,8 +270,7 @@ impl Config {
         library: &MaterialLibrary,
     ) -> Result<Vec<u8>, String> {
         self.validate()?;
-        let mut d: serde_json::Value =
-            serde_json::from_str(self.printer.template()).map_err(|e| e.to_string())?;
+        let mut d = self.printer.template_json()?.clone();
         let process_parent = d["print_settings_id"].clone();
         if d["inherits_group"].is_array() {
             d["inherits_group"][0] = process_parent.clone();
@@ -269,6 +279,10 @@ impl Config {
             ("layer_height", self.layer.to_string()),
             ("wall_loops", self.walls.to_string()),
             ("sparse_infill_density", format!("{}%", self.infill)),
+            (
+                "sparse_infill_pattern",
+                self.infill_pattern_for(self.infill)?.into(),
+            ),
             ("curr_bed_type", self.bed_type().into()),
             ("print_sequence", "by layer".into()),
             ("enable_prime_tower", "0".into()),
@@ -301,10 +315,8 @@ impl Config {
         let colors: Vec<_> = (1..=count).map(|slot| self.color_hex(slot)).collect();
         d["filament_colour"] = serde_json::json!(colors);
         d["filament_multi_colour"] = serde_json::json!(colors);
-        let profiles: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, String>,
-        > = serde_json::from_str(self.printer.filament_overrides()).map_err(|e| e.to_string())?;
+        let profiles: materials::FilamentOverrides =
+            serde_json::from_str(self.printer.filament_overrides()).map_err(|e| e.to_string())?;
         for slot in 1..=count {
             let material = self.appearance(slot).material;
             let preset = library.for_export(material, self.printer, slot)?;

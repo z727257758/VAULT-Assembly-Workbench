@@ -713,6 +713,7 @@ fn write_prepared_3mf(
         ));
     }
     let project_settings = plate.project_json_with_materials(materials)?;
+    let project_infill_pattern = plate.infill_pattern_for(plate.infill)?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, content) in [
@@ -803,6 +804,7 @@ fn write_prepared_3mf(
             material_ids[p.input][0].1
         );
         let source = settings[p.input];
+        let source_infill_pattern = plate.infill_pattern_for(source.infill)?;
         for (key, value) in [
             (
                 source.layer != plate.layer,
@@ -818,6 +820,11 @@ fn write_prepared_3mf(
                 source.infill != plate.infill,
                 "sparse_infill_density",
                 format!("{}%", source.infill),
+            ),
+            (
+                source_infill_pattern != project_infill_pattern,
+                "sparse_infill_pattern",
+                source_infill_pattern.into(),
             ),
             (
                 source.brim != plate.brim,

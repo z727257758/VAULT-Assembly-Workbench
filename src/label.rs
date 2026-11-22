@@ -5,7 +5,7 @@ use manifold_rust::{
     cross_section::CrossSection,
     linalg::{Vec2 as D2, Vec3 as D3},
     manifold::Manifold,
-    types::{Error, MeshGL64},
+    types::Error,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
@@ -534,27 +534,8 @@ pub(crate) fn stroke_check_label_ui(ui: &mut eframe::egui::Ui, config: &Config, 
 }
 
 pub(crate) fn solid(mesh: &Mesh) -> Result<Manifold, String> {
-    let mut input = MeshGL64 {
-        num_prop: 3,
-        ..Default::default()
-    };
-    let mut ids = HashMap::new();
-    for v in &mesh.vertices {
-        let [x, y, z] = v.position;
-        let p = [x, -z, y];
-        let key = p.map(|v| if v == 0. { 0 } else { v.to_bits() });
-        let id = *ids.entry(key).or_insert_with(|| {
-            let id = (input.vert_properties.len() / 3) as u64;
-            input.vert_properties.extend(p.map(f64::from));
-            id
-        });
-        input.tri_verts.push(id);
-    }
-    let result = Manifold::from_mesh_gl64(&input);
-    if result.status() != Error::NoError {
-        return Err(format!("标签网格不是有效闭合实体：{:?}", result.status()));
-    }
-    Ok(result)
+    mesh.closed_solid()
+        .map_err(|error| format!("标签网格不是有效闭合实体：{error:?}"))
 }
 pub fn generate(source: &Arc<Mesh>, config: &Config) -> Result<Arc<Mesh>, String> {
     config.validate()?;

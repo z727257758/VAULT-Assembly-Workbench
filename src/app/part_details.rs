@@ -2,17 +2,29 @@ use super::*;
 use crate::{
     constraints::PartId,
     mesh::Mesh,
+    print_plate::{
+        Config,
+        estimate::{GeometrySettings, ModelVolume},
+    },
     scene::{Part, Target},
 };
 use std::sync::{Arc, Weak, mpsc};
 
-type MassKey = Vec<(Weak<Mesh>, f64)>;
+type GeometryKey = Vec<(Weak<Mesh>, GeometrySettings)>;
+type MeasuredVolumes = Vec<Option<ModelVolume>>;
+
+struct MassSource {
+    mesh: Arc<Mesh>,
+    settings: GeometrySettings,
+    infill: u32,
+    mass_factor: f64,
+}
 
 #[derive(Default)]
 pub(super) struct State {
     pub(super) matching: Option<PartId>,
-    pending: Option<(MassKey, mpsc::Receiver<Option<f64>>)>,
-    measured: Option<(MassKey, Option<f64>)>,
+    pending: Option<(GeometryKey, mpsc::Receiver<MeasuredVolumes>)>,
+    measured: Option<(GeometryKey, MeasuredVolumes)>,
 }
 
 fn matching_parts<'a>(scene: &'a Scene, part: &'a Part) -> impl Iterator<Item = &'a Part> {
@@ -24,46 +36,63 @@ fn matching_parts<'a>(scene: &'a Scene, part: &'a Part) -> impl Iterator<Item = 
 }
 
 impl State {
-    fn mass(&mut self, sources: Vec<(Arc<Mesh>, f64)>, ctx: &egui::Context) -> Option<Option<f64>> {
+    fn mass(&mut self, sources: Vec<MassSource>, ctx: &egui::Context) -> Option<Option<f64>> {
         if let Some((key, receiver)) = &self.pending {
-            let result = match receiver.try_recv() {
-                Ok(mass) => Some(mass),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(None),
-            };
-            if let Some(result) = result {
-                self.measured = Some((key.clone(), result));
-                self.pending = None;
+            match receiver.try_recv() {
+                Ok(volumes) => {
+                    self.measured = Some((key.clone(), volumes));
+                    self.pending = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.measured = Some((key.clone(), vec![None; key.len()]));
+                    self.pending = None;
+                }
             }
         }
-        let key: MassKey = sources
+        let key: GeometryKey = sources
             .iter()
-            .map(|(mesh, density)| (Arc::downgrade(mesh), *density))
+            .map(|source| (Arc::downgrade(&source.mesh), source.settings))
             .collect();
-        if let Some((cached, mass)) = &self.measured
+        if let Some((cached, volumes)) = &self.measured
             && cached.len() == key.len()
             && cached
                 .iter()
                 .zip(&key)
-                .all(|((a, ad), (b, bd))| a.ptr_eq(b) && ad == bd)
+                .all(|((a, settings_a), (b, settings_b))| a.ptr_eq(b) && settings_a == settings_b)
         {
-            return Some(*mass);
+            return Some(
+                sources
+                    .iter()
+                    .zip(volumes)
+                    .map(|(source, volume)| {
+                        volume.map(|v| v.mass_g(source.infill, source.mass_factor))
+                    })
+                    .sum(),
+            );
         }
         if self.pending.is_none() {
             let ctx = ctx.clone();
             let (sender, receiver) = mpsc::channel();
             std::thread::spawn(move || {
-                let mut volumes = std::collections::HashMap::new();
-                let mass = sources
+                let mut volumes = Vec::new();
+                let measured = sources
                     .iter()
-                    .map(|(mesh, density)| {
-                        volumes
-                            .entry(Arc::as_ptr(mesh))
-                            .or_insert_with(|| mesh.volume_mm3())
-                            .map(|volume| volume * density / 1000.)
+                    .map(|source| {
+                        let mesh = Arc::as_ptr(&source.mesh);
+                        let settings = source.settings;
+                        if let Some((_, _, volume)) = volumes
+                            .iter()
+                            .find(|(cached, profile, _)| *cached == mesh && *profile == settings)
+                        {
+                            return *volume;
+                        }
+                        let volume = settings.measure(&source.mesh);
+                        volumes.push((mesh, settings, volume));
+                        volume
                     })
-                    .sum::<Option<f64>>();
-                let _ = sender.send(mass);
+                    .collect();
+                let _ = sender.send(measured);
                 ctx.request_repaint();
             });
             self.pending = Some((key, receiver));
@@ -134,10 +163,9 @@ impl App {
             && self.preview_modes.mode == preview_modes::Mode::Exploded
     }
 
-    fn part_appearance(&self, part: &Part) -> crate::print_plate::GroupAppearance {
+    fn part_print_config(&self, part: &Part) -> &Config {
         let target = Target::of(part);
-        let config = self
-            .members
+        self.members
             .get(target.member)
             .filter(|_| self.scene_key == "combination")
             .and_then(|member| {
@@ -148,8 +176,7 @@ impl App {
                     .print_config
                     .as_ref()
             })
-            .unwrap_or(&self.export_options.plate);
-        config.appearance(config.slot(&part.pose.path))
+            .unwrap_or(&self.export_options.plate)
     }
 
     pub(super) fn part_selection_tools(&mut self, ui: &mut egui::Ui, summary: bool) {
@@ -260,7 +287,8 @@ impl App {
                 location
             },
         );
-        let appearance = self.part_appearance(part);
+        let config = self.part_print_config(part);
+        let appearance = config.appearance(config.slot(&path));
         let material = self.material_library.name(appearance.material).to_owned();
         let color = tower::colors::part_color_label(appearance, z);
         let [r, g, b] = appearance.rgb;
@@ -268,15 +296,26 @@ impl App {
         let sources: Option<Vec<_>> = self
             .preview_selected_parts()
             .map(|part| {
-                let appearance = self.part_appearance(part);
-                self.material_library
-                    .density(appearance.material)
-                    .map(|density| (Arc::clone(&part.mesh), density))
+                let config = self.part_print_config(part);
+                let slot = config.slot(&part.pose.path);
+                let appearance = config.appearance(slot);
+                Some(MassSource {
+                    mesh: Arc::clone(&part.mesh),
+                    settings: config.into(),
+                    infill: config.infill,
+                    mass_factor: self.material_library.mass_factor(
+                        appearance.material,
+                        config.printer,
+                        slot,
+                    )?,
+                })
             })
             .collect();
         let mass = match sources {
             Some(sources) => match self.part_details.mass(sources, ctx) {
                 None => t(z, "计算中…", "Calculating…").into(),
+                Some(Some(mass)) if mass < 0.01 => "< 0.01 g".into(),
+                Some(Some(mass)) if mass < 1. => format!("≈ {mass:.2} g"),
                 Some(Some(mass)) => format!("≈ {mass:.1} g"),
                 Some(None) => "—".into(),
             },
@@ -375,14 +414,14 @@ impl App {
                             row(ui, t(z, "耗材", "Filament"), &format!("{material} · {color}"));
                         }
                         let weight_label = if matching {
-                            t(z, "合计估重", "Total solid weight")
+                            t(z, "合计估重", "Total est. mass")
                         } else {
-                            t(z, "实体估重", "Solid weight")
+                            t(z, "模型估重", "Est. model mass")
                         };
                         row(ui, weight_label, &mass).on_hover_text(t(
                             z,
-                            "按当前网格体积和所选耗材密度估算，未计入切片的填充、支撑和耗材损耗。",
-                            "Estimated from the displayed mesh volume and filament density, before slicing.",
+                            "按展示网格的截面、壁数、顶底实心层、填充密度、耗材密度和流量比估算。实际切片用量以 Bambu Studio 为准。",
+                            "Estimated from display-mesh sections, wall loops, solid shells, infill, filament density and flow ratio. See Bambu Studio for sliced filament usage.",
                         ));
                         if !matching {
                             ui.add_space(9.);

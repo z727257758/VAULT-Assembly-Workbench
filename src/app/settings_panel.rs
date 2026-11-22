@@ -200,7 +200,10 @@ impl App {
                                         }
                                         ui.small(t(zh, "参数应用于当前成员的 3MF 和打印板预览。", "Parameters apply to the current member’s 3MF and plate preview."));
                                         ui.add_enabled_ui(self.export_rx.is_none(), |ui| {
-                                            print_parameters_ui(ui, &mut self.export_options.plate, zh);
+                                            let infill = print_parameters_ui(ui, &mut self.export_options.plate, zh);
+                                            if self.smoke && self.smoke_stage == 2 {
+                                                infill.scroll_to_me_animation(Some(egui::Align::Center), egui::style::ScrollAnimation::none());
+                                            }
                                         });
                                     }
                                     Page::Export => {
@@ -412,7 +415,11 @@ impl App {
     }
 }
 
-fn print_parameters_ui(ui: &mut egui::Ui, p: &mut crate::print_plate::Config, zh: bool) {
+fn print_parameters_ui(
+    ui: &mut egui::Ui,
+    p: &mut crate::print_plate::Config,
+    zh: bool,
+) -> egui::Response {
     ui.strong(t(zh, "摆盘", "Plate layout"));
     ui.horizontal(|ui| {
         ui.label(t(zh, "打印板", "Plate"));
@@ -468,7 +475,26 @@ fn print_parameters_ui(ui: &mut egui::Ui, p: &mut crate::print_plate::Config, zh
             .text(t(zh, "层高 mm", "Layer height mm")),
     );
     ui.add(egui::Slider::new(&mut p.walls, 1..=10).text(t(zh, "壁数", "Wall loops")));
-    ui.add(egui::Slider::new(&mut p.infill, 0..=100).text(t(zh, "螺旋填充 %", "Gyroid infill %")));
+    let infill = ui.horizontal(|ui| {
+        ui.label(t(zh, "稀疏填充密度", "Sparse infill density"));
+        ui.add(
+            egui::DragValue::new(&mut p.infill)
+                .range(0..=100)
+                .suffix("%"),
+        )
+        .on_hover_text(t(
+            zh,
+            "输入 0–100% 的自定义比例",
+            "Enter a custom percentage from 0 to 100",
+        ));
+        egui::ComboBox::from_id_salt("sparse-infill-presets")
+            .selected_text(t(zh, "常用比例", "Presets"))
+            .show_ui(ui, |ui| {
+                for percent in [0, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100] {
+                    ui.selectable_value(&mut p.infill, percent, format!("{percent}%"));
+                }
+            });
+    });
     ui.checkbox(
         &mut p.support_by_name,
         t(
@@ -490,4 +516,5 @@ fn print_parameters_ui(ui: &mut egui::Ui, p: &mut crate::print_plate::Config, zh
         "为识别到的标准 S/M/L 模块卡扣写入强制支撑涂绘。",
         "Paint manual tree supports under recognized standard S/M/L module clips.",
     ));
+    infill.response
 }

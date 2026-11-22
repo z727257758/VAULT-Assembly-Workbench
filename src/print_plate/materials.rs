@@ -10,6 +10,20 @@ use std::{
 
 mod bambu;
 
+pub(super) type FilamentOverrides = BTreeMap<String, BTreeMap<String, String>>;
+
+static ESTIMATE_PROFILES: LazyLock<std::collections::HashMap<super::Printer, FilamentOverrides>> =
+    LazyLock::new(|| {
+        super::Printer::ALL
+            .into_iter()
+            .map(|printer| {
+                let overrides = serde_json::from_str(printer.filament_overrides())
+                    .expect("embedded filament overrides");
+                (printer, overrides)
+            })
+            .collect()
+    });
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FilamentMaterial {
     PlaBasic,
@@ -326,22 +340,28 @@ impl MaterialLibrary {
         }
     }
 
-    pub(crate) fn density(&self, material: FilamentMaterial) -> Option<f64> {
-        let preset = self.preset(material);
-        if let Some(density) = preset.and_then(|p| p.options.get("filament_density")) {
-            return density
+    pub(crate) fn mass_factor(
+        &self,
+        material: FilamentMaterial,
+        printer: super::Printer,
+        slot: u32,
+    ) -> Option<f64> {
+        let preset = self.for_export(material, printer, slot).ok()?;
+        let base = preset.map_or(material, |p| p.base);
+        let template = printer.template_json().ok()?;
+        let profile = ESTIMATE_PROFILES[&printer].get(base.name());
+        let number = |key| {
+            let value = preset
+                .and_then(|p| p.options.get(key))
+                .or_else(|| profile.and_then(|p| p.get(key)))
+                .map(String::as_str)
+                .or_else(|| template[key][0].as_str())?;
+            value
                 .parse::<f64>()
                 .ok()
-                .filter(|v| v.is_finite() && *v > 0.);
-        }
-        // Densities in the bundled printer templates and filament overrides.
-        match preset.map_or(material, |p| p.base) {
-            FilamentMaterial::PlaBasic => Some(1.26),
-            FilamentMaterial::PlaMatte => Some(1.32),
-            FilamentMaterial::PetgBasic | FilamentMaterial::PetgMatte => Some(1.25),
-            FilamentMaterial::PetgHf => Some(1.28),
-            FilamentMaterial::Imported(_) => None,
-        }
+                .filter(|v| v.is_finite() && *v > 0.)
+        };
+        Some(number("filament_density")? * number("filament_flow_ratio")?)
     }
 
     pub fn name(&self, material: FilamentMaterial) -> &str {

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{collections::HashMap, sync::LazyLock};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Printer {
@@ -57,6 +59,17 @@ impl Printer {
             Self::A1Mini => include_str!("../../config/export/a1-mini-0.4.json"),
             Self::X1c => include_str!("../../config/export/x1c-0.4.json"),
         }
+    }
+
+    pub(super) fn template_json(self) -> Result<&'static Value, String> {
+        static PRESETS: LazyLock<HashMap<Printer, Result<Value, serde_json::Error>>> =
+            LazyLock::new(|| {
+                Printer::ALL
+                    .into_iter()
+                    .map(|printer| (printer, serde_json::from_str(printer.template())))
+                    .collect()
+            });
+        PRESETS[&self].as_ref().map_err(ToString::to_string)
     }
 
     pub(super) fn filament_overrides(self) -> &'static str {

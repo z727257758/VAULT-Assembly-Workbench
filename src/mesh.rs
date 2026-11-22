@@ -1,8 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use manifold_rust::{
+    manifold::Manifold,
+    types::{Error, MeshGL64},
+};
 #[cfg(test)]
 use std::io::Cursor;
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
     sync::Arc,
@@ -25,27 +30,28 @@ pub struct Mesh {
     pub max: Vec3,
 }
 impl Mesh {
-    pub(crate) fn volume_mm3(&self) -> Option<f64> {
-        let origin = ((self.min + self.max) * 0.5).as_dvec3();
-        let mut signed_volume = 0.;
-        let mut surface = glam::DVec3::ZERO;
-        let mut total_area = 0.;
-        for triangle in self.vertices.chunks_exact(3) {
-            let [a, b, c] =
-                std::array::from_fn(|i| Vec3::from(triangle[i].position).as_dvec3() - origin);
-            let normal = (b - a).cross(c - a);
-            signed_volume += a.dot(normal);
-            surface += normal;
-            total_area += normal.length();
+    pub(crate) fn closed_solid(&self) -> Result<Manifold, Error> {
+        let mut input = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
+        let mut ids = HashMap::new();
+        for v in &self.vertices {
+            let [x, y, z] = v.position;
+            let p = [x, -z, y];
+            let key = p.map(|v| if v == 0. { 0 } else { v.to_bits() });
+            let id = *ids.entry(key).or_insert_with(|| {
+                let id = (input.vert_properties.len() / 3) as u64;
+                input.vert_properties.extend(p.map(f64::from));
+                id
+            });
+            input.tri_verts.push(id);
         }
-        let volume = signed_volume.abs() / 6.;
-        let extent = (self.max - self.min).as_dvec3();
-        let bounds_volume = extent.x * extent.y * extent.z;
-        (volume.is_finite()
-            && volume > 0.
-            && volume <= bounds_volume * 1.001
-            && surface.length() <= total_area * 0.001)
-            .then_some(volume)
+        let result = Manifold::from_mesh_gl64(&input);
+        if result.status() != Error::NoError {
+            return Err(result.status());
+        }
+        Ok(result)
     }
 
     /// Expand a print-space solid into display-space triangles without recentering it.
