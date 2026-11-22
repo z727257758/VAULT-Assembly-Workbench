@@ -14,7 +14,7 @@ fn ghost_shell(path: &str) -> bool {
                 || path.rsplit('/').next().is_some_and(|n| n.contains(" Roof")))
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,

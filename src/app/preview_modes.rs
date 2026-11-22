@@ -4,6 +4,33 @@ use glam::Vec3;
 
 const LAYER_GAP: f32 = 80.;
 const DEFAULT_PLATE_PITCH: f32 = 1.20;
+const FOCUS_DURATION: f32 = 0.36;
+
+struct CameraFocus {
+    started: Instant,
+    from: Camera,
+    target: Camera,
+    last: Camera,
+    selected: Option<usize>,
+}
+
+impl CameraFocus {
+    fn frame(&self, elapsed: f32) -> Camera {
+        if elapsed >= FOCUS_DURATION {
+            return self.target.clone();
+        }
+        let t = (elapsed / FOCUS_DURATION).clamp(0., 1.);
+        let eased = t * t * (3. - 2. * t);
+        let zoom = |from: f32, to: f32| from * (to / from).powf(eased);
+        Camera {
+            center: self.from.center.lerp(self.target.center, eased),
+            radius: zoom(self.from.radius, self.target.radius),
+            zoom: zoom(self.from.zoom, self.target.zoom),
+            pan: std::array::from_fn(|i| egui::lerp(self.from.pan[i]..=self.target.pan[i], eased)),
+            ..self.from.clone()
+        }
+    }
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -37,8 +64,17 @@ pub(super) struct State {
     filter: Option<usize>,
     active_plate: usize,
     scope: u8,
+    focus: Option<CameraFocus>,
 }
 impl State {
+    pub(super) fn focus_active(&self) -> bool {
+        self.focus.is_some()
+    }
+
+    pub(super) fn cancel_focus(&mut self) {
+        self.focus = None;
+    }
+
     pub fn special(&self) -> bool {
         matches!(self.mode, Mode::Layers | Mode::Plates)
     }
@@ -212,6 +248,7 @@ impl App {
         restored_camera
     }
     pub(super) fn preview_mode_fit(&mut self) {
+        self.preview_modes.cancel_focus();
         match self.preview_modes.mode {
             Mode::Layers => {
                 let names: Vec<_> = self.members.iter().map(|m| m.name.clone()).collect();
@@ -226,17 +263,45 @@ impl App {
             _ => self.camera.fit(&self.scene, self.explosion),
         }
     }
-    pub(super) fn focus_preview_part(&mut self) {
+    pub(super) fn focus_preview_part(&mut self, ctx: &egui::Context) {
         let parts: Vec<_> = self.preview_selected_parts().cloned().collect();
         if !parts.is_empty() {
-            self.camera.fit(
+            let mut target = self.camera.clone();
+            target.fit(
                 &Scene {
                     parts,
                     ..Default::default()
                 },
                 self.explosion,
             );
-            self.camera.zoom = 0.85;
+            target.zoom = 0.85;
+            self.preview_modes.focus = (self.camera != target).then(|| CameraFocus {
+                started: Instant::now(),
+                from: self.camera.clone(),
+                target,
+                last: self.camera.clone(),
+                selected: self.selected,
+            });
+            ctx.request_repaint();
+        }
+    }
+
+    pub(super) fn update_preview_focus(&mut self, ctx: &egui::Context) {
+        let Some(mut focus) = self.preview_modes.focus.take() else {
+            return;
+        };
+        if self.camera != focus.last
+            || self.selected != focus.selected
+            || !self.part_details_visible()
+        {
+            return;
+        }
+        let elapsed = focus.started.elapsed().as_secs_f32();
+        self.camera = focus.frame(elapsed);
+        if elapsed < FOCUS_DURATION {
+            focus.last = self.camera.clone();
+            self.preview_modes.focus = Some(focus);
+            ctx.request_repaint();
         }
     }
 
@@ -271,6 +336,7 @@ impl App {
         let z = self.zh;
         if !self.scene.assembly {
             self.preview_modes.mode = Mode::Assembly;
+            self.preview_modes.cancel_focus();
             return false;
         }
         // Existing per-member and smoke camera states remain the source for these two modes.
@@ -321,6 +387,7 @@ impl App {
             });
         if before != self.preview_modes.mode {
             self.dimensions = false;
+            self.preview_modes.cancel_focus();
             self.part_details.matching = None;
             self.combination_move_source = None;
             match self.preview_modes.mode {
@@ -1316,6 +1383,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_interpolates_the_view_then_reaches_the_exact_framing() {
+        let from = Camera {
+            zoom: 2.,
+            pan: [0.5, -0.25],
+            ..Default::default()
+        };
+        let target = Camera {
+            center: Vec3::new(30., -20., 10.),
+            radius: 10.,
+            zoom: 0.85,
+            pan: [0.; 2],
+            ..from.clone()
+        };
+        let focus = CameraFocus {
+            started: Instant::now(),
+            from: from.clone(),
+            target: target.clone(),
+            last: from.clone(),
+            selected: Some(0),
+        };
+        assert!(focus.frame(0.) == from);
+        let halfway = focus.frame(FOCUS_DURATION / 2.);
+        assert_eq!(halfway.center, target.center * 0.5);
+        assert_eq!(halfway.pan, [0.25, -0.125]);
+        assert_eq!([halfway.yaw, halfway.pitch], [from.yaw, from.pitch]);
+        let expected_extent = (from.radius / from.zoom * target.radius / target.zoom).sqrt();
+        assert!((halfway.radius / halfway.zoom - expected_extent).abs() < 0.001);
+        assert!(focus.frame(FOCUS_DURATION) == target);
+    }
 
     #[test]
     fn leaving_print_plates_releases_geometry_and_discards_late_results() {

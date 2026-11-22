@@ -2102,6 +2102,7 @@ impl App {
                         && !self.tower_regular()
                         && self.combination_viewport_actions(ctx, rect);
                     if !spatial_input && response.dragged_by(egui::PointerButton::Primary) {
+                        self.preview_modes.cancel_focus();
                         let delta = ctx.input(|i| i.pointer.delta());
                         self.camera.yaw -= delta.x * 0.008;
                         self.camera.pitch =
@@ -2111,12 +2112,17 @@ impl App {
                         && (response.dragged_by(egui::PointerButton::Secondary)
                             || response.dragged_by(egui::PointerButton::Middle))
                     {
+                        self.preview_modes.cancel_focus();
                         let d = ctx.input(|i| i.pointer.delta());
                         self.camera.pan[0] -= d.x / rect.width() * 2.;
                         self.camera.pan[1] += d.y / rect.height() * 2.;
                     }
-                    if !spatial_input && response.hovered() {
-                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                    if !spatial_input
+                        && response.hovered()
+                        && let scroll = ctx.input(|i| i.smooth_scroll_delta.y)
+                        && scroll != 0.
+                    {
+                        self.preview_modes.cancel_focus();
                         self.camera.zoom =
                             (self.camera.zoom * (scroll * 0.002).exp()).clamp(0.05, 50.);
                     }
@@ -2125,6 +2131,7 @@ impl App {
                         && response.clicked()
                         && let Some(p) = response.interact_pointer_pos()
                     {
+                        self.preview_modes.cancel_focus();
                         let (o, d) = self.camera.ray(p, rect);
                         self.last_hit = self.scene.pick(o, d, self.explosion);
                         self.part_details.matching = None;
@@ -2151,6 +2158,7 @@ impl App {
                     if !reordering && (!spatial_input || response.context_menu_opened()) {
                         self.viewport_context_menu(&response);
                     }
+                    self.update_preview_focus(ctx);
                     let dpi = ctx.pixels_per_point();
                     let id = self.renderer.render(
                         0,

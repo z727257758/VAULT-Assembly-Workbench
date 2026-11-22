@@ -441,12 +441,18 @@ impl App {
                     self.click_color_control(focus.center);
                 }
                 102 => {
+                    if self.preview_modes.focus_active() {
+                        return Ok(());
+                    }
                     let selection = Scene {
                         parts: self.preview_selected_parts().cloned().collect(),
                         ..Default::default()
                     };
                     let (center, radius) = selection.bounds(self.explosion);
-                    if self.camera.center != center || self.camera.radius != radius {
+                    if self.camera.center != center
+                        || self.camera.radius != radius
+                        || self.camera.zoom != 0.85
+                    {
                         return Err("Focus did not frame all selected guides".into());
                     }
                     if !self.capture_native_smoke(ctx, &folder.join("matching-selection.png"))? {

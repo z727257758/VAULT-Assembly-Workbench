@@ -187,9 +187,10 @@ impl App {
             })
             .clicked()
         {
-            self.focus_preview_part();
+            self.focus_preview_part(ui.ctx());
         }
         if !matching && same > 1 && ui.button(select).clicked() {
+            self.preview_modes.cancel_focus();
             self.part_details.matching = Some(id);
         }
         if self.scene_key == "combination" {
@@ -202,6 +203,7 @@ impl App {
             self.part_details.matching = None;
         }
         if !self.part_details_visible() {
+            self.preview_modes.cancel_focus();
             return;
         }
         let Some(part) = self
@@ -400,6 +402,7 @@ impl App {
                 });
             });
         if !open {
+            self.preview_modes.cancel_focus();
             self.selected = None;
             self.last_hit = None;
             self.part_details.matching = None;
