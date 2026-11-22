@@ -45,6 +45,93 @@ impl Default for Options {
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
+
+pub(crate) fn default_name(project: &str) -> Result<String, String> {
+    Ok(dated_name(project, &local_date()?))
+}
+
+#[cfg(windows)]
+fn local_date() -> Result<String, String> {
+    use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetLocalTime};
+
+    let mut date = SYSTEMTIME::default();
+    // GetLocalTime writes the current local date and time to the supplied structure.
+    unsafe { GetLocalTime(&mut date) };
+    Ok(format!(
+        "{:04}-{:02}-{:02}",
+        date.wYear, date.wMonth, date.wDay
+    ))
+}
+
+#[cfg(not(windows))]
+fn local_date() -> Result<String, String> {
+    let output = std::process::Command::new("date")
+        .arg("+%Y-%m-%d")
+        .output()
+        .map_err(err)?;
+    if !output.status.success() {
+        return Err("无法读取本地日期 / Could not read the local date".into());
+    }
+    Ok(String::from_utf8(output.stdout)
+        .map_err(err)?
+        .trim()
+        .to_owned())
+}
+
+fn dated_name(project: &str, date: &str) -> String {
+    let project = project.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    let mut name: String = project
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut end = name.len().min(200);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    if name.is_empty() {
+        name.push_str("VAULT");
+    }
+    let device = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device
+            .strip_prefix("COM")
+            .or_else(|| device.strip_prefix("LPT"))
+            .is_some_and(|number| {
+                matches!(
+                    number,
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+    {
+        name.insert(0, '_');
+    }
+    format!("{name}_{date}")
+}
+
+pub(crate) fn available_folder(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let mut target = parent.join(name);
+    let mut number = 2;
+    loop {
+        match target.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(error) => return Err(error),
+            Ok(_) => target = parent.join(format!("{name}_{number:02}")),
+        }
+        number += 1;
+    }
+}
 fn xml(s: &str) -> String {
     s.chars()
         .filter(|c| matches!(*c as u32, 9 | 10 | 13) || *c >= ' ')
@@ -271,6 +358,16 @@ fn prepare_inputs(
 }
 
 /// Shared manufacturing geometry and packing for both 3MF and the read-only plate view.
+#[derive(Clone, Copy)]
+struct ObjectSettings {
+    layer: f32,
+    walls: u32,
+    infill: u32,
+    brim: f32,
+    supports: bool,
+    bed: &'static str,
+}
+
 #[derive(Default)]
 pub(crate) struct PreparedPrint {
     pub sizes: Vec<glam::Vec3>,
@@ -281,8 +378,17 @@ pub(crate) struct PreparedPrint {
     pub local_supports: Vec<bool>,
     pub face_down: Vec<bool>,
     pub placements: Vec<crate::print_plate::Placement>,
+    settings: Vec<ObjectSettings>,
 }
 impl PreparedPrint {
+    fn plate_count(&self) -> usize {
+        self.placements
+            .iter()
+            .map(|p| p.plate + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn append_geometry(&mut self, mut job: Self) {
         let offset = self.resources.len();
         for (id, _) in job.material_ids.iter_mut().flatten() {
@@ -295,6 +401,48 @@ impl PreparedPrint {
         self.material_ids.append(&mut job.material_ids);
         self.local_supports.append(&mut job.local_supports);
         self.face_down.append(&mut job.face_down);
+        self.settings.append(&mut job.settings);
+    }
+
+    pub(crate) fn append_plates(&mut self, mut job: Self) {
+        let input_offset = self.sizes.len();
+        let plate_offset = self.plate_count();
+        for p in &mut job.placements {
+            p.plate += plate_offset;
+            p.input += input_offset;
+        }
+        self.placements.append(&mut job.placements);
+        self.append_geometry(job);
+    }
+
+    pub(crate) fn remap_filaments(
+        &mut self,
+        source: &crate::print_plate::Config,
+        project_filaments: &mut Vec<crate::print_plate::GroupAppearance>,
+    ) -> Result<(), String> {
+        let mut mapped = HashMap::new();
+        for slot in self.materials.iter_mut().flatten() {
+            let next = *mapped.entry(*slot).or_insert_with(|| {
+                let appearance = source.appearance(*slot);
+                if let Some(index) = project_filaments.iter().position(|&a| a == appearance) {
+                    index as u32 + 1
+                } else {
+                    project_filaments.push(appearance);
+                    project_filaments.len() as u32
+                }
+            });
+            *slot = next;
+        }
+        if project_filaments.len() as u32 > crate::print_plate::MAX_PROJECT_SLOTS {
+            return Err(
+                "单个 3MF 最多使用 32 个耗材槽 / A 3MF project supports up to 32 filament slots"
+                    .into(),
+            );
+        }
+        for (_, slot) in self.material_ids.iter_mut().flatten() {
+            *slot = mapped[slot];
+        }
+        Ok(())
     }
 
     pub(crate) fn pack(
@@ -461,6 +609,17 @@ fn prepare_geometry(
         material_ids,
         local_supports,
         face_down,
+        settings: vec![
+            ObjectSettings {
+                layer: plate.layer,
+                walls: plate.walls,
+                infill: plate.infill,
+                brim: plate.brim,
+                supports: plate.support_by_name,
+                bed: plate.bed_type(),
+            };
+            inputs.len()
+        ],
         ..Default::default()
     })
 }
@@ -513,7 +672,7 @@ fn write_3mf(
 ) -> Result<(), String> {
     let plan = prepare_print(inputs, label, generated, plate, gridfinity)?;
     let items: Vec<_> = inputs.iter().map(|(item, _)| item.clone()).collect();
-    write_prepared_3mf(file, &items, plan, plate, materials)
+    write_prepared_3mf(file, &items, plan, plate, materials, &[])
 }
 
 pub(crate) fn export_prepared(
@@ -523,10 +682,18 @@ pub(crate) fn export_prepared(
     plan: PreparedPrint,
     plate: &crate::print_plate::Config,
     materials: &MaterialLibrary,
+    attachments: &[(&str, Vec<u8>)],
 ) -> Result<(), String> {
     let parent = export_parent(&root.canonicalize().map_err(err)?, destination)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(err)?;
-    write_prepared_3mf(staged.as_file_mut(), items, plan, plate, materials)?;
+    write_prepared_3mf(
+        staged.as_file_mut(),
+        items,
+        plan,
+        plate,
+        materials,
+        attachments,
+    )?;
     staged.persist(destination).map_err(err)?;
     Ok(())
 }
@@ -537,14 +704,21 @@ fn write_prepared_3mf(
     plan: PreparedPrint,
     plate: &crate::print_plate::Config,
     materials: &MaterialLibrary,
+    attachments: &[(&str, Vec<u8>)],
 ) -> Result<(), String> {
+    let plate_count = plan.plate_count();
+    if plate_count > 36 {
+        return Err(format!(
+            "当前共有 {plate_count} 盘，Bambu Studio 的单个工程最多支持 36 盘。可按整体摆盘，或缩小导出范围。 / Bambu Studio supports up to 36 plates per project; this layout needs {plate_count}. Use combined planning or export fewer layers."
+        ));
+    }
     let project_settings = plate.project_json_with_materials(materials)?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, content) in [
         (
             "[Content_Types].xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/></Types>"#,
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/><Default Extension="json" ContentType="application/json"/><Default Extension="toml" ContentType="application/toml"/><Default Extension="txt" ContentType="text/plain"/></Types>"#,
         ),
         (
             "_rels/.rels",
@@ -565,6 +739,7 @@ fn write_prepared_3mf(
         local_supports,
         face_down,
         placements,
+        settings,
     } = plan;
     for (index, (mesh, origin, name, support_mask)) in resources.iter().enumerate() {
         // Weld by exact source coordinates, preserving triangle order and disconnected bodies.
@@ -609,7 +784,6 @@ fn write_prepared_3mf(
         }
         writeln!(zip, "</triangles></mesh></object>").map_err(err)?;
     }
-    let plate_count = placements.iter().map(|p| p.plate + 1).max().unwrap_or(0);
     let mut config = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><config>");
     // Each copy gets a wrapper object: Bambu's plate map stores one instance per object ID.
     for (i, p) in placements.iter().enumerate() {
@@ -628,9 +802,47 @@ fn write_prepared_3mf(
             r#"<object id="{object}"><metadata key="name" value="{name}"/><metadata key="extruder" value="{}"/>"#,
             material_ids[p.input][0].1
         );
+        let source = settings[p.input];
+        for (key, value) in [
+            (
+                source.layer != plate.layer,
+                "layer_height",
+                source.layer.to_string(),
+            ),
+            (
+                source.walls != plate.walls,
+                "wall_loops",
+                source.walls.to_string(),
+            ),
+            (
+                source.infill != plate.infill,
+                "sparse_infill_density",
+                format!("{}%", source.infill),
+            ),
+            (
+                source.brim != plate.brim,
+                "brim_width",
+                source.brim.to_string(),
+            ),
+            (
+                source.brim != plate.brim,
+                "brim_type",
+                if source.brim > 0. {
+                    "outer_only"
+                } else {
+                    "no_brim"
+                }
+                .into(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(changed, key, value)| changed.then_some((key, value)))
+        {
+            config += &format!(r#"<metadata key="{key}" value="{value}"/>"#);
+        }
         if local_supports[p.input] {
             config += r#"<metadata key="enable_support" value="1"/><metadata key="support_type" value="tree(manual)"/><metadata key="support_on_build_plate_only" value="1"/>"#;
-        } else if plate.support_by_name
+        } else if source.supports
             && inputs[p.input]
                 .path
                 .to_ascii_lowercase()
@@ -689,6 +901,10 @@ fn write_prepared_3mf(
             index + 1,
             name
         );
+        let bed = settings[item.input].bed;
+        if bed != plate.bed_type() {
+            config += &format!(r#"<metadata key="bed_type" value="{bed}"/>"#);
+        }
         for (i, _p) in placements
             .iter()
             .enumerate()
@@ -709,6 +925,11 @@ fn write_prepared_3mf(
     zip.start_file("Metadata/project_settings.config", options)
         .map_err(err)?;
     zip.write_all(&project_settings).map_err(err)?;
+    for (name, bytes) in attachments {
+        zip.start_file(format!("Metadata/vault/{name}"), options)
+            .map_err(err)?;
+        zip.write_all(bytes).map_err(err)?;
+    }
     zip.finish().map_err(err)?.flush().map_err(err)?;
     Ok(())
 }
@@ -716,6 +937,40 @@ fn write_prepared_3mf(
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn default_export_name_uses_a_safe_project_name_and_local_date() {
+        let date = "2026-11-22";
+        assert_eq!(
+            dated_name(" 工作台/抽屉柜 ", date),
+            "工作台_抽屉柜_2026-11-22"
+        );
+        assert_eq!(dated_name("CON.v2", date), "_CON.v2_2026-11-22");
+        assert_eq!(dated_name(" ... ", date), "VAULT_2026-11-22");
+        assert_eq!(
+            dated_name(&"柜".repeat(100), date),
+            format!("{}_{date}", "柜".repeat(66))
+        );
+        let name = default_name("VAULT").unwrap();
+        let date = name.strip_prefix("VAULT_").unwrap();
+        assert_eq!(date.len(), 10);
+        assert!(date.split('-').all(|part| part.parse::<u16>().is_ok()));
+    }
+
+    #[test]
+    fn repeated_folder_exports_keep_the_existing_outputs() {
+        let parent = tempfile::tempdir().unwrap();
+        let name = "项目_2026-11-22";
+        let first = parent.path().join(name);
+        assert_eq!(available_folder(parent.path(), name).unwrap(), first);
+        std::fs::create_dir(&first).unwrap();
+        std::fs::write(parent.path().join(format!("{name}_02")), "existing file").unwrap();
+        assert_eq!(
+            available_folder(parent.path(), name).unwrap(),
+            parent.path().join(format!("{name}_03"))
+        );
+    }
+
     const TRI: &str = "solid t
 facet normal 0 0 1
 outer loop

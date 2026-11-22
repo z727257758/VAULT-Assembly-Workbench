@@ -2814,6 +2814,7 @@ dependencies = [
  "toml",
  "ttf-parser",
  "wgpu",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

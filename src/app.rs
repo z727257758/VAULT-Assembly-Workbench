@@ -2584,6 +2584,7 @@ impl App {
                         }
                     });
                     if self.export_options.format == crate::export::Format::ThreeMf {
+                        ui.small(t(z, "所有打印板保存到一个 3MF，最多 36 盘。混用机型时使用成型空间最大的机型，必要时重新摆盘。", "All plates are saved in one 3MF project, up to 36 plates. Mixed printers use the largest build volume and repack when needed."));
                         ui.small(t(z, "3MF 为未切片工程。请在 Bambu Studio 核对耗材、支撑与首层。", "3MF projects are unsliced. Review filament, supports, and first layer in Bambu Studio."));
                     }
                     if ui.add_enabled((total > 0 && total <= 1000) && !self.busy && !self.preview.has_pending(),
@@ -2597,42 +2598,14 @@ impl App {
             self.start_export(ctx);
         }
     }
-    fn start_export(&mut self, ctx: &egui::Context) {
-        if !self.members.is_empty()
-            && (self.export_scope != workflow::ExportScope::Current
-                || self.active_drawer.is_none()
-                    && !self.members[self.active_member].preset.drawers.is_empty())
-        {
-            self.export_combination(ctx);
-            return;
-        }
-        let name = format!(
-            "VAULT-{}{}-{}",
-            self.selection.width, self.selection.depth, self.selection.height
-        );
-        let target = if self.export_options.format == crate::export::Format::Stl {
-            rfd::FileDialog::new().pick_folder().map(|folder| {
-                folder.join(format!(
-                    "{name}-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ))
-            })
-        } else {
-            rfd::FileDialog::new()
-                .set_file_name(format!("{name}.3mf"))
-                .add_filter("3MF", &["3mf"])
-                .save_file()
-        };
-        let Some(target) = target else {
-            return;
-        };
-        if self.export_options.format != crate::export::Format::Stl
-            && !target
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("3mf"))
+    fn pick_3mf_file(&mut self, name: &str) -> Option<PathBuf> {
+        let target = rfd::FileDialog::new()
+            .set_file_name(format!("{name}.3mf"))
+            .add_filter("3MF", &["3mf"])
+            .save_file()?;
+        if !target
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("3mf"))
         {
             self.status = t(
                 self.zh,
@@ -2640,8 +2613,35 @@ impl App {
                 "Please use the .3mf extension.",
             )
             .into();
+            return None;
+        }
+        Some(target)
+    }
+
+    fn start_export(&mut self, ctx: &egui::Context) {
+        let name = match crate::export::default_name(&self.tower.name) {
+            Ok(name) => name,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        if !self.members.is_empty()
+            && (self.export_scope != workflow::ExportScope::Current
+                || self.active_drawer.is_none()
+                    && !self.members[self.active_member].preset.drawers.is_empty())
+        {
+            self.export_combination(ctx, &name);
             return;
         }
+        let target = if self.export_options.format == crate::export::Format::Stl {
+            self.pick_export_folder(&name)
+        } else {
+            self.pick_3mf_file(&name)
+        };
+        let Some(target) = target else {
+            return;
+        };
         if let Err(e) = self.check_destination(&target) {
             self.status = e;
             return;

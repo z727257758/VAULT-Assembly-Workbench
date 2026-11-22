@@ -22,6 +22,9 @@ tempfile = "3"
 manifold-rust = "=0.18.0"
 ttf-parser = "=0.25.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_SystemInformation"] }
+
 [profile.dev]
 opt-level = 1
 

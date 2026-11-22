@@ -7,7 +7,7 @@ pub use materials::{BambuPreset, FilamentMaterial, MaterialLibrary};
 pub use printer::Printer;
 pub const BIN_COLOR_KEY: &str = "generated/gridfinity/@bin-color";
 // The Bambu Studio 02.05 project importer/UI uses EnforcerBlockerType::ExtruderMax.
-const MAX_PROJECT_SLOTS: u32 = 32;
+pub(crate) const MAX_PROJECT_SLOTS: u32 = 32;
 pub const LABEL_COLOR_KEY: &str = "generated/gridfinity/@label-color";
 const TEXT_ROLE: &str = "text";
 const DEFAULT_TEXT_SLOT: u32 = 6;
@@ -115,6 +115,14 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub(crate) fn bed_type(&self) -> &'static str {
+        if self.textured {
+            "Textured PEI Plate"
+        } else {
+            "High Temp Plate"
+        }
+    }
+
     pub(crate) fn shares_print_project(&self, other: &Self) -> bool {
         self.printer == other.printer
             && self.textured == other.textured
@@ -261,15 +269,7 @@ impl Config {
             ("layer_height", self.layer.to_string()),
             ("wall_loops", self.walls.to_string()),
             ("sparse_infill_density", format!("{}%", self.infill)),
-            (
-                "curr_bed_type",
-                if self.textured {
-                    "Textured PEI Plate"
-                } else {
-                    "High Temp Plate"
-                }
-                .into(),
-            ),
+            ("curr_bed_type", self.bed_type().into()),
             ("print_sequence", "by layer".into()),
             ("enable_prime_tower", "0".into()),
             (
@@ -972,6 +972,19 @@ impl Placement {
             h: self.depth,
         }
     }
+}
+
+pub(crate) fn fits_printer(placements: &[Placement], sizes: &[Vec3], c: &Config) -> bool {
+    let bed = PackingBed::new(c);
+    placements.iter().all(|p| {
+        let footprint = p.footprint();
+        sizes[p.input].z <= c.printer.height()
+            && bed.bounds.expanded(0.001).contains(footprint)
+            && bed
+                .exclusions
+                .iter()
+                .all(|zone| !footprint.intersects(*zone))
+    })
 }
 fn parallel_family(name: &str, size: Vec3) -> Option<&str> {
     if size.x.max(size.y) < 3. * size.x.min(size.y) {

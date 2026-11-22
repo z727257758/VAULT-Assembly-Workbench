@@ -236,6 +236,76 @@ pub(super) fn batch_jobs(
     batches
 }
 
+pub(super) fn prepare_3mf_project(
+    batches: Vec<PrintBatch>,
+    root: &Path,
+    home: &Path,
+) -> Result<
+    (
+        Vec<Bom>,
+        crate::export::PreparedPrint,
+        crate::print_plate::Config,
+    ),
+    String,
+> {
+    // A Bambu project has one machine preset. The tallest supported machine
+    // among the jobs also has at least as much XY area as the other machines.
+    let mut config = batches
+        .iter()
+        .rev()
+        .max_by(|a, b| {
+            a.config
+                .printer
+                .height()
+                .total_cmp(&b.config.printer.height())
+        })
+        .ok_or("没有可导出的打印板 / No plates to export")?
+        .config
+        .clone();
+    let mixed_filaments = batches.iter().any(|batch| {
+        batch.config.palette != config.palette
+            || batch.config.materials != config.materials
+            || batch.config.extra_filaments != config.extra_filaments
+    });
+    let mut items = Vec::new();
+    let mut plan = crate::export::PreparedPrint::default();
+    let mut filaments = Vec::new();
+    for batch in batches {
+        let mut batch = batch.prepare(root, home, None)?;
+        if batch.config.printer != config.printer {
+            let shared = crate::print_plate::Config {
+                printer: config.printer,
+                ..batch.config.clone()
+            };
+            if !crate::print_plate::fits_printer(&batch.plan.placements, &batch.plan.sizes, &shared)
+            {
+                batch
+                    .plan
+                    .pack(&batch.items, &shared)
+                    .map_err(|e| format!("{} · {}: {e}", batch.name, config.printer.name()))?;
+            }
+        }
+        if mixed_filaments {
+            batch.plan.remap_filaments(&batch.config, &mut filaments)?;
+        }
+        items.append(&mut batch.items);
+        plan.append_plates(batch.plan);
+    }
+    if mixed_filaments {
+        config.filament = 1;
+        config.role_filaments.clear();
+        config.component_filaments.clear();
+        config.component_text_filaments.clear();
+        config.part_filaments.clear();
+        config.text_filaments.clear();
+        config.extra_filaments = filaments.get(6..).unwrap_or_default().to_vec();
+        for (i, appearance) in filaments.into_iter().take(6).enumerate() {
+            config.set_appearance(i as u32 + 1, appearance);
+        }
+    }
+    Ok((items, plan, config))
+}
+
 impl PrintBatch {
     pub(super) fn prepare(
         self,

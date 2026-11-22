@@ -1186,7 +1186,18 @@ pub(super) fn load(
 }
 
 impl App {
-    pub(super) fn export_combination(&mut self, ctx: &egui::Context) {
+    pub(super) fn pick_export_folder(&mut self, name: &str) -> Option<PathBuf> {
+        let parent = rfd::FileDialog::new().pick_folder()?;
+        match crate::export::available_folder(&parent, name) {
+            Ok(target) => Some(target),
+            Err(error) => {
+                self.status = error.to_string();
+                None
+            }
+        }
+    }
+
+    pub(super) fn export_combination(&mut self, ctx: &egui::Context, name: &str) {
         self.commit_member();
         let mut saved = self.project_snapshot(self.member_snapshot());
         saved
@@ -1201,16 +1212,14 @@ impl App {
             self.status = e;
             return;
         }
-        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+        let target = if self.export_options.format == crate::export::Format::ThreeMf {
+            self.pick_3mf_file(name)
+        } else {
+            self.pick_export_folder(name)
+        };
+        let Some(target) = target else {
             return;
         };
-        let target = folder.join(format!(
-            "VAULT-combination-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
         if let Err(e) = self.check_destination(&target) {
             self.status = e;
             return;
@@ -1263,7 +1272,9 @@ fn export_members(
         .ok_or("Invalid destination")?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    if parent.starts_with(&library) || target.exists() {
+    if parent.starts_with(&library)
+        || (options.format == crate::export::Format::Stl && target.exists())
+    {
         return Err("目标已存在或位于模型库内 / Existing destination or model library".into());
     }
     let catalog = Catalog::scan(root.to_path_buf())?;
@@ -1273,74 +1284,9 @@ fn export_members(
         .enumerate()
         .filter(|(i, _)| included(*i));
     let jobs = print_list::checked_jobs(members, &catalog)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".vault-combination-")
-        .tempdir_in(parent)
-        .map_err(|e| e.to_string())?;
-    if options.format == crate::export::Format::ThreeMf
-        && options.planning == crate::export::Planning::Combined
-    {
-        let batches = print_list::batch_jobs(jobs, options.planning, &saved.project_name);
-        for (index, batch) in batches.into_iter().enumerate() {
-            let batch = batch.prepare(root, home, None)?;
-            let destination = staging
-                .path()
-                .join(format!("VAULT-Combined-{:02}.3mf", index + 1));
-            crate::export::export_prepared(
-                root,
-                &destination,
-                &batch.items,
-                batch.plan,
-                &batch.config,
-                &options.material_library,
-            )?;
-        }
-    } else {
-        for (index, job) in jobs {
-            let p = &job.preset;
-            let base = format!(
-                "{:02}-{}{}-{}",
-                index + 1,
-                p.selection.width,
-                p.selection.depth,
-                p.selection.height
-            );
-            let name = if saved.members[index].preset.drawers.is_empty() {
-                base
-            } else {
-                let number = job.drawer.map_or(1, |i| i + 2);
-                format!("{base}-{number:02}")
-            };
-            let destination =
-                staging
-                    .path()
-                    .join(if options.format == crate::export::Format::ThreeMf {
-                        format!("{name}.3mf")
-                    } else {
-                        name
-                    });
-            crate::export::run_configured(
-                root,
-                &job.items,
-                &destination,
-                &crate::export::Options {
-                    plate: p.print_config.clone().unwrap_or_default(),
-                    ..options.clone()
-                },
-                &p.label,
-                Some((home, &p.gridfinity, &p.selection)),
-            )
-            .map_err(|e| format!("{}: {e}", job.name))?;
-        }
-    }
     let manifest: Vec<_> = saved.members.iter().enumerate().filter(|(i,_)|included(*i)).map(|(i,m)|
         serde_json::json!({"member_index":i+1,"name":m.name,"specification":format!("{}{}-{}",m.preset.selection.width,m.preset.selection.depth,m.preset.selection.height)})
     ).collect();
-    std::fs::write(
-        staging.path().join("exported-members.json"),
-        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
     let mut hardware = String::from(
         "整体配件五金清单 / Exterior hardware\n尺寸只包含预览零件；采购件按手册核对。\n",
     );
@@ -1353,12 +1299,69 @@ fn export_members(
             hardware.push_str(&format!("{}\n", h.line()));
         }
     }
-    std::fs::write(staging.path().join("hardware.txt"), hardware).map_err(|e| e.to_string())?;
-    std::fs::write(
-        staging.path().join("combination.toml"),
-        toml::to_string_pretty(saved).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let attachments = [
+        (
+            "exported-members.json",
+            serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+        ),
+        ("hardware.txt", hardware.into_bytes()),
+        (
+            "combination.toml",
+            toml::to_string_pretty(saved)
+                .map_err(|e| e.to_string())?
+                .into_bytes(),
+        ),
+    ];
+    if options.format == crate::export::Format::ThreeMf {
+        let batches = print_list::batch_jobs(jobs, options.planning, &saved.project_name);
+        let (items, plan, config) = print_list::prepare_3mf_project(batches, root, home)?;
+        crate::export::export_prepared(
+            root,
+            target,
+            &items,
+            plan,
+            &config,
+            &options.material_library,
+            &attachments,
+        )?;
+        return Ok(target.to_path_buf());
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".vault-combination-")
+        .tempdir_in(parent)
+        .map_err(|e| e.to_string())?;
+    for (index, job) in jobs {
+        let p = &job.preset;
+        let base = format!(
+            "{:02}-{}{}-{}",
+            index + 1,
+            p.selection.width,
+            p.selection.depth,
+            p.selection.height
+        );
+        let name = if saved.members[index].preset.drawers.is_empty() {
+            base
+        } else {
+            let number = job.drawer.map_or(1, |i| i + 2);
+            format!("{base}-{number:02}")
+        };
+        let destination = staging.path().join(name);
+        crate::export::run_configured(
+            root,
+            &job.items,
+            &destination,
+            &crate::export::Options {
+                plate: p.print_config.clone().unwrap_or_default(),
+                ..options.clone()
+            },
+            &p.label,
+            Some((home, &p.gridfinity, &p.selection)),
+        )
+        .map_err(|e| format!("{}: {e}", job.name))?;
+    }
+    for (name, bytes) in attachments {
+        std::fs::write(staging.path().join(name), bytes).map_err(|e| e.to_string())?;
+    }
     std::fs::rename(staging.path(), target).map_err(|e| e.to_string())?;
     Ok(target.to_path_buf())
 }
@@ -2228,8 +2231,16 @@ mod tests {
             .unwrap();
         let library = temp.path().join("library");
         std::fs::create_dir(&library).unwrap();
-        let source = "solid test\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid test\n";
-        std::fs::write(library.join("test.stl"), source).unwrap();
+        let vertices = ["0 0 0", "10 0 0", "0 10 0", "0 0 10"];
+        let mut source = String::from("solid combined\n");
+        for [a, b, c] in [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]] {
+            source.push_str(&format!(
+                "facet normal 0 0 0\nouter loop\nvertex {}\nvertex {}\nvertex {}\nendloop\nendfacet\n",
+                vertices[a], vertices[b], vertices[c]
+            ));
+        }
+        source.push_str("endsolid combined\n");
+        std::fs::write(library.join("test.stl"), &source).unwrap();
         let mut p = preset();
         p.bom = vec![Bom {
             path: "test.stl".into(),
@@ -2352,29 +2363,86 @@ mod tests {
             [0, 0, 1, 1, 1]
         );
 
-        let combined = temp.path().join("combined");
+        let combined = temp.path().join("combined.3mf");
         export_members(&library, &home, &combined, &options, &saved, None).unwrap();
-        let file = std::fs::File::open(combined.join("VAULT-Combined-01.3mf")).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        let mut model = String::new();
-        std::io::Read::read_to_string(
-            &mut archive.by_name("Metadata/model_settings.config").unwrap(),
-            &mut model,
-        )
-        .unwrap();
+        let read_entry = |path: &Path, name: &str| {
+            use std::io::Read;
+            let file = std::fs::File::open(path).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            let mut content = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut content)
+                .unwrap();
+            content
+        };
+        let model_config = "Metadata/model_settings.config";
+        let model = read_entry(&combined, model_config);
         assert_eq!(model.matches("<plate>").count(), 1);
         assert_eq!(model.matches("<model_instance>").count(), 5);
-        assert!(!combined.join("VAULT-Combined-02.3mf").exists());
+        assert!(!read_entry(&combined, "Metadata/vault/combination.toml").is_empty());
+
+        let per_member = temp.path().join("per-member.3mf");
+        let per_member_options = crate::export::Options {
+            planning: crate::export::Planning::PerMember,
+            ..options.clone()
+        };
+        export_members(
+            &library,
+            &home,
+            &per_member,
+            &per_member_options,
+            &saved,
+            None,
+        )
+        .unwrap();
+        let model = read_entry(&per_member, model_config);
+        let plates: Vec<_> = model.split("<plate>").skip(1).collect();
+        assert_eq!(plates.len(), 2);
+        assert_eq!(plates[0].matches("<model_instance>").count(), 2);
+        assert_eq!(plates[1].matches("<model_instance>").count(), 3);
+        assert!(plates[0].contains(r#"key="object_id" value="3""#));
+        assert!(plates[1].contains(r#"key="object_id" value="7""#));
 
         let mut mixed = saved;
-        mixed.members[1]
+        let config = mixed.members[1]
             .preset
             .print_config
-            .get_or_insert_with(Default::default)
-            .textured = false;
-        let mixed_out = temp.path().join("mixed");
+            .get_or_insert_with(Default::default);
+        config.printer = crate::print_plate::Printer::A1Mini;
+        config.textured = false;
+        config.walls = 4;
+        config.set_part_slot("test.stl", 1);
+        config.palette[0] = [12, 34, 56];
+        let mixed_out = temp.path().join("mixed.3mf");
         export_members(&library, &home, &mixed_out, &options, &mixed, None).unwrap();
-        assert!(mixed_out.join("VAULT-Combined-01.3mf").is_file());
-        assert!(mixed_out.join("VAULT-Combined-02.3mf").is_file());
+        let model = read_entry(&mixed_out, model_config);
+        assert_eq!(model.matches("<plate>").count(), 2);
+        assert_eq!(model.matches("<model_instance>").count(), 5);
+        assert!(model.contains(r#"key="bed_type" value="High Temp Plate""#));
+        assert_eq!(model.matches(r#"key="wall_loops" value="4""#).count(), 3);
+        let settings: serde_json::Value =
+            serde_json::from_str(&read_entry(&mixed_out, "Metadata/project_settings.config"))
+                .unwrap();
+        assert_eq!(settings["printer_model"], "Bambu Lab P1S");
+        assert!(
+            settings["filament_colour"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|color| color == "#0C2238")
+        );
+
+        let subset = temp.path().join("selected.3mf");
+        export_members(&library, &home, &subset, &options, &mixed, Some(&[1])).unwrap();
+        let model = read_entry(&subset, model_config);
+        assert_eq!(model.matches("<plate>").count(), 1);
+        assert_eq!(model.matches("<model_instance>").count(), 3);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&read_entry(&subset, "Metadata/vault/exported-members.json"))
+                .unwrap();
+        assert_eq!(manifest.as_array().unwrap().len(), 1);
+        assert_eq!(manifest[0]["name"], "B");
     }
 }
