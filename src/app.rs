@@ -2127,6 +2127,7 @@ impl App {
                     {
                         let (o, d) = self.camera.ray(p, rect);
                         self.last_hit = self.scene.pick(o, d, self.explosion);
+                        self.part_details.matching = None;
                         self.selected = self.last_hit.map(|h| h.part);
                         if self.scene_key == "combination"
                             && let Some(index) = self.selected

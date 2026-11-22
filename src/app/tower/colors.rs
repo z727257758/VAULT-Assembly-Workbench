@@ -816,8 +816,8 @@ pub(super) fn preview_menu(app: &mut App, ui: &mut egui::Ui) {
         .response
         .on_hover_text(t(
             z,
-            "为同类零件设置项目配色分组",
-            "Set the project color group for matching components",
+            "按零件类型设置项目分组，可跨规格。使用自定义配色的成员保留自己的颜色。",
+            "Set the project group by component type, across sizes. Members with custom colors keep their own colors.",
         ));
     })
     .response

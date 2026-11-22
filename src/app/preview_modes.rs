@@ -227,11 +227,11 @@ impl App {
         }
     }
     pub(super) fn focus_preview_part(&mut self) {
-        let Some(index) = self.selected else { return };
-        if let Some(part) = self.scene.parts.get(index).filter(|p| p.visible) {
+        let parts: Vec<_> = self.preview_selected_parts().cloned().collect();
+        if !parts.is_empty() {
             self.camera.fit(
                 &Scene {
-                    parts: vec![part.clone()],
+                    parts,
                     ..Default::default()
                 },
                 self.explosion,
@@ -301,7 +301,10 @@ impl App {
                         }
                         if self.preview_modes.mode != Mode::Plates {
                             ui.separator();
-                            if self.scene_key == "combination" && self.combination_view {
+                            if self.scene_key == "combination"
+                                && self.combination_view
+                                && !(self.part_details_visible() && self.selected.is_some())
+                            {
                                 self.tower_preview_color_menu(ui);
                             }
                             if ui.button(t(z, "标牌…", "Label…")).clicked() {
@@ -311,11 +314,14 @@ impl App {
                     });
                     if self.preview_modes.mode == Mode::Plates {
                         self.plate_toolbar(ui, ctx);
+                    } else if self.preview_modes.mode == Mode::Exploded && self.selected.is_some() {
+                        ui.horizontal_wrapped(|ui| self.part_selection_tools(ui, true));
                     }
                 });
             });
         if before != self.preview_modes.mode {
             self.dimensions = false;
+            self.part_details.matching = None;
             self.combination_move_source = None;
             match self.preview_modes.mode {
                 Mode::Assembly => {
@@ -533,6 +539,18 @@ impl App {
         explosion: f32,
     ) {
         let matrix = camera.matrix(rect.aspect_ratio());
+        if self.matching_selection() {
+            for part in self.preview_selected_parts() {
+                workspace::paint_selection_box(
+                    ui,
+                    rect,
+                    matrix * part.pose.matrix(explosion),
+                    part.mesh.min,
+                    part.mesh.max,
+                );
+            }
+            return;
+        }
         if let Some(index) = self.selected {
             if let Some(part) = scene.parts.get(index).filter(|p| p.visible) {
                 workspace::paint_selection_box(

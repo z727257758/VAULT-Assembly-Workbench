@@ -11,6 +11,7 @@ const PRESET_NAME: &str = "原始配色";
 
 // Read the actual texts painted by egui so that duplicated, hidden or incorrectly
 // labelled rows cannot pass through a separate representation built by the test.
+#[derive(Clone)]
 struct Text {
     layer: LayerId,
     value: String,
@@ -415,18 +416,70 @@ impl App {
                             .position(|p| p.visible && p.pose.path == GUIDE)
                             .ok_or("No runner guide in assembled fixture")?,
                     );
+                    self.explosion = 1.;
+                    self.camera.fit(&self.scene, self.explosion);
+                    self.smoke_stage = 99;
                 }
-                1 => self.click_color_control(control(&ui, "颜色分组", false)?),
-                2 => {
-                    for (_, name, _) in ROLES {
-                        control(&ui, name, false)?;
+                100 => {
+                    let select = ui
+                        .iter()
+                        .filter(|text| text.value.starts_with("选中同类 "))
+                        .min_by(|a, b| a.center.y.total_cmp(&b.center.y))
+                        .ok_or("No select-matching action in the exploded view")?;
+                    self.click_color_control(select.center);
+                }
+                101 => {
+                    let count = self.preview_selected_parts().count();
+                    if !self.matching_selection() || count < 2 {
+                        return Err("Matching selection did not include multiple guides".into());
                     }
-                    self.click_color_control(control(&ui, "配件", false)?);
+                    let focus = ui
+                        .iter()
+                        .filter(|text| text.value == "聚焦同类")
+                        .max_by(|a, b| a.center.y.total_cmp(&b.center.y))
+                        .ok_or("No focus-matching action in the preview toolbar")?;
+                    self.click_color_control(focus.center);
+                }
+                102 => {
+                    let selection = Scene {
+                        parts: self.preview_selected_parts().cloned().collect(),
+                        ..Default::default()
+                    };
+                    let (center, radius) = selection.bounds(self.explosion);
+                    if self.camera.center != center || self.camera.radius != radius {
+                        return Err("Focus did not frame all selected guides".into());
+                    }
+                    if !self.capture_native_smoke(ctx, &folder.join("matching-selection.png"))? {
+                        return Ok(());
+                    }
+                    let group = ui
+                        .iter()
+                        .filter(|text| text.value == "颜色分组")
+                        .min_by(|a, b| a.center.y.total_cmp(&b.center.y))
+                        .ok_or("No group action in the selection panel")?;
+                    self.click_color_control(group.center);
+                    self.smoke_stage = 1;
+                }
+                2 => {
+                    let popup: Vec<_> = ui
+                        .iter()
+                        .filter(|text| text.layer.order == egui::Order::Foreground)
+                        .cloned()
+                        .collect();
+                    for (_, name, _) in ROLES {
+                        control(&popup, name, false)?;
+                    }
+                    self.click_color_control(control(&popup, "配件", false)?);
                 }
                 3 => {
                     if self.global_colors.role_for(GUIDE) != "accessory" {
                         return Err("Preview menu did not reassign the guide".into());
                     }
+                    if !self.matching_selection() {
+                        return Err("Regrouping cleared the matching selection".into());
+                    }
+                    self.explosion = 0.;
+                    self.camera.fit(&self.scene, self.explosion);
                     self.check_color_rows(&ui, true)?;
                     self.click_color_control(control(&ui, "配件", true)?);
                 }
