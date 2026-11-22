@@ -1368,7 +1368,7 @@ impl App {
                 });
                 return;
             }
-            if self.tower.print_list { self.tower_print_list(ui, ctx); return; }
+            if self.tower.print_list { self.tower_print_list(ui); return; }
             let all = match rows(&self.members) {
                 Ok(rows) => rows,
                 Err(error) => {
@@ -1586,31 +1586,7 @@ impl App {
                     ui.separator();
                     ui.horizontal(|ui| {
                         self.layer_motion_ui(ui, &row.members, ctx);
-                        let checked_count = row
-                            .members
-                            .iter()
-                            .filter(|i| self.member_selection.contains(i))
-                            .count();
-                        let mut checked = checked_count == row.members.len();
-                        let mixed = checked_count > 0 && !checked;
-                        if ui
-                            .add(
-                                egui::Checkbox::new(
-                                    &mut checked,
-                                    t(z, "勾选导出", "Include in export"),
-                                )
-                                .indeterminate(mixed),
-                            )
-                            .changed()
-                        {
-                            for &i in &row.members {
-                                if checked {
-                                    self.member_selection.insert(i);
-                                } else {
-                                    self.member_selection.remove(&i);
-                                }
-                            }
-                        }
+                        self.layer_export_checkbox(ui, row.level);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if layers::icon_button(
                                 ui,
@@ -1952,10 +1928,15 @@ impl App {
                 ));
             });
         });
+        let checked_layers = self.tower.print_list && !self.member_selection.is_empty();
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button(if self.tower.print_list {
-                    t(z, "查看打印板", "Preview plates")
+                    if checked_layers {
+                        t(z, "预览勾选层", "Preview checked layers")
+                    } else {
+                        t(z, "查看打印板", "Preview plates")
+                    }
                 } else {
                     t(z, "下一步：打印清单 →", "Next: print list →")
                 })
@@ -1964,18 +1945,26 @@ impl App {
                 let show_plates = self.tower.print_list;
                 self.open_project_tab(true, ctx);
                 if show_plates {
-                    self.preview_modes.mode = preview_modes::Mode::Plates;
+                    self.open_print_list_plates(checked_layers);
                 }
             }
             if ui
                 .add_enabled(
                     !items.is_empty(),
-                    crate::ui_style::primary_button(t(z, "导出整个项目…", "Export project…")),
+                    crate::ui_style::primary_button(if checked_layers {
+                        t(z, "导出勾选层…", "Export checked layers…")
+                    } else {
+                        t(z, "导出整个项目…", "Export project…")
+                    }),
                 )
                 .clicked()
             {
                 self.commit_member();
-                self.export_scope = workflow::ExportScope::All;
+                self.export_scope = if checked_layers {
+                    workflow::ExportScope::Selected
+                } else {
+                    workflow::ExportScope::All
+                };
                 self.export_open = true;
             }
         });
@@ -1992,135 +1981,52 @@ impl App {
             ));
         }
     }
-    fn tower_print_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn tower_print_list(&mut self, ui: &mut egui::Ui) {
         let z = self.zh;
         ui.heading(t(z, "打印清单", "Print list"));
         ui.small(t(
             z,
-            "整个项目 · 自上而下核对。份数按源 STL 统计，标牌保留各自文字。",
-            "Entire project · top to bottom. Copies count source STL files; labels keep their own text.",
+            "勾选要打印的层。同层相同源文件合计份数。",
+            "Check the layers to print. Copies of the same source file are totaled within each layer.",
         ));
-        let mut next = self.members.clone();
-        let mut changes = Vec::new();
-        let mut edit_error = None;
-        let mut accessories = None;
-        let mut show_rows = |ui: &mut egui::Ui,
-                             p: &mut Preset,
-                             housing: Option<bool>,
-                             target: crate::scene::Target| {
-            let items = p
-                .bom
-                .iter_mut()
-                .filter(|b| housing.is_none_or(|h| crate::catalog::tower::housing(&b.path) == h));
-            let edits = print_list::rows(ui, items, &p.selection, z);
-            if let Some((path, enabled, qty)) = edits.toggle {
-                let inserts = (p.assembly_kind == AssemblyKind::Drawer)
-                    .then_some((&mut p.divider_layout, &mut p.gridfinity));
-                if let Err(e) =
-                    print_list::set_accessory(&p.selection, &mut p.bom, inserts, path, enabled, qty)
-                {
-                    edit_error = Some(e);
-                    return;
-                }
-            } else if !edits.changed {
-                return;
-            }
-            match p.validate_member(&self.catalog) {
-                Ok(()) => changes.push((target, p.clone())),
-                Err(e) => edit_error = Some(e),
-            }
-        };
-        let mut order: Vec<_> = (0..next.len()).collect();
-        order.sort_by_key(|&i| {
-            (
-                std::cmp::Reverse(next[i].placement.level),
-                next[i].placement.column,
-            )
-        });
-        for index in order {
-            let member = &mut next[index];
-            ui.push_id(("print-member", index), |ui| {
-                egui::CollapsingHeader::new(&member.name)
-                    .default_open(index == self.active_member)
-                    .show(ui, |ui| {
-                        let stack = !member.preset.drawers.is_empty();
-                        show_rows(
-                            ui,
-                            &mut member.preset,
-                            stack.then_some(true),
-                            crate::scene::Target {
-                                member: index,
-                                drawer: None,
-                            },
-                        );
-                        for (i, p) in member.preset.drawers.iter_mut().enumerate() {
-                            ui.collapsing(
-                                format!("{} {} · {}", t(z, "抽屉", "Drawer"), i + 1, p.label.text),
-                                |ui| {
-                                    show_rows(
-                                        ui,
-                                        p,
-                                        Some(false),
-                                        crate::scene::Target {
-                                            member: index,
-                                            drawer: Some(i),
-                                        },
-                                    )
-                                },
-                            );
-                        }
-                        if let Ok(extras) = self.catalog.exterior_components(
-                            &member.preset.selection,
-                            &member.exterior,
-                            member.preset.assembly_kind == AssemblyKind::Sustainer,
-                        ) && !extras.is_empty()
-                        {
-                            ui.separator();
-                            ui.small(t(
-                                z,
-                                "顶盖 / 底座 / 外部配件（随配置导出）",
-                                "Covers / base / accessories (exported with configuration)",
-                            ));
-                            for extra in extras {
-                                let b = extra.bom;
-                                let name = crate::accessories::info(&b.path, z)
-                                    .map_or_else(|| b.name().to_owned(), |m| m.name);
-                                ui.label(format!("{name} × {}", b.qty));
-                            }
-                            if ui
-                                .small_button(t(z, "修改配件…", "Edit accessories…"))
-                                .clicked()
-                            {
-                                accessories = Some(index);
-                            }
-                        }
-                    });
+        let layers = print_list::project_layers(&self.members, &self.catalog);
+        let active_level = self
+            .members
+            .get(self.active_member)
+            .map(|m| m.placement.level);
+        for (level, bom) in layers.into_iter().rev() {
+            let title = format!(
+                "{} · {} {}",
+                print_list::layer_title(level, z),
+                bom.enabled_copies(),
+                t(z, "份", "copies")
+            );
+            let id = ui.make_persistent_id(("print-layer", level));
+            let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                Some(level) == active_level,
+            );
+            let mut toggle = false;
+            let mut header = state.show_header(ui, |ui| {
+                print_list::aligned_row(
+                    ui,
+                    |ui| self.layer_export_checkbox(ui, level),
+                    |ui| {
+                        toggle = ui
+                            .add(
+                                egui::Label::new(title)
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                            )
+                            .clicked();
+                    },
+                );
             });
-        }
-        if !changes.is_empty() {
-            self.record_workflow();
-            for (target, edited) in changes {
-                print_list::apply_project_edit(&mut self.members, target, edited);
+            if toggle {
+                header.toggle();
             }
-            let active = crate::scene::Target {
-                member: self.active_member,
-                drawer: self.active_drawer,
-            };
-            if let Some(p) = inline_edit::target_preset(&self.members, active) {
-                self.bom.clone_from(&p.bom);
-                self.gridfinity.clone_from(&p.gridfinity);
-                self.divider_layout.clone_from(&p.divider_layout);
-            }
-            self.tower.error.clear();
-            self.assembly(ctx);
-        }
-        if let Some(e) = edit_error {
-            self.tower.error = e;
-        }
-        if let Some(index) = accessories
-            && let Err(error) = self.tower_action(Action::Accessories(index), ctx)
-        {
-            self.tower.error = error;
+            header.body(|ui| bom.show(ui, z));
         }
     }
 }
@@ -3065,29 +2971,20 @@ mod tests {
         assert_eq!(jobs[0].1.items[0].path, rail.path);
     }
     #[test]
-    fn printing_edits_change_only_the_target_drawers_print_fields() {
+    fn checking_a_layer_selects_all_its_members_without_editing_the_bom() {
         let c = catalog();
-        let mut m = member(&c, "M", "2F", 3, 1);
-        m.name = "Custom name".into();
-        m.placement.offset = [1., 2., 3.];
-        m.preset.drawers = vec![preset(&c, "M", "1F"), preset(&c, "M", "1F")];
-        let mut edit = m.preset.drawers[1].clone();
-        edit.bom[0].qty = 7;
-        edit.label.text = "unrelated edit".into();
-        let mut expected = m.clone();
-        expected.preset.drawers[1].bom[0].qty = 7;
-        print_list::apply_project_edit(
-            std::slice::from_mut(&mut m),
-            crate::scene::Target {
-                member: 0,
-                drawer: Some(1),
-            },
-            edit,
-        );
-        assert_eq!(
-            serde_json::to_value(m).unwrap(),
-            serde_json::to_value(expected).unwrap()
-        );
+        let members = vec![
+            member(&c, "S", "1F", 0, 0),
+            member(&c, "M", "2F", 1, 0),
+            member(&c, "S", "2F", 1, 1),
+        ];
+        let before = serde_json::to_value(&members).unwrap();
+        let mut checked = [0, 2].into();
+        print_list::set_layer_checked(&members, &mut checked, 1, true);
+        assert_eq!(checked, [0, 1, 2].into());
+        print_list::set_layer_checked(&members, &mut checked, 1, false);
+        assert_eq!(checked, [0].into());
+        assert_eq!(serde_json::to_value(&members).unwrap(), before);
     }
     #[test]
     fn multiple_drawers_print_one_shared_shell_and_keep_leaf_settings() {
@@ -3120,6 +3017,26 @@ mod tests {
                 .iter()
                 .all(|b| !crate::catalog::tower::housing(&b.path))
         }));
+        let mut same_layer = member(&c, "M", "2F", 0, 0);
+        same_layer.preset = stacked.clone();
+        let layers = print_list::project_layers(
+            &[
+                same_layer,
+                member(&c, "M", "2F", 0, 1),
+                member(&c, "M", "2F", 1, 0),
+            ],
+            &c,
+        );
+        let copy_counts = |level, matches: fn(&str) -> bool| {
+            layers[&level]
+                .lines()
+                .filter(|line| matches(&line[0].path))
+                .map(|line| line.iter().map(|item| item.qty).sum::<u32>())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(copy_counts(0, |path| path.contains("/Modules/")), [2]);
+        assert_eq!(copy_counts(0, crate::label::is_label), [3]);
+        assert_eq!(copy_counts(1, crate::label::is_label), [1]);
         let text = toml::to_string(&stacked).unwrap();
         let restored: Preset = toml::from_str(&text).unwrap();
         restored.validate_member(&c).unwrap();

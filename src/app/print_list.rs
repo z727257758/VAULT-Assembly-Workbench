@@ -1,54 +1,161 @@
 use super::*;
+use crate::scene::Target;
+use std::collections::BTreeSet;
+
+type BomKey = (String, Option<(usize, Option<usize>)>);
 
 #[derive(Default)]
-pub(super) struct RowChanges {
-    pub changed: bool,
-    pub toggle: Option<(String, bool, u32)>,
+pub(super) struct LayerBom {
+    lines: BTreeMap<BomKey, Vec<Bom>>,
 }
 
-pub(super) fn rows<'a>(
+pub(super) fn layer_title(level: u32, zh: bool) -> String {
+    if zh {
+        format!("第 {} 层", level + 1)
+    } else {
+        format!("Layer {}", level + 1)
+    }
+}
+
+fn layer_members(members: &[Member], level: u32) -> impl Iterator<Item = usize> {
+    members
+        .iter()
+        .enumerate()
+        .filter(move |(_, m)| m.placement.level == level)
+        .map(|(i, _)| i)
+}
+
+pub(super) fn set_layer_checked(
+    members: &[Member],
+    selection: &mut BTreeSet<usize>,
+    level: u32,
+    checked: bool,
+) {
+    for i in layer_members(members, level) {
+        if checked {
+            selection.insert(i);
+        } else {
+            selection.remove(&i);
+        }
+    }
+}
+
+impl App {
+    pub(super) fn layer_export_checkbox(&mut self, ui: &mut egui::Ui, level: u32) {
+        let (count, selected) = layer_members(&self.members, level).fold((0, 0), |(n, s), i| {
+            (n + 1, s + usize::from(self.member_selection.contains(&i)))
+        });
+        let mut checked = count > 0 && selected == count;
+        let mixed = selected > 0 && !checked;
+        if ui
+            .add(
+                egui::Checkbox::new(&mut checked, t(self.zh, "勾选导出", "Include in export"))
+                    .indeterminate(mixed),
+            )
+            .changed()
+        {
+            set_layer_checked(&self.members, &mut self.member_selection, level, checked);
+        }
+    }
+}
+
+pub(super) fn aligned_row(
     ui: &mut egui::Ui,
-    items: impl Iterator<Item = &'a mut Bom>,
-    selection: &Selection,
-    zh: bool,
-) -> RowChanges {
-    let mut edits = RowChanges::default();
-    for item in items {
-        ui.push_id(item.path.clone(), |ui| {
-            let rule = item.print_rule();
-            let required = rule == crate::catalog::PrintRule::RequiredRails;
-            let locked = required || rule == crate::catalog::PrintRule::LayoutManaged;
-            item.normalize_print(selection);
+    right: impl FnOnce(&mut egui::Ui),
+    left: impl FnOnce(&mut egui::Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            right(ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                left(ui);
+            });
+        });
+    });
+}
+
+impl LayerBom {
+    pub(super) fn add(&mut self, item: Bom, target: Target) {
+        // Generated paths carry local bin IDs. The same ID can represent
+        // different geometry or lettering in different drawers.
+        let owner = item
+            .path
+            .starts_with(crate::gridfinity::PREFIX)
+            .then_some((target.member, target.drawer));
+        self.lines
+            .entry((item.path.clone(), owner))
+            .or_default()
+            .push(item);
+    }
+
+    pub(super) fn lines(&self) -> impl Iterator<Item = &[Bom]> {
+        self.lines.values().map(Vec::as_slice)
+    }
+
+    pub(super) fn enabled_copies(&self) -> u32 {
+        self.lines()
+            .flatten()
+            .filter(|item| item.enabled)
+            .map(|item| item.qty)
+            .sum()
+    }
+
+    pub(super) fn show(&self, ui: &mut egui::Ui, zh: bool) {
+        for items in self.lines() {
+            let copies: u32 = items
+                .iter()
+                .filter(|item| item.enabled)
+                .map(|item| item.qty)
+                .sum();
+            if copies == 0 {
+                continue;
+            }
+            let item = &items[0];
             let name = crate::accessories::info(&item.path, zh)
                 .map_or_else(|| item.name().to_owned(), |info| info.name);
-            let mut qty = item.qty;
-            ui.horizontal_wrapped(|ui| {
-                let mut enabled = item.enabled;
-                let response = ui.add_enabled(!locked, egui::Checkbox::new(&mut enabled, name));
-                if response.changed() {
-                    edits.toggle = Some((item.path.clone(), enabled, item.qty));
-                }
-                if required {
-                    response.on_hover_text(t(
-                        zh,
-                        "必备：一份包含上下两根齿条",
-                        "Required: one file contains both racks",
-                    ));
-                } else {
-                    response.on_hover_text(&item.path);
-                }
-                edits.changed |= ui
-                    .add_enabled(
-                        !locked && rule != crate::catalog::PrintRule::FacadeCaps,
-                        egui::DragValue::new(&mut qty).range(1..=100),
-                    )
-                    .on_hover_text(t(zh, "源 STL 文件份数", "Source STL copies"))
-                    .changed();
-            });
-            item.qty = qty;
-        });
+            aligned_row(
+                ui,
+                |ui| {
+                    ui.label(format!("× {copies}"));
+                },
+                |ui| {
+                    ui.add(egui::Label::new(name).truncate())
+                        .on_hover_text(&item.path);
+                },
+            );
+        }
     }
-    edits
+}
+
+pub(super) fn project_layers(members: &[Member], catalog: &Catalog) -> BTreeMap<u32, LayerBom> {
+    let mut layers = BTreeMap::<u32, LayerBom>::new();
+    for (index, member) in members.iter().enumerate() {
+        let layer = layers.entry(member.placement.level).or_default();
+        for job in member.preset.print_jobs(&member.name) {
+            let target = Target {
+                member: index,
+                drawer: job.drawer,
+            };
+            for item in job.items {
+                layer.add(item, target);
+            }
+        }
+        if let Ok(extras) = catalog.exterior_components(
+            &member.preset.selection,
+            &member.exterior,
+            member.preset.assembly_kind == AssemblyKind::Sustainer,
+        ) {
+            let target = Target {
+                member: index,
+                drawer: None,
+            };
+            for extra in extras {
+                layer.add(extra.bom, target);
+            }
+        }
+    }
+    layers
 }
 
 pub(super) fn checked_jobs<'a>(
@@ -226,21 +333,6 @@ pub(super) fn set_accessory(
         bins.sync_bom(bom);
     }
     Ok(())
-}
-
-pub(super) fn apply_project_edit(
-    members: &mut [Member],
-    target: crate::scene::Target,
-    edited: Preset,
-) {
-    let owner = &mut members[target.member].preset;
-    let destination = match target.drawer {
-        Some(index) => &mut owner.drawers[index],
-        None => owner,
-    };
-    destination.bom = edited.bom;
-    destination.divider_layout = edited.divider_layout;
-    destination.gridfinity = edited.gridfinity;
 }
 
 #[cfg(test)]

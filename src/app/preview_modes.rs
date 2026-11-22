@@ -93,6 +93,11 @@ fn build(request: PrintRequest, cancel: &crate::preview::Cancel) -> Result<Print
     Ok(layout)
 }
 impl App {
+    pub(super) fn open_print_list_plates(&mut self, checked_layers: bool) {
+        self.preview_modes.scope = u8::from(checked_layers);
+        self.preview_modes.mode = Mode::Plates;
+    }
+
     pub(super) fn current_print_member(&self) -> Member {
         let mut preset = self.member_snapshot();
         let owner = self.members.get(self.active_member);
@@ -346,7 +351,7 @@ impl App {
         let z = self.zh;
         let scopes = [
             (0, t(z, "全部成员", "All members")),
-            (1, t(z, "勾选成员", "Checked members")),
+            (1, t(z, "勾选层", "Checked layers")),
             (2, t(z, "当前成员", "Current member")),
         ];
         let mut edit = None;

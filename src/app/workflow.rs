@@ -83,7 +83,7 @@ impl App {
             ui.selectable_value(
                 &mut self.export_scope,
                 ExportScope::Selected,
-                t(z, "勾选成员", "Checked members"),
+                t(z, "勾选层", "Checked layers"),
             );
             ui.selectable_value(
                 &mut self.export_scope,
@@ -100,67 +100,84 @@ impl App {
         if indices.is_empty() {
             ui.label(t(
                 z,
-                "尚未选择成员，请返回整体页勾选。",
-                "No members selected. Check members on the overall page.",
+                "请在打印清单勾选要导出的层。",
+                "Check layers in the print list to export them.",
             ));
         }
         egui::ScrollArea::vertical()
             .id_salt("export-review")
             .max_height(210.)
             .show(ui, |ui| {
+                let mut layers =
+                    BTreeMap::<u32, (print_list::LayerBom, std::collections::BTreeSet<&str>)>::new(
+                    );
                 for i in indices {
                     let m = &self.members[i];
                     let leaf = i == self.active_member
                         && self.active_drawer.is_some()
                         && self.export_scope == ExportScope::Current;
-                    let mut items = if leaf {
-                        self.current_print_member().preset.printing_bom()
+                    let current = if leaf {
+                        Some(self.current_print_member().preset)
                     } else if i == self.active_member && self.active_drawer.is_none() {
-                        self.member_snapshot().printing_bom()
+                        Some(self.member_snapshot())
                     } else {
-                        m.preset.printing_bom()
+                        None
                     };
+                    let preset = current.as_ref().unwrap_or(&m.preset);
+                    let (bom, printers) = layers.entry(m.placement.level).or_default();
+                    for job in preset.print_jobs(&m.name) {
+                        if self.export_options.format == crate::export::Format::ThreeMf {
+                            printers.insert(job.preset.printer().name());
+                        }
+                        let target = crate::scene::Target {
+                            member: i,
+                            drawer: if leaf { self.active_drawer } else { job.drawer },
+                        };
+                        for item in job.items {
+                            bom.add(item, target);
+                        }
+                    }
                     if !leaf {
                         match self.catalog.exterior_components(
                             &m.preset.selection,
                             &m.exterior,
                             m.preset.assembly_kind == AssemblyKind::Sustainer,
                         ) {
-                            Ok(extras) => items.extend(extras.into_iter().map(|c| c.bom)),
+                            Ok(extras) => {
+                                let target = crate::scene::Target {
+                                    member: i,
+                                    drawer: None,
+                                };
+                                for extra in extras {
+                                    bom.add(extra.bom, target);
+                                }
+                            }
                             Err(e) => {
                                 ui.colored_label(ui.visuals().error_fg_color, e);
                             }
                         }
                     }
-                    let count: u32 = items.iter().filter(|b| b.enabled).map(|b| b.qty).sum();
+                }
+                for (level, (bom, printers)) in layers.into_iter().rev() {
+                    let count = bom.enabled_copies();
                     total += count;
-                    let mut title = format!("{} · {} {}", m.name, count, t(z, "份", "copies"));
-                    if self.export_options.format == crate::export::Format::ThreeMf {
-                        let printers = if leaf {
-                            vec![self.export_options.plate.printer.name()]
-                        } else {
-                            let mut names = vec![m.preset.printer().name()];
-                            for drawer in &m.preset.drawers {
-                                let name = drawer.printer().name();
-                                if !names.contains(&name) {
-                                    names.push(name);
-                                }
-                            }
-                            names
-                        };
+                    let mut title = format!(
+                        "{} · {count} {}",
+                        print_list::layer_title(level, z),
+                        t(z, "份", "copies")
+                    );
+                    if !printers.is_empty() {
                         title.push_str(" · ");
-                        title.push_str(&printers.join(" / "));
+                        title.push_str(&printers.into_iter().collect::<Vec<_>>().join(" / "));
                     }
                     ui.collapsing(title, |ui| {
-                        for b in items.iter().filter(|b| b.enabled) {
-                            ui.label(format!("{} × {}", b.name(), b.qty));
-                        }
-                        let omitted = items.iter().filter(|b| !b.enabled).count();
+                        bom.show(ui, z);
+                        let omitted = bom.lines().flatten().filter(|item| !item.enabled).count();
                         if omitted > 0 {
                             ui.label(format!(
                                 "{} {}",
                                 omitted,
-                                t(z, "项未勾选，不会导出", "unchecked items will not export")
+                                t(z, "项已停用", "disabled entries")
                             ));
                         }
                     });
